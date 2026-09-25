@@ -98,7 +98,13 @@ func (stubDriver) AddGroupSubscriptions(_ context.Context, groupID string, subID
 func (stubDriver) RemoveGroupSubscriptions(_ context.Context, groupID string, subIDs []string) error {
 	return nil
 }
+
+// lastAddNodeIDs records what AddGroupNodes was last asked to attach, so a
+// batch attach can be told from a single one.
+var lastAddNodeIDs []string
+
 func (stubDriver) AddGroupNodes(_ context.Context, groupID string, nodeIDs []string) error {
+	lastAddNodeIDs = append([]string(nil), nodeIDs...)
 	return nil
 }
 func (stubDriver) RemoveGroupNodes(_ context.Context, groupID string, nodeIDs []string) error {
@@ -119,7 +125,13 @@ func (stubDriver) TestLatency(_ context.Context, ids []string) error {
 	lastTestIDs = append([]string(nil), ids...)
 	return nil
 }
+
+// lastLatencyIDs records the node IDs the stub was last asked latencies
+// for, so a scoped poll can be told from a full-instance one.
+var lastLatencyIDs []string
+
 func (stubDriver) Latencies(_ context.Context, ids []string) ([]driver.Latency, error) {
+	lastLatencyIDs = append([]string(nil), ids...)
 	return []driver.Latency{
 		{NodeID: "n1", Ms: 88, Alive: true, TestedAt: time.Now()},
 		{NodeID: "n2", Ms: 420, Alive: true, TestedAt: time.Now()},
@@ -337,6 +349,9 @@ func key(s string) tea.KeyMsg {
 	}
 	if s == "esc" {
 		return tea.KeyMsg{Type: tea.KeyEscape}
+	}
+	if s == "backspace" {
+		return tea.KeyMsg{Type: tea.KeyBackspace}
 	}
 	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
 }
@@ -1090,8 +1105,9 @@ func TestConfigsProfileManagement(t *testing.T) {
 	m := newTestModel(t)
 	m, _ = m.Update(key("5"))
 
-	// create (dns section: move cursor to the dns row first).
-	m, _ = m.Update(key("j")) // cursor: config c1 → dns d1
+	// create in the dns section: two j's put the cursor on the DNS header.
+	m, _ = m.Update(key("j")) // c1
+	m, _ = m.Update(key("j")) // DNS 分区标题
 	m, cmd := m.Update(key("c"))
 	if v := m.View(); !strings.Contains(v, "新建") {
 		t.Fatalf("create modal missing:\n%s", v)
@@ -1118,7 +1134,7 @@ func TestConfigsProfileManagement(t *testing.T) {
 		t.Fatalf("expected exactly one cursor marker, got %d:\n%s", n, m.View())
 	}
 
-	// rename.
+	// rename (still on the DNS header → the section's selected profile).
 	m, cmd = m.Update(key("R"))
 	if v := m.View(); !strings.Contains(v, "重命名") {
 		t.Fatalf("rename modal missing:\n%s", v)
@@ -1131,8 +1147,9 @@ func TestConfigsProfileManagement(t *testing.T) {
 		m, _ = m.Update(msg)
 	}
 
-	// delete with confirmation (cursor sits on d1 after the reloads; one
-	// j moves to the unselected 备用DNS row).
+	// delete with confirmation (the reloads leave the cursor on the DNS
+	// header; two j's move past the selected 默认DNS to 备用DNS).
+	m, _ = m.Update(key("j"))
 	m, _ = m.Update(key("j"))
 	m, _ = m.Update(key("D"))
 	if v := m.View(); !strings.Contains(v, "确认删除") {
@@ -1319,10 +1336,9 @@ func TestConfigsFieldFallbackLabel(t *testing.T) {
 func TestConfigsRoutingSummaryToggle(t *testing.T) {
 	m := newTestModel(t)
 	m, _ = m.Update(key("5"))
-	// Flat row order: config c1, dns d1, dns d2, routing r1.
-	for i := 0; i < 3; i++ {
-		m, _ = m.Update(key("j"))
-	}
+	// Row order: 全局配置, c1, DNS, d1, d2, 路由规则, r1 — G jumps to the last
+	// row, the routing profile.
+	m, _ = m.Update(key("G"))
 	m, _ = m.Update(key("tab"))
 	v := m.View()
 	if !strings.Contains(v, "路由规则 (DSL 原文)") {
@@ -1350,7 +1366,9 @@ func TestConfigsRoutingSummaryToggle(t *testing.T) {
 	// The dns profile summarizes its upstreams the same way.
 	m, _ = m.Update(key("h"))
 	m, _ = m.Update(key("g"))
-	m, _ = m.Update(key("j")) // dns d1
+	for i := 0; i < 3; i++ {
+		m, _ = m.Update(key("j")) // 全局配置 → c1 → DNS → d1
+	}
 	m, _ = m.Update(key("tab"))
 	m, _ = m.Update(key("v"))
 	if v := m.View(); !strings.Contains(v, "alidns: udp://223.5.5.5:53") {
@@ -1381,9 +1399,25 @@ func TestConfigsEditorDoneSubmitsChange(t *testing.T) {
 	if valMsg.Err != nil {
 		t.Fatalf("stub validation should pass: %v", valMsg.Err)
 	}
+	// A valid edit is shown as a diff and waits for confirmation instead of
+	// submitting directly.
 	m, cmd = m.Update(msg)
+	if cmd != nil {
+		t.Fatal("a validated edit should wait for the diff confirmation, not submit")
+	}
+	v := m.View()
+	for _, want := range []string{"确认应用更改", "upstream {}", "alidns"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("diff confirm missing %q:\n%s", want, v)
+		}
+	}
+	if _, err := os.Stat(tmp); err != nil {
+		t.Fatalf("edited file removed before confirmation: %v", err)
+	}
+	// y applies the edit and finally removes the temp file.
+	m, cmd = m.Update(key("y"))
 	if cmd == nil {
-		t.Fatal("validated content should fire configTextCmd")
+		t.Fatal("y should fire configTextCmd")
 	}
 	if msg := cmd(); msg != nil {
 		m, _ = m.Update(msg)
@@ -1391,10 +1425,30 @@ func TestConfigsEditorDoneSubmitsChange(t *testing.T) {
 	if _, err := os.Stat(tmp); !os.IsNotExist(err) {
 		t.Fatal("edited file should be removed after a successful submit")
 	}
+
+	// Declining the diff keeps the edit on disk and submits nothing.
+	tmp2 := filepath.Join(t.TempDir(), "z.dns")
+	os.WriteFile(tmp2, []byte("upstream { alidns: 'udp://223.5.5.5:53' }"), 0o600)
+	m, cmd = m.Update(editorDoneMsg{Path: tmp2, Section: "dns", ID: "d1", Old: "upstream {}"})
+	if cmd == nil {
+		t.Fatal("changed content should fire the syntax validation")
+	}
+	m, _ = m.Update(cmd())
+	m, cmd = m.Update(key("n"))
+	if cmd == nil {
+		t.Fatal("declining should at least surface a toast")
+	}
+	if msg := cmd(); msg != nil {
+		m, _ = m.Update(msg)
+	}
+	if _, err := os.Stat(tmp2); err != nil {
+		t.Fatalf("a declined edit must stay on disk for recovery: %v", err)
+	}
+
 	// Unchanged content must not fire.
-	tmp2 := filepath.Join(t.TempDir(), "y.dns")
-	os.WriteFile(tmp2, []byte("  fallback: direct  "), 0o600)
-	m2, cmd2 := m.Update(editorDoneMsg{Path: tmp2, Section: "routing", ID: "r1", Old: "fallback: direct"})
+	tmp3 := filepath.Join(t.TempDir(), "y.dns")
+	os.WriteFile(tmp3, []byte("  fallback: direct  "), 0o600)
+	m2, cmd2 := m.Update(editorDoneMsg{Path: tmp3, Section: "routing", ID: "r1", Old: "fallback: direct"})
 	_ = m2
 	if cmd2 != nil {
 		t.Fatal("unchanged content should not fire a cmd")
@@ -1407,7 +1461,11 @@ func TestConfigsEditorDoneSubmitsChange(t *testing.T) {
 func TestConfigsValidationRejectsBrokenDsl(t *testing.T) {
 	m := newTestModelWith(t, rejectingDriver{})
 	m, _ = m.Update(key("5"))
-	m, _ = m.Update(key("j")) // cursor onto the dns profile that gets edited
+	// Row order: 全局配置, c1, DNS, d1, d2, 路由规则, r1 — three j's put the
+	// cursor on d1, the profile that gets edited.
+	for i := 0; i < 3; i++ {
+		m, _ = m.Update(key("j"))
+	}
 	// A short path (t.TempDir embeds the test name) so the assertion can
 	// check the whole path survives the detail pane.
 	tmp := filepath.Join(os.TempDir(), fmt.Sprintf("dae-tui-test-%d.dns", time.Now().UnixNano()))
@@ -1939,5 +1997,779 @@ func TestGroupsNodeFilter(t *testing.T) {
 	m, cmd = m.Update(key("enter"))
 	if cmd == nil {
 		t.Fatal("enter in the picker should add the node")
+	}
+}
+
+// A subscription's section expansion follows the subscription, not its
+// position: a refresh that reorders the group's subscriptions must not open
+// someone else's section.
+func TestGroupSectionExpansionFollowsSubscriptionID(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("2"))
+	m, _ = m.Update(key("l"))     // expand the group
+	m, _ = m.Update(key("enter")) // open the subscription section
+	if v := m.View(); !strings.Contains(v, "▾ 订阅") {
+		t.Fatalf("subscription section should be open:\n%s", v)
+	}
+	// Reload with a second subscription in front of the opened one.
+	gs := mustGroups(t)
+	g := gs[0]
+	g.Subscriptions = []driver.GroupSubscription{
+		{SubscriptionID: "s9", Tag: "机场Z", MatchedCount: 1,
+			Nodes: []driver.Node{{ID: "z1", Name: "Z-01", Protocol: "ss", SubscriptionID: "s9"}}},
+		g.Subscriptions[0],
+	}
+	m, _ = m.Update(groupsMsg{Groups: []driver.Group{g, gs[1]}})
+	v := m.View()
+	if !strings.Contains(v, "▾ 订阅 机场A") {
+		t.Fatalf("机场A section should stay open after the reorder:\n%s", v)
+	}
+	if !strings.Contains(v, "▸ 订阅 机场Z") {
+		t.Fatalf("机场Z section should stay collapsed:\n%s", v)
+	}
+}
+
+// Editing a subscription's tag or cron reloads the list but must not throw
+// away the node caches; only an update (u), which re-fetches nodes, may.
+func TestSubsNodeCacheSurvivesReload(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("3"))
+	m, cmd := m.Update(key("l")) // expand s1 → fetch its nodes
+	if cmd == nil {
+		t.Fatal("expanding subscription should fetch its nodes")
+	}
+	m, _ = m.Update(cmd())
+	if n := len(m.(Model).subs.subNodes); n != 1 {
+		t.Fatalf("expected one cached node list, got %d", n)
+	}
+	// A plain reload (what a tag/cron edit returns) keeps the cache.
+	m, _ = m.Update(subsMsg{Subs: mustSubs(t)})
+	mm := m.(Model)
+	if _, ok := mm.subs.subNodes["s1"]; !ok {
+		t.Fatal("node cache dropped by a plain subsMsg")
+	}
+	if v := mm.View(); !strings.Contains(v, "机场A-01") {
+		t.Fatalf("expanded nodes should render without a re-fetch:\n%s", v)
+	}
+	// An update invalidates just that subscription and re-fetches it.
+	m, cmd = m.Update(key("u"))
+	if cmd == nil {
+		t.Fatal("u should fire subMutateCmd")
+	}
+	m, cmd = m.Update(cmd()) // subsMsg after the mutation
+	if cmd == nil {
+		t.Fatal("an updated subscription should be re-fetched")
+	}
+	if _, ok := m.(Model).subs.subNodes["s1"]; ok {
+		t.Fatal("the updated subscription's cache should be dropped")
+	}
+}
+
+// The in-flight window scales with the batch size, and the tab bar reports
+// real progress instead of a fixed spinner.
+func TestLatencyTestProgress(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("2"))
+	m, cmd := m.Update(key("t")) // whole group: n1, n3, n2
+	if cmd == nil {
+		t.Fatal("t should fire a test")
+	}
+	m, _ = m.Update(cmd())
+	if !m.(Model).groups.testing {
+		t.Fatal("groups page should be in testing state")
+	}
+	if v := m.View(); !strings.Contains(v, "测速中 0/3") {
+		t.Fatalf("tab bar should show progress:\n%s", v)
+	}
+	later := time.Now().Add(time.Second)
+	m, _ = m.Update(latenciesMsg{Lats: []driver.Latency{
+		{NodeID: "n1", Ms: 90, Alive: true, TestedAt: later},
+		{NodeID: "n2", Ms: 300, Alive: true, TestedAt: later},
+	}})
+	if v := m.View(); !strings.Contains(v, "测速中 2/3") {
+		t.Fatalf("progress should count the nodes that reported:\n%s", v)
+	}
+	m, _ = m.Update(latenciesMsg{Lats: []driver.Latency{
+		{NodeID: "n3", Alive: false, TestedAt: later},
+	}})
+	if m.(Model).groups.testing {
+		t.Fatal("testing should end once every probed node reported")
+	}
+	if v := m.View(); strings.Contains(v, "测速中") {
+		t.Fatalf("progress indicator should be gone:\n%s", v)
+	}
+}
+
+// A large batch gets a proportionally longer window; the cap matches the
+// command's own context timeout.
+func TestTestWindowScales(t *testing.T) {
+	if got := testWindow(3); got != 15*time.Second+600*time.Millisecond {
+		t.Fatalf("testWindow(3) = %v", got)
+	}
+	if got := testWindow(1000); got != 2*time.Minute {
+		t.Fatalf("testWindow(1000) = %v, want the 2m cap", got)
+	}
+}
+
+// Enter on a home-page group row jumps to the groups page with that group
+// expanded — the short path to switching a group's node.
+func TestHomeGroupRowJump(t *testing.T) {
+	m := newTestModel(t)
+	if v := m.View(); !strings.Contains(v, "各组当前节点") {
+		t.Fatalf("home should list the groups:\n%s", v)
+	}
+	m, _ = m.Update(key("tab")) // focus the group list
+	if v := m.View(); !strings.Contains(v, "Enter 跳到群组页并展开该组") {
+		t.Fatalf("group-list focus hint missing:\n%s", v)
+	}
+	m, _ = m.Update(key("j")) // cursor onto the second group (direct)
+	m, cmd := m.Update(key("enter"))
+	if cmd == nil {
+		t.Fatal("enter on a group row should fire gotoGroupMsg")
+	}
+	msg, ok := cmd().(gotoGroupMsg)
+	if !ok {
+		t.Fatalf("cmd = %T, want gotoGroupMsg", cmd())
+	}
+	if msg.ID != "g2" {
+		t.Fatalf("gotoGroupMsg.ID = %q, want g2", msg.ID)
+	}
+	m, _ = m.Update(msg)
+	v := m.View()
+	if !strings.Contains(v, "路由组") {
+		t.Fatalf("should land on the groups page:\n%s", v)
+	}
+	if !strings.Contains(v, "direct · 自动") {
+		t.Fatalf("the chosen group should be expanded:\n%s", v)
+	}
+	// Coming back home, tab/esc leave the group list without touching the
+	// routing picker.
+	m, _ = m.Update(key("1"))
+	m, _ = m.Update(key("tab"))
+	m, _ = m.Update(key("esc"))
+	if m.(Model).home.groupFocus {
+		t.Fatal("esc should return focus to the routing picker")
+	}
+}
+
+// Space ticks nodes for batch operations: t probes exactly the ticked ones,
+// and x removes the ticked directly-attached nodes in one mutation.
+func TestGroupsBatchSelection(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("2"))
+	m, _ = m.Update(key("l"))     // expand the group
+	m, _ = m.Update(key("enter")) // open the subscription section
+	m, _ = m.Update(key("j"))     // 东京-01 (subscription node)
+	m, _ = m.Update(key("space"))
+	if v := m.View(); !strings.Contains(v, "✓") {
+		t.Fatalf("ticked row should show a mark:\n%s", v)
+	}
+	m, _ = m.Update(key("j")) // SG-03 (subscription node)
+	m, _ = m.Update(key("space"))
+	lastTestIDs = nil
+	m, cmd := m.Update(key("t"))
+	if cmd == nil {
+		t.Fatal("t with ticks should fire a test")
+	}
+	cmd()
+	if len(lastTestIDs) != 2 {
+		t.Fatalf("t should probe exactly the ticked nodes, got %v", lastTestIDs)
+	}
+	// Subscription-sourced nodes cannot be removed individually; say so.
+	m, cmd = m.Update(key("x"))
+	if cmd == nil {
+		t.Fatal("x should explain why nothing can be removed")
+	}
+	if msg := cmd(); msg != nil {
+		m, _ = m.Update(msg)
+	}
+	if v := m.View(); !strings.Contains(v, "均来自订阅挂载") {
+		t.Fatalf("subscription-node removal should be explained:\n%s", v)
+	}
+	// Open the direct section and tick HK-02: the batch removal confirms.
+	m, _ = m.Update(key("j"))     // direct section header
+	m, _ = m.Update(key("enter")) // open it
+	m, _ = m.Update(key("j"))     // HK-02 (directly attached)
+	m, _ = m.Update(key("space"))
+	if v := m.View(); !strings.Contains(v, "已选 3") {
+		t.Fatalf("pane title should count the ticks:\n%s", v)
+	}
+	m, cmd = m.Update(key("x"))
+	if cmd != nil {
+		t.Fatal("x should open the confirmation, not fire a mutation")
+	}
+	// SG-03 is attached both ways in the stub, so the batch covers it too.
+	if v := m.View(); !strings.Contains(v, "确认将 2 个节点从组中移除") {
+		t.Fatalf("batch removal confirmation missing:\n%s", v)
+	}
+	m, cmd = m.Update(key("y"))
+	if cmd == nil {
+		t.Fatal("y should fire the batch removal")
+	}
+	if msg := cmd(); msg != nil {
+		m, _ = m.Update(msg)
+	}
+}
+
+// Ticked candidates in the add-node picker are attached in one mutation.
+func TestGroupsPickerBatchAdd(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("2"))
+	m, cmd := m.Update(key("n"))
+	if cmd == nil {
+		t.Fatal("n should load the attach candidates")
+	}
+	m, _ = m.Update(cmd())
+	// Candidates: 自建-HK, 自建-SG, 机场A-01, 机场A-02.
+	m, _ = m.Update(key("space"))
+	m, _ = m.Update(key("j"))
+	m, _ = m.Update(key("space"))
+	if v := m.View(); !strings.Contains(v, "已选 2") {
+		t.Fatalf("picker should count the ticks:\n%s", v)
+	}
+	lastAddNodeIDs = nil
+	m, cmd = m.Update(key("enter"))
+	if cmd == nil {
+		t.Fatal("enter should fire the batch attach")
+	}
+	if msg := cmd(); msg != nil {
+		m, _ = m.Update(msg)
+	}
+	if len(lastAddNodeIDs) != 2 || lastAddNodeIDs[0] != "m1" || lastAddNodeIDs[1] != "m2" {
+		t.Fatalf("batch attach ids = %v, want [m1 m2]", lastAddNodeIDs)
+	}
+}
+
+// noCapsDriver reports a backend that supports nothing; the UI must degrade
+// with feedback instead of leaving keys that silently do nothing.
+type noCapsDriver struct{ stubDriver }
+
+func (noCapsDriver) Capabilities() driver.Caps { return driver.Caps{} }
+
+func TestCapabilityGating(t *testing.T) {
+	m := newTestModelWith(t, noCapsDriver{})
+	if v := m.View(); !strings.Contains(v, "当前后端不支持") {
+		t.Fatalf("home should report the unsupported traffic stats:\n%s", v)
+	}
+	m, _ = m.Update(key("2"))
+	m, cmd := m.Update(key("t"))
+	if cmd == nil {
+		t.Fatal("t should report the missing capability")
+	}
+	if msg := cmd(); msg != nil {
+		m, _ = m.Update(msg)
+	}
+	if v := m.View(); !strings.Contains(v, "当前后端不支持该操作") {
+		t.Fatalf("capability toast missing:\n%s", v)
+	}
+	m, _ = m.Update(key("3"))
+	if v := m.View(); !strings.Contains(v, "当前后端不支持订阅管理") {
+		t.Fatalf("subs page banner missing:\n%s", v)
+	}
+	m, cmd = m.Update(key("u"))
+	if cmd == nil {
+		t.Fatal("u should report the missing capability")
+	}
+	m, _ = m.Update(key("5"))
+	if v := m.View(); !strings.Contains(v, "当前后端不支持配置管理") {
+		t.Fatalf("configs page banner missing:\n%s", v)
+	}
+	m, cmd = m.Update(key("e"))
+	if cmd == nil {
+		t.Fatal("e should report the missing capability")
+	}
+}
+
+// The setup form advertises "letters and digits" — that is the rule that
+// runs, not just a length check.
+func TestSetupPasswordRule(t *testing.T) {
+	var m tea.Model = New(stubDriver{}, &config.Config{Endpoint: "http://127.0.0.1:2023/graphql"}, "/tmp/dae-tui-test.toml")
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m2, _ = m2.Update(bootMsg{Users: 0}) // no users yet → first-run setup
+	m = m2
+	if v := m.View(); !strings.Contains(v, "初始化 daed 账号") {
+		t.Fatalf("expected the setup form:\n%s", v)
+	}
+	for _, k := range []string{"a", "d", "m", "i", "n"} {
+		m, _ = m.Update(key(k))
+	}
+	m, _ = m.Update(key("tab"))
+	for _, k := range []string{"1", "2", "3", "4", "5", "6"} { // digits only
+		m, _ = m.Update(key(k))
+	}
+	m, _ = m.Update(key("tab"))
+	for _, k := range []string{"1", "2", "3", "4", "5", "6"} {
+		m, _ = m.Update(key(k))
+	}
+	m, cmd := m.Update(key("enter"))
+	if cmd != nil {
+		t.Fatal("a digits-only password must be refused client-side")
+	}
+	if v := m.View(); !strings.Contains(v, "需包含字母和数字") {
+		t.Fatalf("password rule error missing:\n%s", v)
+	}
+	// Letters only is refused too… (two tabs walk focus from the confirm
+	// field back to the password field).
+	m, _ = m.Update(key("tab"))
+	m, _ = m.Update(key("tab"))
+	for i := 0; i < 6; i++ {
+		m, _ = m.Update(key("backspace"))
+	}
+	for _, k := range []string{"a", "b", "c", "d", "e", "f"} {
+		m, _ = m.Update(key(k))
+	}
+	m, _ = m.Update(key("tab"))
+	for i := 0; i < 6; i++ {
+		m, _ = m.Update(key("backspace"))
+	}
+	for _, k := range []string{"a", "b", "c", "d", "e", "f"} {
+		m, _ = m.Update(key(k))
+	}
+	m, cmd = m.Update(key("enter"))
+	if cmd != nil {
+		t.Fatal("a letters-only password must be refused client-side")
+	}
+	// …and a mix passes.
+	m, _ = m.Update(key("tab"))
+	m, _ = m.Update(key("tab"))
+	for i := 0; i < 6; i++ {
+		m, _ = m.Update(key("backspace"))
+	}
+	for _, k := range []string{"a", "b", "c", "1", "2", "3"} {
+		m, _ = m.Update(key(k))
+	}
+	m, _ = m.Update(key("tab"))
+	for i := 0; i < 6; i++ {
+		m, _ = m.Update(key("backspace"))
+	}
+	for _, k := range []string{"a", "b", "c", "1", "2", "3"} {
+		m, _ = m.Update(key(k))
+	}
+	m, cmd = m.Update(key("enter"))
+	if cmd == nil {
+		t.Fatal("a mixed password should submit")
+	}
+}
+
+// The change-password form enforces the same rule it advertises.
+func TestHomePasswordRule(t *testing.T) {
+	cfg := &config.Config{Endpoint: "http://127.0.0.1:2023/graphql", Username: "admin"}
+	var m tea.Model = New(stubDriver{}, cfg, "/tmp/dae-tui-test.toml")
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	m2, _ = m2.Update(bootMsg{Users: 1, Status: driver.Status{Version: "v2.1.1", Running: true}})
+	m = m2
+	m, _ = m.Update(key("P"))
+	m, _ = m.Update(key("enter")) // password form
+	for _, k := range []string{"o", "l", "d", "p", "w", "1"} {
+		m, _ = m.Update(key(k))
+	}
+	m, _ = m.Update(key("tab"))
+	for _, k := range []string{"a", "b", "c", "d", "e", "f"} { // letters only
+		m, _ = m.Update(key(k))
+	}
+	m, _ = m.Update(key("tab"))
+	for _, k := range []string{"a", "b", "c", "d", "e", "f"} {
+		m, _ = m.Update(key(k))
+	}
+	m, cmd := m.Update(key("enter"))
+	if cmd != nil {
+		t.Fatal("a letters-only new password must be refused")
+	}
+	if v := m.View(); !strings.Contains(v, "新密码至少 6 位，且需包含字母和数字") {
+		t.Fatalf("password rule error missing:\n%s", v)
+	}
+}
+
+// A field value is checked against the backend-declared type before the
+// round trip.
+func TestConfigsFieldTypeValidation(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("5"))
+	m, cmd := m.Update(key("e")) // field picker on the config section
+	if cmd != nil {
+		t.Fatal("e on config should not fire a cmd directly")
+	}
+	m, _ = m.Update(key("j"))     // lanInterface (array), prefilled "eth0"
+	m, _ = m.Update(key("enter")) // field input
+	m, _ = m.Update(key(","))
+	m, _ = m.Update(key(","))
+	m, cmd = m.Update(key("enter"))
+	if cmd != nil {
+		t.Fatal("an array with an empty element must not submit")
+	}
+	if v := m.View(); !strings.Contains(v, "数组元素不能为空") {
+		t.Fatalf("type error missing:\n%s", v)
+	}
+	// A valid value submits.
+	m, _ = m.Update(key("esc")) // back to the picker
+	m, _ = m.Update(key("enter"))
+	m, _ = m.Update(key(","))
+	m, _ = m.Update(key(" "))
+	m, _ = m.Update(key("w"))
+	m, _ = m.Update(key("l"))
+	m, _ = m.Update(key("a"))
+	m, _ = m.Update(key("n"))
+	m, _ = m.Update(key("0"))
+	m, cmd = m.Update(key("enter"))
+	if cmd == nil {
+		t.Fatal("a valid array value should fire configFieldCmd")
+	}
+}
+
+// The history keeps a bounded, per-node window of samples and evicts the
+// least recently seen node when full.
+func TestLatHistoryWindowAndEviction(t *testing.T) {
+	h := newLatHistory()
+	h.maxNodes = 2
+	now := time.Now()
+	for _, ms := range []int{100, 120, 140} {
+		h.add(driver.Latency{NodeID: "n1", Ms: ms, Alive: true, TestedAt: now})
+	}
+	if got := h.series("n1"); len(got) != 3 || got[0] != 100 || got[2] != 140 {
+		t.Fatalf("series = %v, want the three alive samples", got)
+	}
+	// Dead probes are skipped, not plotted as impossibly fast nodes.
+	h.add(driver.Latency{NodeID: "n1", Alive: false, TestedAt: now})
+	if got := h.series("n1"); len(got) != 3 {
+		t.Fatalf("a dead probe should not extend the series: %v", got)
+	}
+	// The window trims to the newest samples (the dead probe occupies a
+	// slot, it is just not plotted).
+	h.window = 3
+	h.add(driver.Latency{NodeID: "n1", Ms: 160, Alive: true, TestedAt: now})
+	if got := h.series("n1"); len(got) != 2 || got[0] != 140 || got[1] != 160 {
+		t.Fatalf("window should keep the newest samples: %v", got)
+	}
+	// Tracking a third node evicts the least recently updated one.
+	h.add(driver.Latency{NodeID: "n2", Ms: 50, Alive: true, TestedAt: now})
+	h.add(driver.Latency{NodeID: "n1", Ms: 170, Alive: true, TestedAt: now}) // touch n1
+	h.add(driver.Latency{NodeID: "n3", Ms: 60, Alive: true, TestedAt: now})
+	if got := h.series("n2"); got != nil {
+		t.Fatalf("n2 should have been evicted, got %v", got)
+	}
+	if got := h.series("n1"); len(got) == 0 {
+		t.Fatal("n1 was touched last and must survive")
+	}
+}
+
+// The manual-node detail pane draws the accumulated trend once a node has
+// at least two alive samples.
+func TestNodesDetailTrend(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("4"))
+	m, _ = m.Update(key("tab")) // detail pane
+	now := time.Now()
+	for _, ms := range []int{80, 120, 200, 160} {
+		m, _ = m.Update(latenciesMsg{Lats: []driver.Latency{
+			{NodeID: "m1", Ms: ms, Alive: true, TestedAt: now},
+		}})
+	}
+	v := m.View()
+	if !strings.Contains(v, "趋势") {
+		t.Fatalf("detail pane should show the trend line:\n%s", v)
+	}
+}
+
+func TestDiffLines(t *testing.T) {
+	lines := diffLines("a\nb\nc\nd\ne", "a\nB\nc\nd\ne\nf")
+	var adds, dels int
+	for _, l := range lines {
+		switch l.kind {
+		case diffAdd:
+			adds++
+		case diffDel:
+			dels++
+		}
+	}
+	if adds != 2 || dels != 1 {
+		t.Fatalf("adds = %d, dels = %d, want 2 and 1", adds, dels)
+	}
+	// A long unchanged run collapses into a gap marker.
+	lines = diffLines(strings.Repeat("x\n", 10)+"tail", strings.Repeat("x\n", 10)+"TAIL")
+	gap := false
+	for _, l := range lines {
+		if l.kind == diffGap {
+			gap = true
+		}
+	}
+	if !gap {
+		t.Fatal("a long unchanged run should collapse into a gap")
+	}
+}
+
+// y copies through OSC 52; off a terminal the command reports the failure
+// instead of writing escape noise into a pipe.
+func TestClipboardCopyFeedback(t *testing.T) {
+	if stdoutIsTerminal() {
+		t.Skip("stdout is a terminal; OSC 52 would be written for real")
+	}
+	m := newTestModel(t)
+	m, _ = m.Update(key("3"))
+	m, cmd := m.Update(key("y"))
+	if cmd == nil {
+		t.Fatal("y on the subs page should copy the link")
+	}
+	msg, ok := cmd().(clipboardMsg)
+	if !ok {
+		t.Fatalf("cmd = %T, want clipboardMsg", msg)
+	}
+	if msg.OK {
+		t.Fatal("off a terminal the copy must report failure")
+	}
+	m, _ = m.Update(msg)
+	if v := m.View(); !strings.Contains(v, "复制失败") {
+		t.Fatalf("copy feedback missing:\n%s", v)
+	}
+}
+
+// L launches the journal viewer. The command itself is not executed here:
+// on a machine with journalctl it would attach to the log stream and never
+// return, which is exactly what it does in the TUI.
+func TestLogsViewerLaunches(t *testing.T) {
+	m := newTestModel(t)
+	m, cmd := m.Update(key("L"))
+	if cmd == nil {
+		t.Fatal("L should launch the journal viewer (or report journalctl missing)")
+	}
+}
+
+// Latency data is polled for what the current page shows — never the whole
+// instance. The home page polls nothing: its per-group estimate runs on
+// accumulated data rather than paying for every member of every group.
+func TestLatencyPollScopedToVisibleNodes(t *testing.T) {
+	m := newTestModel(t)
+	if cmd := m.(Model).latencyPollCmd(); cmd != nil {
+		t.Fatal("the home page should not poll latency data")
+	}
+	// Collapsed groups page: section headers only, no node rows.
+	m, _ = m.Update(key("2"))
+	if cmd := m.(Model).latencyPollCmd(); cmd != nil {
+		t.Fatal("a collapsed group detail should not poll")
+	}
+	// Expand and open the subscription section: its node rows are polled.
+	m, _ = m.Update(key("l"))
+	m, _ = m.Update(key("enter"))
+	lastLatencyIDs = nil
+	cmd := m.(Model).latencyPollCmd()
+	if cmd == nil {
+		t.Fatal("an expanded group should poll its node rows")
+	}
+	cmd()
+	if len(lastLatencyIDs) != 2 || lastLatencyIDs[0] != "n1" || lastLatencyIDs[1] != "n3" {
+		t.Fatalf("polled ids = %v, want the two visible subscription nodes", lastLatencyIDs)
+	}
+	// A filter narrows the poll to what survives it.
+	m, _ = m.Update(key("/"))
+	for _, k := range []string{"S", "G"} {
+		m, _ = m.Update(key(k))
+	}
+	m, _ = m.Update(key("enter")) // keep the filter
+	lastLatencyIDs = nil
+	cmd = m.(Model).latencyPollCmd()
+	if cmd == nil {
+		t.Fatal("a filtered list should still poll its visible nodes")
+	}
+	cmd()
+	if len(lastLatencyIDs) != 1 || lastLatencyIDs[0] != "n3" {
+		t.Fatalf("polled ids = %v, want only the matching node", lastLatencyIDs)
+	}
+
+	// Subs page polls only while a subscription is expanded.
+	m, _ = m.Update(key("3"))
+	if cmd := m.(Model).latencyPollCmd(); cmd != nil {
+		t.Fatal("a collapsed subscription should not poll")
+	}
+	m, cmd = m.Update(key("l"))
+	if cmd == nil {
+		t.Fatal("expanding should fetch the nodes")
+	}
+	m, _ = m.Update(cmd())
+	lastLatencyIDs = nil
+	cmd = m.(Model).latencyPollCmd()
+	if cmd == nil {
+		t.Fatal("an expanded subscription should poll its visible nodes")
+	}
+	cmd()
+	if len(lastLatencyIDs) != 2 || lastLatencyIDs[0] != "x1" {
+		t.Fatalf("polled ids = %v, want the subscription's nodes", lastLatencyIDs)
+	}
+
+	// The manual node page is always showing its list.
+	m, _ = m.Update(key("4"))
+	lastLatencyIDs = nil
+	cmd = m.(Model).latencyPollCmd()
+	if cmd == nil {
+		t.Fatal("the manual node page should poll its list")
+	}
+	cmd()
+	if len(lastLatencyIDs) != 2 || lastLatencyIDs[0] != "m1" {
+		t.Fatalf("polled ids = %v, want the manual nodes", lastLatencyIDs)
+	}
+}
+
+// The add-node picker sorts by latency, so its candidates stay in the poll
+// scope while it is open.
+func TestLatencyPollCoversOpenPicker(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("2"))
+	m, cmd := m.Update(key("n"))
+	if cmd == nil {
+		t.Fatal("n should load the attach candidates")
+	}
+	m, _ = m.Update(cmd())
+	lastLatencyIDs = nil
+	poll := m.(Model).latencyPollCmd()
+	if poll == nil {
+		t.Fatal("the open picker should poll its candidates")
+	}
+	poll()
+	// 自建-HK, 自建-SG, 机场A-01, 机场A-02.
+	if len(lastLatencyIDs) != 4 {
+		t.Fatalf("polled ids = %v, want the picker candidates", lastLatencyIDs)
+	}
+}
+
+// Startup must not probe the whole instance: measurements are created on
+// demand (t/T) and kept fresh by the per-page poll.
+func TestNoStartupLatencyTest(t *testing.T) {
+	cfg := &config.Config{Endpoint: "http://127.0.0.1:2023/graphql"}
+	var m tea.Model = New(stubDriver{}, cfg, "/tmp/dae-tui-test.toml")
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	lastTestIDs = nil
+	m3, cmd := m2.Update(bootMsg{Users: 1, Status: driver.Status{Version: "v2.1.1", Running: true}})
+	if cmd == nil {
+		t.Fatal("boot should fire initialLoad")
+	}
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("cmd = %T, want tea.BatchMsg", cmd())
+	}
+	for _, c := range batch {
+		c()
+	}
+	if lastTestIDs != nil {
+		t.Fatalf("startup triggered a latency test: %v", lastTestIDs)
+	}
+	// The initial load still fetches the page data.
+	if m3.(Model).phase != phaseMain {
+		t.Fatal("boot should enter the main phase")
+	}
+}
+
+// The home page's per-group line shows the estimated node without a
+// millisecond figure — keeping one fresh for every group is exactly the
+// full-instance cost the per-page poll avoids.
+func TestHomeCurrentNodeHasNoMilliseconds(t *testing.T) {
+	m := newTestModel(t)
+	v := m.View()
+	if !strings.Contains(v, "≈ 东京-01") {
+		t.Fatalf("home should estimate the best measured node:\n%s", v)
+	}
+	if strings.Contains(v, "88ms") {
+		t.Fatalf("home should not show per-node milliseconds:\n%s", v)
+	}
+}
+
+// The help page must describe how latency data actually works now: on-demand
+// probing plus a poll scoped to the visible nodes, no startup-wide test.
+func TestHelpDescribesLatencyModel(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("?"))
+	v := m.View()
+	for _, want := range []string{"测速按需触发", "每 3 秒轮询当前页可见节点", "≈ 已测最优节点"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("help missing %q:\n%s", want, v)
+		}
+	}
+}
+
+// The groups page sorts each section's nodes by latency: rebuild applies the
+// shared filter+sort per section, so the section structure survives.
+func TestGroupsSortByLatency(t *testing.T) {
+	m := newTestModel(t)
+	// A group whose node order differs from the latency order.
+	groups := []driver.Group{{
+		ID: "g1", Name: "proxy", Policy: "min_moving_avg",
+		Subscriptions: []driver.GroupSubscription{{
+			SubscriptionID: "s1", Tag: "机场A", MatchedCount: 2,
+			Nodes: []driver.Node{
+				{ID: "slow", Name: "慢-01", Protocol: "ss", SubscriptionID: "s1"},
+				{ID: "fast", Name: "快-02", Protocol: "ss", SubscriptionID: "s1"},
+			},
+		}},
+	}}
+	m, _ = m.Update(groupsMsg{Groups: groups})
+	m, _ = m.Update(latenciesMsg{Lats: []driver.Latency{
+		{NodeID: "slow", Ms: 900, Alive: true, TestedAt: time.Now()},
+		{NodeID: "fast", Ms: 50, Alive: true, TestedAt: time.Now()},
+	}})
+	m, _ = m.Update(key("2"))
+	m, _ = m.Update(key("l"))     // expand the group
+	m, _ = m.Update(key("enter")) // open the subscription section
+	v := m.View()
+	if i, j := strings.Index(v, "慢-01"), strings.Index(v, "快-02"); i > j {
+		t.Fatalf("backend order expected before sorting:\n%s", v)
+	}
+	m, _ = m.Update(key("o")) // latency ↑
+	v = m.View()
+	if !strings.Contains(v, "延迟↑") {
+		t.Fatalf("the pane title should name the sort mode:\n%s", v)
+	}
+	if i, j := strings.Index(v, "慢-01"), strings.Index(v, "快-02"); i < j {
+		t.Fatalf("latency sort should put the fast node first:\n%s", v)
+	}
+}
+
+// Automatic-policy groups without any measurement say so, rather than
+// showing a bare policy label that reads like a rendering gap.
+func TestHomeUntestedGroupsAreMarked(t *testing.T) {
+	cfg := &config.Config{Endpoint: "http://127.0.0.1:2023/graphql"}
+	var m tea.Model = New(stubDriver{}, cfg, "/tmp/dae-tui-test.toml")
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	m2, _ = m2.Update(bootMsg{Users: 1, Status: driver.Status{Version: "v2.1.1", Running: true}})
+	m2, _ = m2.Update(groupsMsg{Groups: mustGroups(t)}) // no latenciesMsg: nothing measured
+	m = m2
+	v := m.View()
+	if !strings.Contains(v, "未测速") {
+		t.Fatalf("unmeasured automatic groups should be marked:\n%s", v)
+	}
+	if strings.Contains(v, "≈") {
+		t.Fatalf("no estimate without measurements:\n%s", v)
+	}
+}
+
+// r reloads every list, not just the current page's: the pages share data
+// (home shows groups, the groups page shows subscription tags, the home
+// routing section comes from selections), so a per-page refresh left the
+// views you were not looking at stale.
+func TestForceRefreshReloadsEverything(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("3")) // the subs page — the old behavior reloaded only this
+	m, cmd := m.Update(key("r"))
+	if cmd == nil {
+		t.Fatal("r should fire a refresh")
+	}
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("cmd = %T, want tea.BatchMsg", cmd())
+	}
+	var sawGroups, sawSubs, sawSel, sawStatus, sawManual bool
+	for _, c := range batch {
+		switch c().(type) {
+		case groupsMsg:
+			sawGroups = true
+		case subsMsg:
+			sawSubs = true
+		case selectionsMsg:
+			sawSel = true
+		case statusMsg:
+			sawStatus = true
+		case manualNodesMsg:
+			sawManual = true
+		}
+	}
+	if !sawGroups || !sawSubs || !sawSel || !sawStatus || !sawManual {
+		t.Fatalf("refresh should reload every list: groups=%v subs=%v selections=%v status=%v manual=%v",
+			sawGroups, sawSubs, sawSel, sawStatus, sawManual)
 	}
 }

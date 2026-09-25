@@ -1,11 +1,44 @@
 package app
 
 import (
+	"errors"
+	"fmt"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"dae-tui/internal/driver"
 )
+
+// validateFieldValue checks a new field value against the backend-declared
+// type, so an obvious typo never reaches the backend. It only guards the
+// syntax; semantic ranges stay the backend's business.
+func validateFieldValue(f driver.ConfigField, val string) error {
+	switch f.Type {
+	case "int":
+		if _, err := strconv.Atoi(val); err != nil {
+			return fmt.Errorf("需要整数，得到 %q", val)
+		}
+	case "bool":
+		switch strings.ToLower(val) {
+		case "true", "false":
+		default:
+			return fmt.Errorf("需要 true 或 false，得到 %q", val)
+		}
+	case "duration":
+		if _, err := time.ParseDuration(val); err != nil {
+			return fmt.Errorf("需要时长（如 30s、5m），得到 %q", val)
+		}
+	case "array":
+		for _, item := range strings.Split(val, ",") {
+			if strings.TrimSpace(item) == "" {
+				return errors.New("数组元素不能为空（用逗号分隔）")
+			}
+		}
+	}
+	return nil
+}
 
 // configuredIfaces splits an interface field value ("eth0, wlan0") into NIC
 // names. dae accepts the literal "auto" as "detect it yourself" (daed's

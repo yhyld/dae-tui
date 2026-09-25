@@ -4,6 +4,8 @@ package app
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -37,6 +39,15 @@ type Model struct {
 	cfg     *config.Config
 	cfgPath string
 
+	// caps is the backend's feature set, read once at startup. Pages gate
+	// their keys on it so a less capable driver degrades with feedback
+	// instead of leaving keys that silently do nothing.
+	caps driver.Caps
+
+	// latHist accumulates per-node latency samples from the poll stream, for
+	// the detail-pane trend sparkline.
+	latHist *latHistory
+
 	phase  int
 	fatal  error
 	status driver.Status
@@ -57,14 +68,24 @@ type Model struct {
 	confirmApply  bool // global `A` apply confirmation
 }
 
+// errUnsupported is the toast a gated key produces on a backend whose
+// Capabilities do not cover the operation.
+var errUnsupported = errors.New("当前后端不支持该操作")
+
+// unsupportedCmd reports a capability-gated keypress as a toast.
+func unsupportedCmd(op string) tea.Cmd {
+	return func() tea.Msg { return opDoneMsg{Op: op, Err: errUnsupported} }
+}
+
 func New(drv driver.Driver, cfg *config.Config, cfgPath string) Model {
-	m := Model{drv: drv, cfg: cfg, cfgPath: cfgPath}
-	m.home = newHomePage()
+	m := Model{drv: drv, cfg: cfg, cfgPath: cfgPath, caps: drv.Capabilities(), latHist: newLatHistory()}
+	m.home = newHomePage(m.caps)
 	m.home.presets = drv.RoutingPresets()
-	m.groups = newGroupsPage()
-	m.subs = newSubsPage()
-	m.nodes = newNodesPage()
-	m.configs = newConfigsPage()
+	m.groups = newGroupsPage(m.caps)
+	m.subs = newSubsPage(m.caps)
+	m.nodes = newNodesPage(m.caps)
+	m.nodes.hist = m.latHist
+	m.configs = newConfigsPage(m.caps)
 	return m
 }
 
@@ -92,7 +113,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmds []tea.Cmd
 		cmds = append(cmds, tickCmd(msg.n))
 		if m.phase == phaseMain {
-			cmds = append(cmds, trafficCmd(m.drv))
+			if m.caps.TrafficStats {
+				cmds = append(cmds, trafficCmd(m.drv))
+			}
 			if m.groups.testing {
 				cmds = append(cmds, latenciesCmd(m.drv, m.groups.testIDs))
 			}
@@ -110,11 +133,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.n%10 == 0 {
 				cmds = append(cmds, loadInterfacesCmd(m.drv))
 			}
-			// Background latency data: probes are triggered once at
-			// startup (see initialLoad) and manually via t/T; results are
-			// polled every 3s so latency columns stay fresh.
+			// Latency data is polled for what the current page actually
+			// shows: a full-instance poll every 3s is wasted work when the
+			// visible list is a dozen nodes, and on a large instance it is
+			// the single largest recurring response. Pages that show no
+			// nodes (a collapsed group detail, the home page) poll nothing.
 			if msg.n%3 == 0 {
-				cmds = append(cmds, latenciesCmd(m.drv, nil))
+				if cmd := m.latencyPollCmd(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
 			}
 		}
 		return m, tea.Batch(cmds...)
@@ -165,6 +192,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.login = newLoginForm(false)
 		return m, m.login.init()
 
+	case gotoGroupMsg:
+		// Home page Enter on a group row: open the groups page with that
+		// group already expanded, so the node list is one j/k away.
+		m.page = pageTree
+		for i, g := range m.groups.groups {
+			if g.ID == msg.ID {
+				m.groups.gi = i
+				break
+			}
+		}
+		m.groups.expanded = true
+		m.groups.focus = 1
+		m.groups.rc = 0
+		m.groups.rebuild()
+		return m, nil
+
+	case logsDoneMsg:
+		return m, nil
+
 	case statusMsg:
 		if msg.Err == nil {
 			m.status = msg.Status
@@ -211,6 +257,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case latenciesMsg:
+		for _, l := range msg.Lats {
+			m.latHist.add(l)
+		}
 		m.groups.handleLatencies(msg.Lats, msg.Err)
 		m.home.handleLatencies(msg.Lats)
 		m.subs.handleLatencies(msg.Lats)
@@ -220,6 +269,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case subsMsg:
 		m.subs.handleSubs(msg.Subs, msg.Err)
 		m.groups.setSubs(msg.Subs, msg.Err)
+		// An `u` update dropped the expanded subscription's cached nodes;
+		// re-fetch them now instead of waiting for a collapse/expand cycle.
+		if cmd := m.subs.ensureNodes(m.drv); cmd != nil {
+			return m, cmd
+		}
 		return m, nil
 
 	case selectionsMsg:
@@ -250,6 +304,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case clipboardMsg:
+		if msg.OK {
+			m.showToast("✓ 已复制到剪贴板 (OSC 52)")
+		} else {
+			m.showToast("✗ 复制失败：当前输出不是终端")
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -270,15 +332,51 @@ func (m *Model) enterMain() {
 }
 
 func (m *Model) initialLoad() tea.Cmd {
-	return tea.Batch(
+	cmds := []tea.Cmd{
 		loadGroupsCmd(m.drv),
 		loadSubsCmd(m.drv),
 		loadSelectionsCmd(m.drv),
 		loadManualNodesCmd(m.drv),
 		loadInterfacesCmd(m.drv),
-		trafficCmd(m.drv),
-		testLatencyCmd(m.drv, nil), // populate latency data for the home page
-	)
+	}
+	if m.caps.TrafficStats {
+		cmds = append(cmds, trafficCmd(m.drv))
+	}
+	// No startup-wide latency test on purpose: probing every node of the
+	// instance is the heaviest one-time load the tool can cause, it fires on
+	// every launch regardless of what the user opened the tool for, and it
+	// would probe nodes no visible list asks about. Measurements are created
+	// on demand (t/T on a group, subscription or list) and then kept fresh
+	// by the per-page poll.
+	return tea.Batch(cmds...)
+}
+
+// latencyPollCmd polls the latency data the current page displays, or nil
+// when the page shows no nodes.
+func (m Model) latencyPollCmd() tea.Cmd {
+	ids := m.visibleLatencyIDs()
+	if len(ids) == 0 {
+		return nil
+	}
+	return latenciesCmd(m.drv, ids)
+}
+
+// visibleLatencyIDs lists the nodes whose latency the current page renders.
+// The home page deliberately reports nothing: its per-group "current node"
+// for automatic policies is an estimate over group members, and keeping it
+// exact would mean polling every member of every group — the full-instance
+// cost this mechanism exists to avoid. The home page shows the estimate
+// without a millisecond figure instead, from whatever has been measured.
+func (m Model) visibleLatencyIDs() []string {
+	switch m.page {
+	case pageTree:
+		return m.groups.visibleLatencyIDs()
+	case pageSubs:
+		return m.subs.visibleLatencyIDs()
+	case pageNodes:
+		return m.nodes.visibleLatencyIDs()
+	}
+	return nil
 }
 
 func (m *Model) layout() {
@@ -444,21 +542,28 @@ func (m Model) anyModal() bool {
 	return false
 }
 
-// forceRefresh reloads data for the current page.
+// forceRefresh reloads every list from the backend, not just the current
+// page's: the pages share data (the home page shows groups, the groups page
+// shows subscription tags, the home routing section comes from selections),
+// so a per-page refresh left the views you were not looking at stale.
 func (m *Model) forceRefresh() tea.Cmd {
-	switch m.page {
-	case pageHome:
-		return tea.Batch(statusCmd(m.drv), loadGroupsCmd(m.drv), trafficCmd(m.drv), loadInterfacesCmd(m.drv))
-	case pageTree:
-		return loadGroupsCmd(m.drv)
-	case pageSubs:
-		return loadSubsCmd(m.drv)
-	case pageNodes:
-		return loadManualNodesCmd(m.drv)
-	case pageConfigs:
-		return tea.Batch(loadSelectionsCmd(m.drv), loadInterfacesCmd(m.drv))
+	cmds := []tea.Cmd{
+		statusCmd(m.drv),
+		loadGroupsCmd(m.drv),
+		loadSubsCmd(m.drv),
+		loadSelectionsCmd(m.drv),
+		loadManualNodesCmd(m.drv),
+		loadInterfacesCmd(m.drv),
 	}
-	return nil
+	if m.caps.TrafficStats {
+		cmds = append(cmds, trafficCmd(m.drv))
+	}
+	// Latency data is polled on its own cadence; include the current page's
+	// poll so a manual refresh feels complete.
+	if cmd := m.latencyPollCmd(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m Model) View() string {
@@ -523,8 +628,11 @@ func (m Model) statusBar() string {
 	}
 	left := ui.TitleStyle.Render("dae-tui") + ui.HelpStyle.Render(" ("+m.cfg.Endpoint+")") +
 		"  " + run + ui.HelpStyle.Render(" dae "+m.status.Version) + mod
-	s := m.home.snap
-	right := ui.HelpStyle.Render("↑" + ui.Rate(s.UpRate) + " ↓" + ui.Rate(s.DownRate))
+	right := ""
+	if m.caps.TrafficStats {
+		s := m.home.snap
+		right = ui.HelpStyle.Render("↑" + ui.Rate(s.UpRate) + " ↓" + ui.Rate(s.DownRate))
+	}
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {
 		gap = 1
@@ -544,10 +652,24 @@ func (m Model) tabsBar() string {
 		}
 	}
 	bar := strings.Join(parts, "")
-	if m.groups.testing || m.subs.testing || m.nodes.testing {
-		bar += ui.HelpStyle.Render("   ⏳ 测速中…")
+	if done, total := m.testProgress(); total > 0 {
+		bar += ui.HelpStyle.Render(fmt.Sprintf("   ⏳ 测速中 %d/%d", done, total))
 	}
 	return bar
+}
+
+// testProgress reports the current page's in-flight latency test as
+// (returned, total), or a zero total when nothing is being probed.
+func (m Model) testProgress() (int, int) {
+	switch m.page {
+	case pageTree:
+		return m.groups.testProgress()
+	case pageSubs:
+		return m.subs.testProgress()
+	case pageNodes:
+		return m.nodes.testProgress()
+	}
+	return 0, 0
 }
 
 func (m Model) toastLine() string {
@@ -564,15 +686,15 @@ func (m Model) helpLine() string {
 	var keys string
 	switch m.page {
 	case pageHome:
-		keys = "o 开关代理  j/k+Enter 切换路由  g 换组  P 账户  A 应用  r 刷新"
+		keys = "o 开关代理  Tab 切焦点  j/k+Enter 切换路由/跳群组页  L 日志  g 换组  P 账户  A 应用  r 刷新"
 	case pageTree:
-		keys = "j/k 移动  Tab/l 展开  Enter(分区)开合  a 自动策略  x 移除  c/R/D/p 建组/改名/删除/策略  s/n 挂订阅/加节点  t 测速  / 过滤  o 排序"
+		keys = "j/k 移动  Tab/l 展开  Enter(分区)开合  space 标记  a 自动策略  x 移除(选中则批量)  c/R/D/p 建组/改名/删除/策略  s/n 挂订阅/加节点  t 测速  / 过滤  o 排序"
 	case pageSubs:
-		keys = "j/k 移动  Tab/l 看节点  u 更新  e 编辑标签/链接  n 新增  x 删除  c 定时刷新  t 测速  / 过滤  o 排序"
+		keys = "j/k 移动  Tab/l 看节点  y 复制链接  u 更新  e 编辑标签/链接  n 新增  x 删除  c 定时刷新  t 测速  / 过滤  o 排序"
 	case pageNodes:
-		keys = "j/k 移动  a 批量导入  e 编辑标签/链接  x 删除  t/T 测速  Tab 后 G 加入群组  / 过滤  o 排序"
+		keys = "j/k 移动  a 批量导入  y 复制链接  e 编辑标签/链接  x 删除  t/T 测速  Tab 后 G 加入群组  / 过滤  o 排序"
 	case pageConfigs:
-		keys = "j/k 移动  Enter 选择  e 编辑(DSL 先校验)  v 概览/原文  c/R/D 新建/改名/删除  Tab/l 滚动  A 应用(全局)"
+		keys = "j/k 移动  Enter 选择  y 复制 DSL  e 编辑(DSL 先校验后 diff)  v 概览/原文  c/R/D 新建/改名/删除  Tab/l 滚动  A 应用(全局)"
 	default:
 		keys = "A 应用  1-5 切换页面  q 退出"
 	}

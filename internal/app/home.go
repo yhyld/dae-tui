@@ -1,7 +1,9 @@
 package app
 
 import (
+	"errors"
 	"fmt"
+	"os/exec"
 	"strconv"
 	"strings"
 
@@ -56,11 +58,21 @@ type homePage struct {
 	presetText    string // rendered DSL shown in the confirmation
 	presetErr     error  // rendering failure (e.g. unusable group name)
 
+	// groupCursor/groupFocus drive the per-group node list at the bottom.
+	// Tab moves focus between it and the routing picker; Enter on a group
+	// row jumps to the groups page with that group expanded, which is the
+	// short path to "switch this group's node" (a fixed-group pin is not
+	// offered — see the groups page).
+	groupCursor int
+	groupFocus  bool
+
 	width, height int
+
+	caps driver.Caps
 }
 
-func newHomePage() homePage {
-	p := homePage{lat: map[string]driver.Latency{}, confirmPreset: -1}
+func newHomePage(caps driver.Caps) homePage {
+	p := homePage{lat: map[string]driver.Latency{}, confirmPreset: -1, caps: caps}
 	p.pwCur = newPasswordInput("当前密码")
 	p.pwNew = newPasswordInput("新密码 (至少6位, 含字母和数字)")
 	p.pwRepeat = newPasswordInput("确认新密码")
@@ -87,6 +99,9 @@ func (p *homePage) handleGroups(groups []driver.Group, err error) {
 		return
 	}
 	p.groups = groups
+	if p.groupCursor >= len(p.groups) {
+		p.groupCursor = max0(len(p.groups) - 1)
+	}
 	p.rederiveGroupIdx()
 }
 
@@ -296,12 +311,44 @@ func (p *homePage) handleKey(msg tea.KeyMsg, d driver.Driver, running bool) tea.
 		}
 		return nil
 	}
+	// Focus on the per-group node list: j/k moves, Enter jumps to the groups
+	// page with that group expanded. Only navigation keys are claimed here —
+	// o/P/L and friends still work while the list has focus.
+	if p.groupFocus {
+		switch msg.String() {
+		case "tab", "esc", "h", "left":
+			p.groupFocus = false
+			return nil
+		case "j", "down":
+			if p.groupCursor < len(p.groups)-1 {
+				p.groupCursor++
+			}
+			return nil
+		case "k", "up":
+			if p.groupCursor > 0 {
+				p.groupCursor--
+			}
+			return nil
+		case "enter":
+			if p.groupCursor >= 0 && p.groupCursor < len(p.groups) {
+				id := p.groups[p.groupCursor].ID
+				return func() tea.Msg { return gotoGroupMsg{ID: id} }
+			}
+			return nil
+		}
+	}
 	switch msg.String() {
 	case "o":
 		p.confirmSwitch = true
 	case "P":
 		p.acct = 1
 		p.acctCur = 0
+	case "L":
+		return logsCmd()
+	case "tab":
+		if len(p.groups) > 0 {
+			p.groupFocus = true
+		}
 	case "j", "down":
 		if p.presetCursor < len(p.presets)-1 {
 			p.presetCursor++
@@ -396,8 +443,8 @@ func (p *homePage) acctKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 				p.pwErr = "两次输入的新密码不一致"
 				return nil
 			}
-			if len(nw) < 6 {
-				p.pwErr = "新密码至少 6 位"
+			if !strongEnough(nw) {
+				p.pwErr = "新密码至少 6 位，且需包含字母和数字"
 				return nil
 			}
 			p.pwErr = ""
@@ -443,6 +490,21 @@ func (p *homePage) setPwFocus() {
 	case 2:
 		p.pwRepeat.Focus()
 	}
+}
+
+// logsCmd opens the daed journal in a pager-less follow view. tea.ExecProcess
+// hands the real terminal to the child and restores the TUI afterwards; the
+// view is read-only and local — journalctl lives on this machine, so it only
+// works when daed runs here rather than behind an SSH tunnel. q or ctrl+c
+// leaves the viewer.
+func logsCmd() tea.Cmd {
+	if _, err := exec.LookPath("journalctl"); err != nil {
+		return func() tea.Msg {
+			return opDoneMsg{Op: "查看日志", Err: errors.New("未找到 journalctl（daed 需以 systemd 服务运行在本机）")}
+		}
+	}
+	c := exec.Command("journalctl", "-u", "daed", "-n", "200", "--no-pager", "-f")
+	return tea.ExecProcess(c, func(err error) tea.Msg { return logsDoneMsg{} })
 }
 
 // acctSection renders the account UI inside the home page.
@@ -518,17 +580,19 @@ func isBuiltinOutbound(target string) bool {
 	return false
 }
 
-// currentNode describes what a group is using right now.
+// currentNode describes what a group is using right now. Fixed groups are
+// exact — daed stores the pinned index in policyParams. Automatic policies
+// are an estimate: the actual pick lives inside the dae core and is not
+// exposed via the API, so the best-measured member stands in for it. Neither
+// carries a millisecond figure: keeping one fresh for every group would mean
+// polling every member of every group, which is the full-instance cost the
+// per-page latency poll exists to avoid (the groups page shows per-node
+// latencies for the group you are actually looking at).
 func (p *homePage) currentNode(g driver.Group) (label string, style lipgloss.Style) {
 	if sel := g.SelectedNode(); sel != nil && g.Policy == "fixed" {
-		s := "手动: " + ui.SpaceAfterFlag(sel.Name)
-		if l, ok := p.lat[sel.ID]; ok && l.Alive && l.Ms > 0 {
-			s += fmt.Sprintf("  (%dms)", l.Ms)
-		}
-		return s, ui.OKStyle
+		return "手动: " + ui.SpaceAfterFlag(sel.Name), ui.OKStyle
 	}
-	// Auto policy: the actual pick lives inside the dae core and is not
-	// exposed via the API — show the best-latency node as an estimate.
+	// Auto policy: show the best-latency node as an estimate.
 	best, bestMs := "", -1
 	for _, n := range g.Members() {
 		if l, ok := p.lat[n.ID]; ok && l.Alive && l.Ms > 0 && (bestMs < 0 || l.Ms < bestMs) {
@@ -542,9 +606,12 @@ func (p *homePage) currentNode(g driver.Group) (label string, style lipgloss.Sty
 		auto = g.Policy
 	}
 	if best != "" {
-		return fmt.Sprintf("%s ≈ %s  (%dms)", auto, best, bestMs), ui.SelectedStyle
+		return fmt.Sprintf("%s ≈ %s", auto, best), ui.SelectedStyle
 	}
-	return auto, ui.HelpStyle
+	// No member has been measured: say so instead of showing a bare policy
+	// label that reads like a rendering gap. Measurements are created on
+	// demand (t/T on the groups page).
+	return auto + " · 未测速", ui.HelpStyle
 }
 
 func (p homePage) View(status driver.Status) string {
@@ -576,23 +643,27 @@ func (p homePage) View(status driver.Status) string {
 	b.WriteString("\n")
 
 	// --- traffic charts (smaller than the old full page) ---
-	chartW := max0(p.width/2 - 16)
-	if chartW < 20 {
-		chartW = 20
+	if !p.caps.TrafficStats {
+		b.WriteString(ui.HelpStyle.Render(" 流量统计：当前后端不支持") + "\n\n")
+	} else {
+		chartW := max0(p.width/2 - 16)
+		if chartW < 20 {
+			chartW = 20
+		}
+		chartH := 4
+		green := lipgloss.NewStyle().Foreground(ui.Green)
+		yellow := lipgloss.NewStyle().Foreground(ui.Yellow)
+		s := p.snap
+		up := ui.Sparkline(s.UpSeries, chartW, chartH, green, "↑")
+		down := ui.Sparkline(s.DownSeries, chartW, chartH, yellow, "↓")
+		left := "↑ 上行  " + green.Render(ui.Rate(s.UpRate)) + "\n" + up +
+			"\n\n↓ 下行  " + yellow.Render(ui.Rate(s.DownRate)) + "\n" + down
+		right := "连接 " + strconv.Itoa(s.Conns) + "   UDP " + strconv.Itoa(s.UDPSessions) +
+			"\n累计 ↑ " + ui.Bytes(s.UpTotal) + "\n累计 ↓ " + ui.Bytes(s.DownTotal) +
+			"\n\n" + ui.HelpStyle.Render("每秒自动刷新 (runtimeOverview)")
+		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, left, "    ", right))
+		b.WriteString("\n\n")
 	}
-	chartH := 4
-	green := lipgloss.NewStyle().Foreground(ui.Green)
-	yellow := lipgloss.NewStyle().Foreground(ui.Yellow)
-	s := p.snap
-	up := ui.Sparkline(s.UpSeries, chartW, chartH, green, "↑")
-	down := ui.Sparkline(s.DownSeries, chartW, chartH, yellow, "↓")
-	left := "↑ 上行  " + green.Render(ui.Rate(s.UpRate)) + "\n" + up +
-		"\n\n↓ 下行  " + yellow.Render(ui.Rate(s.DownRate)) + "\n" + down
-	right := "连接 " + strconv.Itoa(s.Conns) + "   UDP " + strconv.Itoa(s.UDPSessions) +
-		"\n累计 ↑ " + ui.Bytes(s.UpTotal) + "\n累计 ↓ " + ui.Bytes(s.DownTotal) +
-		"\n\n" + ui.HelpStyle.Render("每秒自动刷新 (runtimeOverview)")
-	b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, left, "    ", right))
-	b.WriteString("\n\n")
 
 	// --- network state ---
 	if net := p.netSection(); net != "" {
@@ -608,9 +679,18 @@ func (p homePage) View(status driver.Status) string {
 	if len(p.groups) == 0 {
 		b.WriteString(ui.HelpStyle.Render(" （加载中…）") + "\n")
 	}
-	for _, g := range p.groups {
+	for i, g := range p.groups {
 		label, style := p.currentNode(g)
-		b.WriteString("  " + ui.PadRight(g.Name, 16) + style.Render(label) + "\n")
+		cursor := " "
+		if i == p.groupCursor && p.groupFocus {
+			cursor = ui.CursorStyle.Render("❯")
+		}
+		b.WriteString(" " + cursor + " " + ui.PadRight(g.Name, 16) + style.Render(label) + "\n")
+	}
+	if p.groupFocus {
+		b.WriteString(ui.HelpStyle.Render("  Enter 跳到群组页并展开该组   Tab 返回路由切换   esc 返回") + "\n")
+	} else if len(p.groups) > 0 {
+		b.WriteString(ui.HelpStyle.Render("  Tab 切换到组列表（Enter 跳到群组页并展开）") + "\n")
 	}
 
 	return b.String()

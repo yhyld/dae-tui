@@ -25,7 +25,11 @@ type subsPage struct {
 	subNodes map[string][]driver.Node
 	loading  string // subID being fetched
 	subErr   map[string]error
-	nc       int // node cursor in right pane
+	// stale lists subscriptions whose nodes were just re-fetched by the
+	// backend (an `u` update). Their cache entry is dropped when the reloaded
+	// list arrives, instead of throwing away every subscription's nodes.
+	stale map[string]bool
+	nc    int // node cursor in right pane
 
 	nodeView // filter/sort for the right pane's node list
 
@@ -41,6 +45,8 @@ type subsPage struct {
 
 	lat map[string]driver.Latency
 
+	caps driver.Caps
+
 	// latency test polling state
 	testing   bool
 	testIDs   []string
@@ -50,7 +56,7 @@ type subsPage struct {
 	leftW, rightW, height int
 }
 
-func newSubsPage() subsPage {
+func newSubsPage(caps driver.Caps) subsPage {
 	l := textinput.New()
 	l.Placeholder = "https://example.com/sub 或 data:… 链接"
 	l.CharLimit = 2048
@@ -67,9 +73,11 @@ func newSubsPage() subsPage {
 		link: l, tag: t, cronInput: c,
 		subNodes: map[string][]driver.Node{},
 		subErr:   map[string]error{},
+		stale:    map[string]bool{},
 		lat:      map[string]driver.Latency{},
 		baseline: map[string]time.Time{},
 		nodeView: newNodeView(),
+		caps:     caps,
 	}
 }
 
@@ -85,12 +93,30 @@ func (p *subsPage) handleSubs(subs []driver.Subscription, err error) {
 	p.err = nil
 	p.busy = false
 	p.subs = subs
-	p.subNodes = map[string][]driver.Node{}
-	p.subErr = map[string]error{}
+	// Keep the per-subscription node caches: editing a tag or a cron
+	// expression reloads this list too, and dropping every entry would force
+	// a full re-fetch of each expanded subscription for a change that
+	// touched no nodes at all. Only entries the backend actually refreshed
+	// (an `u` update) or that no longer exist are dropped.
+	live := make(map[string]bool, len(subs))
+	for _, s := range subs {
+		live[s.ID] = true
+	}
+	for id := range p.subNodes {
+		if !live[id] || p.stale[id] {
+			delete(p.subNodes, id)
+			delete(p.subErr, id)
+		}
+	}
+	p.stale = map[string]bool{}
 	if p.sel >= len(subs) {
 		p.sel = max0(len(subs) - 1)
 	}
-	p.nc = 0
+	// The node list under the cursor may have shrunk; keep the cursor valid
+	// without yanking it back to the top on every reload.
+	if p.nc >= len(p.visibleNodes()) {
+		p.nc = max0(len(p.visibleNodes()) - 1)
+	}
 }
 
 func (p *subsPage) handleSubNodes(subID string, nodes []driver.Node, err error) {
@@ -112,7 +138,7 @@ func (p *subsPage) handleLatencies(lats []driver.Latency) {
 	if !p.testing {
 		return
 	}
-	if time.Since(p.testStart) > 15*time.Second {
+	if time.Since(p.testStart) > testWindow(len(p.testIDs)) {
 		p.testing = false
 		return
 	}
@@ -125,6 +151,19 @@ func (p *subsPage) handleLatencies(lats []driver.Latency) {
 	p.testing = false
 }
 
+// testProgress reports how many probed nodes have reported back.
+func (p *subsPage) testProgress() (done, total int) {
+	if !p.testing {
+		return 0, 0
+	}
+	for _, id := range p.testIDs {
+		if l, ok := p.lat[id]; ok && l.TestedAt.After(p.baseline[id]) {
+			done++
+		}
+	}
+	return done, len(p.testIDs)
+}
+
 func (p *subsPage) cur() *driver.Subscription {
 	if p.sel < 0 || p.sel >= len(p.subs) {
 		return nil
@@ -133,10 +172,10 @@ func (p *subsPage) cur() *driver.Subscription {
 }
 
 // ensureNodes returns a fetch command when the selected subscription's
-// nodes are not cached yet.
+// nodes are not cached yet (or were just invalidated by an update).
 func (p *subsPage) ensureNodes(d driver.Driver) tea.Cmd {
 	s := p.cur()
-	if s == nil {
+	if s == nil || !p.expanded {
 		return nil
 	}
 	if _, ok := p.subNodes[s.ID]; ok || p.loading == s.ID {
@@ -182,11 +221,20 @@ func (p *subsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	// Global to this page.
 	switch msg.String() {
 	case "u":
+		if !p.caps.Subscriptions {
+			return unsupportedCmd("更新订阅")
+		}
 		if s := p.cur(); s != nil {
 			p.busy = true
+			// The backend re-fetches the subscription's nodes; drop the
+			// cached list when the reloaded subscriptions arrive.
+			p.stale[s.ID] = true
 			return subMutateCmd(d, subMutation{kind: 1, id: s.ID}, "更新订阅 "+s.Tag)
 		}
 	case "c":
+		if !p.caps.Subscriptions {
+			return unsupportedCmd("定时刷新")
+		}
 		if s := p.cur(); s != nil && p.focus == 0 {
 			p.mode = 3
 			p.ifld = 0
@@ -196,6 +244,9 @@ func (p *subsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			return textinput.Blink
 		}
 	case "n":
+		if !p.caps.Subscriptions {
+			return unsupportedCmd("新增订阅")
+		}
 		p.mode = 1
 		p.ifld = 0
 		p.link.SetValue("")
@@ -203,6 +254,10 @@ func (p *subsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		p.link.Focus()
 		p.tag.Blur()
 		return textinput.Blink
+	case "y":
+		if s := p.cur(); s != nil && s.Link != "" {
+			return osc52CopyCmd(s.Link)
+		}
 	}
 
 	if p.focus == 0 {
@@ -234,10 +289,16 @@ func (p *subsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 				return p.ensureNodes(d)
 			}
 		case "x":
+			if !p.caps.Subscriptions {
+				return unsupportedCmd("删除订阅")
+			}
 			if p.cur() != nil {
 				p.mode = 2
 			}
 		case "e":
+			if !p.caps.Subscriptions {
+				return unsupportedCmd("编辑订阅")
+			}
 			if s := p.cur(); s != nil {
 				return p.openEdit(s)
 			}
@@ -249,6 +310,9 @@ func (p *subsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	nodes := p.visibleNodes()
 	switch msg.String() {
 	case "e":
+		if !p.caps.Subscriptions {
+			return unsupportedCmd("编辑订阅")
+		}
 		if s := p.cur(); s != nil {
 			return p.openEdit(s)
 		}
@@ -268,6 +332,9 @@ func (p *subsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		p.focus = 0
 		p.expanded = false
 	case "t":
+		if !p.caps.TestLatency {
+			return unsupportedCmd("测速")
+		}
 		ids := make([]string, 0, len(nodes))
 		for i, n := range nodes {
 			if i >= 500 {
@@ -351,6 +418,20 @@ func (p *subsPage) curNodes() []driver.Node {
 // currently present it.
 func (p *subsPage) visibleNodes() []driver.Node {
 	return p.nodeView.visible(p.curNodes(), p.lat)
+}
+
+// visibleLatencyIDs lists the nodes whose latency the right pane renders; a
+// collapsed subscription shows none.
+func (p *subsPage) visibleLatencyIDs() []string {
+	if !p.expanded {
+		return nil
+	}
+	nodes := p.visibleNodes()
+	ids := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		ids = append(ids, n.ID)
+	}
+	return ids
 }
 
 // clampNodeCursor keeps the node cursor inside the filtered list, which can
@@ -512,6 +593,9 @@ func (p subsPage) View() string {
 
 func (p subsPage) leftLines() []string {
 	var lines []string
+	if !p.caps.Subscriptions {
+		lines = append(lines, ui.ErrorStyle.Render("✗ 当前后端不支持订阅管理"))
+	}
 	if p.err != nil {
 		lines = append(lines, ui.ErrorStyle.Render("✗ "+shortErr(p.err)))
 	}
@@ -529,13 +613,20 @@ func (p subsPage) leftLines() []string {
 		if i == p.sel {
 			cursor = ui.CursorStyle.Render("❯")
 		}
+		// A bare status string ("failed") never says why; the backend's
+		// info field does, so surface its first line under failed rows.
+		failed := s.Status == "" || containsFold(s.Status, "fail") || containsFold(s.Status, "error")
 		stStyle := ui.OKStyle
-		if s.Status == "" || containsFold(s.Status, "fail") || containsFold(s.Status, "error") {
+		if failed {
 			stStyle = ui.ErrorStyle
 		}
 		lines = append(lines, cursor+" "+ui.PadRight(s.Tag, max0(p.leftW-24))+
 			stStyle.Render(ui.Truncate(s.Status, 10))+
 			ui.HelpStyle.Render(" "+strconv.Itoa(s.NodeCount)+"节点"))
+		if failed && s.Info != "" {
+			lines = append(lines, "    "+ui.ErrorStyle.Render(
+				ui.Truncate(firstLine(s.Info), max0(p.leftW-6))))
+		}
 	}
 	if p.busy {
 		lines = append(lines, ui.HelpStyle.Render("⏳ 操作进行中…"))

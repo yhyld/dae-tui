@@ -49,10 +49,13 @@ type nodesPage struct {
 
 	nodeView // filter/sort for the node list
 
+	caps driver.Caps
+	hist *latHistory // shared per-node latency samples for the trend sparkline
+
 	leftW, rightW, height int
 }
 
-func newNodesPage() nodesPage {
+func newNodesPage(caps driver.Caps) nodesPage {
 	l := textinput.New()
 	l.Placeholder = "vmess://… / ss://… / trojan://… 分享链接"
 	l.CharLimit = 4096
@@ -72,6 +75,7 @@ func newNodesPage() nodesPage {
 		lat:      map[string]driver.Latency{},
 		baseline: map[string]time.Time{},
 		nodeView: newNodeView(),
+		caps:     caps,
 	}
 }
 
@@ -140,7 +144,7 @@ func (p *nodesPage) handleLatencies(lats []driver.Latency) {
 	if !p.testing {
 		return
 	}
-	if time.Since(p.testStart) > 15*time.Second {
+	if time.Since(p.testStart) > testWindow(len(p.testIDs)) {
 		p.testing = false
 		return
 	}
@@ -151,6 +155,19 @@ func (p *nodesPage) handleLatencies(lats []driver.Latency) {
 		}
 	}
 	p.testing = false
+}
+
+// testProgress reports how many probed nodes have reported back.
+func (p *nodesPage) testProgress() (done, total int) {
+	if !p.testing {
+		return 0, 0
+	}
+	for _, id := range p.testIDs {
+		if l, ok := p.lat[id]; ok && l.TestedAt.After(p.baseline[id]) {
+			done++
+		}
+	}
+	return done, len(p.testIDs)
 }
 
 func (p *nodesPage) cur() *driver.Node {
@@ -164,6 +181,17 @@ func (p *nodesPage) cur() *driver.Node {
 // visibleNodes is the manual node list as the filter and sort present it.
 func (p *nodesPage) visibleNodes() []driver.Node {
 	return p.nodeView.visible(p.nodes, p.lat)
+}
+
+// visibleLatencyIDs lists the nodes whose latency the list and the detail
+// pane render — the manual node list is always on screen.
+func (p *nodesPage) visibleLatencyIDs() []string {
+	nodes := p.visibleNodes()
+	ids := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		ids = append(ids, n.ID)
+	}
+	return ids
 }
 
 // clampCursor keeps the cursor inside the filtered list, which can shrink
@@ -269,9 +297,19 @@ func (p *nodesPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		p.tag.Blur()
 		return p.links.Focus()
 	case "t":
+		if !p.caps.TestLatency {
+			return unsupportedCmd("测速")
+		}
 		return p.startTest(d, false)
 	case "T":
+		if !p.caps.TestLatency {
+			return unsupportedCmd("测速")
+		}
 		return p.startTest(d, true)
+	case "y":
+		if n := p.cur(); n != nil && n.Link != "" {
+			return osc52CopyCmd(n.Link)
+		}
 	}
 
 	if p.focus == 0 {
@@ -569,7 +607,19 @@ func (p nodesPage) rightLines() []string {
 		}
 		lines = append(lines, ui.SelectedStyle.Render("延迟  ")+v)
 	}
+	// Trend: the accumulated samples tell "slowing down" from "one bad
+	// probe", which a single number cannot.
+	if p.hist != nil {
+		if series := p.hist.series(n.ID); len(series) >= 2 {
+			w := max0(p.rightW - 12)
+			if w > 48 {
+				w = 48
+			}
+			lines = append(lines, ui.SelectedStyle.Render("趋势  ")+
+				ui.Sparkline(series, w, 1, lipgloss.NewStyle().Foreground(ui.Green), ""))
+		}
+	}
 	lines = append(lines, "",
-		ui.HelpStyle.Render(" e 编辑   G 加入群组   x 删除   T 单节点测速"))
+		ui.HelpStyle.Render(" e 编辑   y 复制链接   G 加入群组   x 删除   T 单节点测速"))
 	return append(report, lines...)
 }

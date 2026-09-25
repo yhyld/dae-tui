@@ -2,6 +2,7 @@ package app
 
 import (
 	"strings"
+	"unicode"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -9,6 +10,25 @@ import (
 
 	"dae-tui/internal/ui"
 )
+
+// strongEnough is the password rule both forms advertise: at least 6
+// characters, with letters and digits. The backend is free to demand more,
+// but the hint must not promise a check that never runs.
+func strongEnough(p string) bool {
+	if len([]rune(p)) < 6 {
+		return false
+	}
+	var hasLetter, hasDigit bool
+	for _, r := range p {
+		switch {
+		case unicode.IsLetter(r):
+			hasLetter = true
+		case unicode.IsDigit(r):
+			hasDigit = true
+		}
+	}
+	return hasLetter && hasDigit
+}
 
 // loginForm is used both for login (existing account) and first-run setup
 // (create the account; daed only allows one user, created when none exist).
@@ -113,7 +133,7 @@ func (f *loginForm) values() (string, string, bool) {
 		f.err = "两次输入的密码不一致"
 		return "", "", false
 	}
-	if f.setup && len(p) < 6 {
+	if f.setup && !strongEnough(p) {
 		f.err = "密码至少 6 位，且需包含字母和数字"
 		return "", "", false
 	}

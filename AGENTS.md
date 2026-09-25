@@ -18,6 +18,8 @@ go build -o dae-tui ./cmd/dae-tui   # 构建（产物 /dae-tui 已被 .gitignore
 go test ./...                       # 全部测试：driver httptest mock + TUI 无头渲染冒烟
 go vet ./...
 go run ./cmd/dae-tui -probe         # 非交互自检，只读打印后端状态
+go run ./cmd/dae-tui -cmd status    # 非交互一行式状态（可绑快捷键/写脚本）
+go run ./cmd/dae-tui -cmd test -g 组名   # 非交互测速（-n id,id 指定节点；不给则全部）
 ```
 
 Go 1.27.1（go.mod 写 1.27.1）。直接依赖仅 5 个：bubbletea / bubbles / lipgloss /
@@ -31,10 +33,12 @@ eBPF 的纯 API 实例，再用 `-endpoint http://127.0.0.1:2024/graphql` 指向
 ## 目录与分层
 
 ```
-cmd/dae-tui/main.go   入口：flag 解析、config 加载、driver 装配、probe 模式
+cmd/dae-tui/main.go   入口：flag 解析、config 加载、driver 装配、probe 与 -cmd 子命令
 internal/driver/      Driver 接口 + 领域类型 + Caps 能力位（**不含任何 daed 细节**）
 internal/driver/daed/ daed GraphQL 驱动（client/auth/queries/types/driver + schema.graphql）
 internal/app/         Bubble Tea 应用：根 model + 各页面（home/groups/subs/nodes/configs/login/help）
+                      横切工具：nodelist.go（节点过滤/排序）、lathist.go（延迟历史）、
+                      clip.go（OSC 52 剪贴板）、diff.go（DSL 行 diff）
 internal/ui/          lipgloss 样式、延迟色阶、CJK 宽度工具、braille sparkline
 internal/config/      ~/.config/dae-tui/config.toml（0600）
 ```
@@ -136,7 +140,11 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   失败明细渲染在右栏（`importFail`）——一行 toast 说不完逐条报错。
 - 首页 `P` 是账户状态机（`homePage.acct`：0 无 / 1 菜单 / 2 改密码 / 3 退出确认），
   已计入 `anyModal()`；退出登录由根模型处理（`logoutMsg`：清 cfg + 存盘 + `drv.Logout` +
-  回 `phaseLogin`），页面自己不能改 phase。
+  回 `phaseLogin`），页面自己不能改 phase。首页 `L` 是 daed 日志视图（`tea.ExecProcess`
+  跑 `journalctl -u daed -n 200 --no-pager -f`，只读、仅本机有效），退出即回到 TUI。
+- 全局 `r` 是**全量刷新**：所有列表 + status + traffic + 当前页延迟轮询一次性重拉，
+  不是只刷当前页——各页共享组/订阅/方案数据（首页显示组、群组页显示订阅标签、首页
+  路由区来自 selections），只刷当前页会让切过去后的视图是旧的。
 - **`Model.View()` 末尾的硬钳制不能删**：body 行数超过 `height-4` 就截断，否则页签/帮助
   条会被挤出屏幕（这是最早修的滚动 bug）。
 - 弹窗/输入框打开时（`anyModal()`）所有按键——包括 `1`-`5` 翻页热键——必须进弹窗，
@@ -150,8 +158,61 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   `🇩🇪Germany 01` 这种旗贴字格式，国旗占两列且字形顶到国家名上，看起来像重叠。
   列表、详情、标题、toast、确认框一处都不能漏。
 - 延迟色阶：未测/死亡 = 灰，<200ms 绿，<500ms 黄，其余红；自动策略下的"当前节点"是
-  估算值，显示时加 `≈` 前缀。
+  估算值，显示时加 `≈` 前缀（没有测量数据时首页标注「未测速」；首页不显示毫秒数，
+  逐节点延迟去群组页看）。
 - 破坏性操作（删组/删节点/删配置/停止代理/应用配置）都要 `y` 确认。
+
+## 横切机制（改 UI 前必读）
+
+- **Caps 降级已接线**：`New()` 启动时读一次 `drv.Capabilities()` 存进 `Model.caps` 并传给
+  各页面。按键按能力位门控，不支持时 `unsupportedCmd(op)` 出 toast（"当前后端不支持
+  该操作"），订阅/配置页还有横幅；`!TrafficStats` 时首页不渲染流量图、轮询也跳过。
+  新 driver 必须如实返回 Caps——`stubDriver` 返回全 true，写"残废后端"测试要内嵌它再覆盖。
+- **测速进度**：`testWindow(n) = 15s + 200ms×n`（上限 2 分钟，与 `testLatencyCmd` 的
+  ctx 超时一致），三个页面各自 `testProgress()`，根模型 `tabsBar` 显示"⏳ 测速中 x/y"。
+  完成判定仍是"所有 testIDs 的 `TestedAt` 都新于 baseline"。测速期间的 `testIDs` 轮询
+  （每秒）与下面的按页轮询并存，互不影响。
+- **延迟按页轮询，无启动全量测速**：每 3 秒只轮询当前页可见节点的 `nodeLatencies`
+  （`Model.visibleLatencyIDs()` 按页分发：群组页=展开分区的节点行，选择器打开时=候选；
+  订阅页=右栏可见节点；手动节点页=列表；首页/配置页不轮询）。`initialLoad` **不再**
+  触发 `testLatencyCmd(nil)`——启动即全节点测速是最大的一次性后端负载，且和"只维护
+  可见列表"矛盾；测量改由 `t`/`T` 按需创建。连带影响（写进 README 已知限制）：非当前页
+  延迟列停在最后值；首页自动策略组的 `≈` 只用已测数据且**不显示毫秒**（`currentNode`
+  为此去掉了 `(%dms)`——要全组成员的延迟就得全量轮询，正是要避免的）；`latHistory` 只
+  累积被轮询到的节点，LRU 256 兜底。测速中的进度轮询（`testIDs`）不变。
+- **延迟历史**（`lathist.go`）：`latHistory` 按节点保留最近 60 个采样（约 3 分钟），
+  LRU 上限 256 个节点；根模型在 `latenciesMsg` 里喂数据，手动节点页详情页画 sparkline。
+  死亡采样占窗口位但不绘制（`series()` 只收 alive>0）。历史只来自轮询流，没有独立采样器。
+- **OSC 52 剪贴板**（`clip.go`）：`osc52CopyCmd` 只在 stdout 是字符设备时写转义序列
+  （测试/管道环境下返回 `clipboardMsg{OK:false}`，根模型转 toast）。订阅/手动节点/配置页
+  的 `y` 键。没有引入任何剪贴板依赖。
+- **群组页多选**：`space` 按**节点 ID**标记（`marked map[string]bool`），`t` 只测已标记、
+  `x` 批量移除已标记的**直接挂载**节点（订阅贡献的只能随订阅移除，会给 toast 说明）、
+  选择器内 `Enter` 批量添加。`markedIDs()/markedDirectNodes()` 必须去重——同一节点可以
+  同时出现在订阅区和直接区两行。换组/收起（`collapseSections`）清空标记。
+- **首页组行跳转**：`Tab` 在路由选择器与组列表间切焦点（`home.groupFocus`），组行
+  `Enter` 发 `gotoGroupMsg{ID}`，根模型开群组页并展开该组（`expanded/focus=1`）。
+  焦点在组列表时只吞导航键，`o/P/L/g` 等仍走原路径。
+- **订阅页节点缓存**：`subsMsg` **不再**清空 `subNodes`；只有 `u`（更新）把对应 ID 记入
+  `stale`，下次 `handleSubs` 时删那一条（并顺带清理已删除订阅的残留），根模型随后
+  `ensureNodes` 重取。`ensureNodes` 自带 `expanded` 判断，任何地方调用都安全。
+- **群组页分区展开按订阅 ID 键定**（`subOpen map[string]bool`）：刷新后订阅重排不会
+  把展开状态错位到别的订阅。`directOpen` 是整个直接区的单个 bool。
+- **DSL 编辑流程**：`$EDITOR` 退出 → 后端校验 → **diff 确认**（`configsPage.diff`，
+  mode 6，`y` 提交/`n` 取消）→ 才 `configTextCmd`。临时文件只在"应用后"和"内容未变"
+  删除；校验失败和用户取消都保留并在 toast/右栏说明路径。diff 用 `diff.go` 的 LCS，
+  长相同行折叠成 gap 标记。
+- **配置页左栏分区标题是光标行**（`rowRef.kind = rowHeader`）：光标会停在标题上，
+  `item()` 对标题行解析为该分区"当前选中（否则第一个）"的条目，所以标题上的
+  `Enter/e/R/D` 作用在用户上次选的方案上。空分区不建行。
+- **字段输入预校验**（`fields.go: validateFieldValue`）：按 `ConfigField.Type`
+  （int/bool/duration/array）在客户端挡掉明显非法的值，错误显示在输入框模态内，
+  不提交。语义仍然归后端。
+- **日志视图**：首页 `L` 用 `tea.ExecProcess` 跑 `journalctl -u daed -n 200 --no-pager -f`。
+  本地 exec，远程隧道场景天然不可用（LookPath 失败时 toast 说明）。测试里**不要**执行
+  这个 cmd——它会一直 follow 不退出。
+- **CLI 子命令**（`main.go`）：`-cmd status|test`，`test` 支持 `-g 组名` / `-n id,id`。
+  刻意没有 `-cmd switch`：fixed 组改组是破坏性操作，理由见"已知限制"。
 
 ## 测试约定
 
@@ -161,6 +222,11 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   做**无头渲染冒烟**：驱动 `Update` + `View`，断言关键文案出现/不出现，并断言按键
   是否产生了 `tea.Cmd`。改 UI 先跑 `go test ./internal/app`。
 - 断言用的是中文字面量（如 `"确认删除群组"`），改文案会破坏测试，两边一起改。
+- 观察"驱动被问了什么"用包级记录器：`lastTestIDs`（TestLatency 的 ids）、
+  `lastAddNodeIDs`（AddGroupNodes 的 ids）、`lastLatencyIDs`（Latencies 的 ids 参数）。
+  要检查一批 cmd 里到底发了哪些请求：`cmd().(tea.BatchMsg)` 后逐个执行、按消息类型
+  断言（见 `TestNoStartupLatencyTest` / `TestForceRefreshReloadsEverything`）。
+  执行 `tea.ExecProcess` 的 cmd（首页 `L`）**不能**在测试里跑——journalctl -f 不会退出。
 
 ## 安全与兼容
 
@@ -172,7 +238,8 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
 
 ## 其他
 
-- **仓库目前没有任何 commit**（全部文件未跟踪）。除用户明确要求，不要 `git commit`。
+- 仓库已有 commit（`git log` 可查）。除用户明确要求，不要 `git commit`——改动留在工作区
+  即可，由用户自己决定何时提交。
 - `.zcode/plans/` 下是最初的实施计划，可当历史背景读，但目录结构已与实际代码有偏差
   （实际没有 `app/pages/`、`app/keys.go`、`auth.go`），以代码为准。
 - 未来方向（接口已预留，未实现）：裸 dae 驱动（Phase 2）、clash-api 驱动。动

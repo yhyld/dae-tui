@@ -31,6 +31,14 @@ type authMsg struct {
 // credentials/token and fall back to the login form.
 type logoutMsg struct{}
 
+// gotoGroupMsg asks the root model to open the groups page with one group
+// expanded (the home page's Enter on a group row).
+type gotoGroupMsg struct{ ID string }
+
+// logsDoneMsg is returned when the journalctl viewer exits; it carries no
+// state, the TUI simply resumes.
+type logsDoneMsg struct{}
+
 type statusMsg struct {
 	Status driver.Status
 	Err    error
@@ -344,6 +352,19 @@ func testLatencyCmd(d driver.Driver, ids []string) tea.Cmd {
 	})
 }
 
+// testWindow is how long the UI keeps a latency test "in flight" before
+// giving up on it. daed probes asynchronously and reports through
+// nodeLatencies, so a large batch legitimately takes proportionally longer;
+// a fixed short window flipped the indicator off while probes were still
+// running. The cap matches testLatencyCmd's context timeout.
+func testWindow(nodeCount int) time.Duration {
+	w := 15*time.Second + time.Duration(nodeCount)*200*time.Millisecond
+	if w > 2*time.Minute {
+		w = 2 * time.Minute
+	}
+	return w
+}
+
 func latenciesCmd(d driver.Driver, ids []string) tea.Cmd {
 	return withCtx(func(ctx context.Context) tea.Msg {
 		lats, err := d.Latencies(ctx, ids)
@@ -518,11 +539,13 @@ type editorDoneMsg struct {
 
 // editorValidatedMsg is the result of parsing edited DSL through the backend
 // before it replaces a stored profile. Path names the temp file, which is
-// still on disk when Err != nil so a rejected edit is never lost.
+// still on disk when Err != nil so a rejected edit is never lost. Old is the
+// text the edit started from, for the pre-submit diff.
 type editorValidatedMsg struct {
 	Path    string
 	Section string
 	ID      string
+	Old     string
 	Text    string
 	Err     error
 }
@@ -530,7 +553,7 @@ type editorValidatedMsg struct {
 // validateTextCmd runs the edited DSL through the backend parser. It is a
 // separate step (not folded into the submit) so a syntax error can be shown
 // without the edited file having been deleted yet.
-func validateTextCmd(d driver.Driver, section, id, text, path string) tea.Cmd {
+func validateTextCmd(d driver.Driver, section, id, text, old, path string) tea.Cmd {
 	return withCtx(func(ctx context.Context) tea.Msg {
 		var err error
 		switch section {
@@ -539,7 +562,7 @@ func validateTextCmd(d driver.Driver, section, id, text, path string) tea.Cmd {
 		case "routing":
 			err = d.ValidateRouting(ctx, text)
 		}
-		return editorValidatedMsg{Path: path, Section: section, ID: id, Text: text, Err: err}
+		return editorValidatedMsg{Path: path, Section: section, ID: id, Old: old, Text: text, Err: err}
 	})
 }
 
