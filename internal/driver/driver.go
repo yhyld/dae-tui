@@ -162,16 +162,20 @@ type ConfigItem struct {
 	Name     string
 	Selected bool
 	Detail   string        // one-line summary
-	Body     string        // full content (DSL text / formatted fields) for detail panes
+	Body     string        // full DSL text for detail panes (dns/routing)
 	Fields   []ConfigField // editable global fields (config section only)
+	Summary  []string      // neutral structured overview lines (routing rules / dns upstreams)
 }
 
 // ConfigField describes one editable global config field.
 type ConfigField struct {
-	Name  string // globalInput key
-	Label string // display label
-	Value string // current value as text
-	Type  string // string | int | bool | duration | array
+	Name     string // globalInput key
+	Label    string // display label; backends may leave it empty for the UI to resolve
+	Value    string // current value as text
+	Type     string // string | int | bool | duration | array
+	Default  string // backend default as text (empty when unknown)
+	Desc     string // backend documentation (empty when unknown)
+	Required bool
 }
 
 // Selections lists stored config profiles per section with the selected one.
@@ -185,6 +189,17 @@ type Selections struct {
 type Policy struct {
 	Name       string // random | fixed | min_avg10 | min_moving_avg | min
 	FixedIndex int    // used when Name == "fixed"
+	// FixedIndex is retained for API completeness: daed supports fixed
+	// groups, but the TUI no longer creates them (a v2 fixed group may hold
+	// exactly one member, so pinning silently rebuilt the whole group).
+	// Existing fixed groups are still displayed read-only.
+}
+
+// RoutingPreset is a ready-made routing template a backend can render as
+// DSL. IDs are backend-stable; the UI owns the labels and descriptions.
+type RoutingPreset struct {
+	ID    string // e.g. "gfw"
+	Group bool   // the template sends traffic through a proxy group
 }
 
 // Driver is the backend abstraction consumed by the UI.
@@ -254,6 +269,18 @@ type Driver interface {
 	// UpdateDnsText / UpdateRoutingText replace the raw DSL content.
 	UpdateDnsText(ctx context.Context, id, text string) error
 	UpdateRoutingText(ctx context.Context, id, text string) error
+	// RoutingPresets lists the ready-made routing templates; BuildRouting-
+	// Preset renders one. DetectRoutingPreset reports which preset a stored
+	// routing DSL corresponds to ("" when it is custom), so the UI can show
+	// the active mode.
+	RoutingPresets() []RoutingPreset
+	BuildRoutingPreset(id, proxyGroup string) (string, error)
+	DetectRoutingPreset(raw string) string
+	// ValidateDns / ValidateRouting parse raw DSL text through the backend's
+	// parser without storing it, so an edited profile can be rejected before
+	// it replaces a working one.
+	ValidateDns(ctx context.Context, raw string) error
+	ValidateRouting(ctx context.Context, raw string) error
 	// UpdateConfigField applies a partial globalInput update for one field.
 	UpdateConfigField(ctx context.Context, id string, field ConfigField, value string) error
 	// UpdateConfigFields applies a partial globalInput update for several

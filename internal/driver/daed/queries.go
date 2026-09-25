@@ -155,20 +155,60 @@ const mUpdateSubscriptionCron = `mutation UpdateSubscriptionCron($id: ID!, $cron
 }`
 
 // One document for all three sections: they are all root query fields.
+// global enumerates every Global field (schema.graphql); the field list the
+// UI offers is driven by qConfigFlatDesc, not by this selection set.
 const qSelections = `query Selections {
 	configs {
 		id
 		name
 		selected
 		global {
-			logLevel lanInterface wanInterface tcpCheckUrl udpCheckDns
-			checkInterval checkTolerance dialMode allowInsecure
-			tcpCheckHttpMethod sniffingTimeout mptcp pprofPort
-			autoConfigKernelParameter autoConfigFirewallRule
+			tproxyPort tproxyPortProtect soMarkFromDae soMarkFromDaeSet
+			logLevel tcpCheckUrl tcpCheckHttpMethod udpCheckDns
+			checkInterval checkTolerance lanInterface wanInterface
+			allowInsecure dialMode disableWaitingNetwork enableLocalTcpFastRedirect
+			autoConfigKernelParameter autoConfigFirewallRule sniffingTimeout
+			tlsImplementation utlsImitate tlsFragment tlsFragmentLength tlsFragmentInterval
+			pprofPort mptcp bootstrapResolver fallbackResolver
+			bandwidthMaxTx bandwidthMaxRx udphopInterval
 		}
 	}
-	dnss { id name selected dns { string } }
-	routings { id name selected routing { string } }
+	dnss {
+		id
+		name
+		selected
+		dns { string upstream { key val } }
+	}
+	routings {
+		id
+		name
+		selected
+		routing {
+			string
+			rules {
+				conditions { and { name not params { key val } } }
+				outbound { name not params { key val } }
+			}
+			fallback { ... on Function { name not params { key val } } ... on Plaintext { val } }
+		}
+	}
+}`
+
+// qConfigFlatDesc describes every config.dae field: name is the Go field
+// path, mapping the flat key ("global.tproxy_port"), type the Go type.
+// Only the global.* entries map to the GraphQL globalInput keys.
+const qConfigFlatDesc = `query ConfigFlatDesc {
+	configFlatDesc { name mapping isArray defaultValue required type desc }
+}`
+
+// qParsedRouting / qParsedDns parse raw DSL without storing it. Syntax
+// problems come back as GraphQL errors carrying the offending line/column.
+const qParsedRouting = `query ParsedRouting($raw: String!) {
+	parsedRouting(raw: $raw) { string }
+}`
+
+const qParsedDns = `query ParsedDns($raw: String!) {
+	parsedDns(raw: $raw) { string }
 }`
 
 const mCreateConfig = `mutation CreateConfig($name: String) { createConfig(name: $name) { id } }`

@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -265,72 +264,7 @@ func groupMutateCmd(d driver.Driver, gm groupMutation, label string) tea.Cmd {
 	})
 }
 
-// pinNodeCmd implements daed v2's manual-selection model: a fixed-policy
-// group may contain exactly one node. Pinning therefore detaches all other
-// members (subscriptions and direct nodes), attaches the chosen node, and
-// sets policy fixed(0). Re-attach subscriptions later with `s` if needed.
-func pinNodeCmd(d driver.Driver, groupID string, nodeID, nodeName string) tea.Cmd {
-	return withCtxT(60*time.Second, func(ctx context.Context) tea.Msg {
-		groups, err := d.ListGroups(ctx)
-		if err != nil {
-			return opDoneMsg{Op: "固定节点 " + nodeName, Err: err}
-		}
-		var g *driver.Group
-		for i := range groups {
-			if groups[i].ID == groupID {
-				g = &groups[i]
-			}
-		}
-		if g == nil {
-			return opDoneMsg{Op: "固定节点 " + nodeName, Err: fmt.Errorf("group not found")}
-		}
-		// 1. detach all subscriptions
-		var subIDs []string
-		for _, s := range g.Subscriptions {
-			subIDs = append(subIDs, s.SubscriptionID)
-		}
-		if len(subIDs) > 0 {
-			if err := d.RemoveGroupSubscriptions(ctx, groupID, subIDs); err != nil {
-				return opDoneMsg{Op: "固定节点 " + nodeName, Err: err}
-			}
-		}
-		// 2. detach all direct nodes except the target
-		var delIDs []string
-		for _, n := range g.Nodes {
-			if n.ID != nodeID {
-				delIDs = append(delIDs, n.ID)
-			}
-		}
-		if len(delIDs) > 0 {
-			if err := d.RemoveGroupNodes(ctx, groupID, delIDs); err != nil {
-				return opDoneMsg{Op: "固定节点 " + nodeName, Err: err}
-			}
-		}
-		// 3. ensure the target is a direct member (it may come from a
-		// subscription whose binding we just removed)
-		attached := false
-		for _, n := range g.Nodes {
-			if n.ID == nodeID {
-				attached = true
-			}
-		}
-		if !attached {
-			if err := d.AddGroupNodes(ctx, groupID, []string{nodeID}); err != nil {
-				return opDoneMsg{Op: "固定节点 " + nodeName, Err: err}
-			}
-		}
-		// 4. fixed(0)
-		if err := d.SetGroupPolicy(ctx, groupID, driver.Policy{Name: "fixed", FixedIndex: 0}); err != nil {
-			return opDoneMsg{Op: "固定节点 " + nodeName, Err: err}
-		}
-		groups, lerr := d.ListGroups(ctx)
-		if lerr != nil {
-			return opDoneMsg{Op: "固定节点 " + nodeName, Err: lerr}
-		}
-		return groupsMsg{Groups: groups}
-	})
-}
-
+// switchNodeCmd applies a policy to a group and reloads the group list.
 func switchNodeCmd(d driver.Driver, groupID string, p driver.Policy) tea.Cmd {
 	return withCtx(func(ctx context.Context) tea.Msg {
 		if err := d.SetGroupPolicy(ctx, groupID, p); err != nil {
@@ -508,6 +442,61 @@ type editorDoneMsg struct {
 	Old     string
 	Err     error
 	Editor  string // resolved editor command, for error messages
+}
+
+// editorValidatedMsg is the result of parsing edited DSL through the backend
+// before it replaces a stored profile. Path names the temp file, which is
+// still on disk when Err != nil so a rejected edit is never lost.
+type editorValidatedMsg struct {
+	Path    string
+	Section string
+	ID      string
+	Text    string
+	Err     error
+}
+
+// validateTextCmd runs the edited DSL through the backend parser. It is a
+// separate step (not folded into the submit) so a syntax error can be shown
+// without the edited file having been deleted yet.
+func validateTextCmd(d driver.Driver, section, id, text, path string) tea.Cmd {
+	return withCtx(func(ctx context.Context) tea.Msg {
+		var err error
+		switch section {
+		case "dns":
+			err = d.ValidateDns(ctx, text)
+		case "routing":
+			err = d.ValidateRouting(ctx, text)
+		}
+		return editorValidatedMsg{Path: path, Section: section, ID: id, Text: text, Err: err}
+	})
+}
+
+// presetValidatedMsg is the result of validating a rendered routing preset
+// before it replaces a stored profile. Unlike the $EDITOR flow there is no
+// temp file to keep: the text is regenerated on demand.
+type presetValidatedMsg struct {
+	Section string
+	ID      string
+	Text    string
+	Label   string // toast label for the submit
+	Err     error
+}
+
+// presetTextCmd validates rendered preset DSL through the backend parser and
+// submits it on success. Presets are generated, not typed, so a rejection
+// here means the proxy group name cannot be interpolated — the error goes
+// back to the page that started the switch.
+func presetTextCmd(d driver.Driver, section, id, text, label string) tea.Cmd {
+	return withCtx(func(ctx context.Context) tea.Msg {
+		var err error
+		switch section {
+		case "dns":
+			err = d.ValidateDns(ctx, text)
+		case "routing":
+			err = d.ValidateRouting(ctx, text)
+		}
+		return presetValidatedMsg{Section: section, ID: id, Text: text, Label: label, Err: err}
+	})
 }
 
 func runCmd(d driver.Driver, dry bool) tea.Cmd {

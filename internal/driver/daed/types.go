@@ -126,45 +126,70 @@ type rawSubscription struct {
 	Nodes      rawNodesConn `json:"nodes"`
 }
 
-type rawGlobal struct {
-	LogLevel               string   `json:"logLevel"`
-	LanInterface           []string `json:"lanInterface"`
-	WanInterface           []string `json:"wanInterface"`
-	TcpCheckUrl            []string `json:"tcpCheckUrl"`
-	UdpCheckDns            []string `json:"udpCheckDns"`
-	CheckInterval          string   `json:"checkInterval"`
-	CheckTolerance         string   `json:"checkTolerance"`
-	DialMode               string   `json:"dialMode"`
-	AllowInsecure          bool     `json:"allowInsecure"`
-	TcpCheckHttpMethod     string   `json:"tcpCheckHttpMethod"`
-	SniffingTimeout        string   `json:"sniffingTimeout"`
-	Mptcp                  bool     `json:"mptcp"`
-	PprofPort              int      `json:"pprofPort"`
-	AutoConfigKernelParam  bool     `json:"autoConfigKernelParameter"`
-	AutoConfigFirewallRule bool     `json:"autoConfigFirewallRule"`
+// rawConfig keeps global untyped: the editable field set is discovered from
+// qConfigFlatDesc, so the driver must not hard-code which keys exist.
+type rawConfig struct {
+	ID       string         `json:"id"`
+	Name     string         `json:"name"`
+	Selected bool           `json:"selected"`
+	Global   map[string]any `json:"global"`
 }
 
-type rawConfig struct {
-	ID       string    `json:"id"`
-	Name     string    `json:"name"`
-	Selected bool      `json:"selected"`
-	Global   rawGlobal `json:"global"`
+type rawFlatDesc struct {
+	Name         string `json:"name"`
+	Mapping      string `json:"mapping"`
+	IsArray      bool   `json:"isArray"`
+	DefaultValue string `json:"defaultValue"`
+	Required     bool   `json:"required"`
+	Type         string `json:"type"`
+	Desc         string `json:"desc"`
+}
+
+type rawFunction struct {
+	Name   string     `json:"name"`
+	Not    bool       `json:"not"`
+	Params []rawParam `json:"params"`
+}
+
+type rawAndFunctions struct {
+	And []rawFunction `json:"and"`
+}
+
+type rawRoutingRule struct {
+	Conditions rawAndFunctions `json:"conditions"`
+	Outbound   rawFunction     `json:"outbound"`
+}
+
+// rawFunctionOrPlaintext decodes the FunctionOrPlaintext union: a Plaintext
+// carries only val, a Function only name/params.
+type rawFunctionOrPlaintext struct {
+	Name   string     `json:"name"`
+	Val    string     `json:"val"`
+	Not    bool       `json:"not"`
+	Params []rawParam `json:"params"`
+}
+
+type rawDaeRouting struct {
+	String   string                 `json:"string"`
+	Rules    []rawRoutingRule       `json:"rules"`
+	Fallback rawFunctionOrPlaintext `json:"fallback"`
+}
+
+type rawDaeDns struct {
+	String   string     `json:"string"`
+	Upstream []rawParam `json:"upstream"`
 }
 
 type rawDnsItem struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Selected bool   `json:"selected"`
-	Dns      struct {
-		String string `json:"string"`
-	} `json:"dns"`
+	ID       string    `json:"id"`
+	Name     string    `json:"name"`
+	Selected bool      `json:"selected"`
+	Dns      rawDaeDns `json:"dns"`
 }
 
 type rawRoutingItem struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Selected bool   `json:"selected"`
-	Routing  struct {
-		String string `json:"string"`
-	} `json:"routing"`
+	ID       string        `json:"id"`
+	Name     string        `json:"name"`
+	Selected bool          `json:"selected"`
+	Routing  rawDaeRouting `json:"routing"`
 }

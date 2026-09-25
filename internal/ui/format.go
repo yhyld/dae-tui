@@ -56,6 +56,26 @@ func Truncate(s string, w int) string {
 	return truncate(s, w)
 }
 
+// TruncateHead shortens s from the front with an ellipsis, keeping the tail
+// (CJK-aware). For paths the tail is the identifying part, so cutting the
+// end off — as Truncate does — destroys the information.
+func TruncateHead(s string, w int) string {
+	if w <= 1 || width(s) <= w {
+		return s
+	}
+	rs := []rune(s)
+	kept, start := 0, len(rs)
+	for start > 0 {
+		rw := width(string(rs[start-1]))
+		if kept+rw > w-1 { // one cell reserved for the ellipsis
+			break
+		}
+		kept += rw
+		start--
+	}
+	return "…" + string(rs[start:])
+}
+
 // SpaceAfterFlag keeps a leading flag emoji from running into the text that
 // follows it. Subscription node names routinely arrive as "🇩🇪Germany 01":
 // a flag occupies two cells and its glyph ends up pressed against the

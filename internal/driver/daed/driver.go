@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -440,45 +441,236 @@ func (d *Driver) ListSelections(ctx context.Context) (driver.Selections, error) 
 	if err := d.client.Do(ctx, qSelections, nil, &out); err != nil {
 		return driver.Selections{}, err
 	}
+	descs := d.configFieldDescs(ctx)
 	sel := driver.Selections{}
 	for _, c := range out.Configs {
-		g := c.Global
-		fields := []driver.ConfigField{
-			{Name: "logLevel", Label: "日志级别", Value: g.LogLevel, Type: "string"},
-			{Name: "lanInterface", Label: "LAN 接口", Value: strings.Join(g.LanInterface, ","), Type: "array"},
-			{Name: "wanInterface", Label: "WAN 接口", Value: strings.Join(g.WanInterface, ","), Type: "array"},
-			{Name: "dialMode", Label: "拨号模式", Value: g.DialMode, Type: "string"},
-			{Name: "checkInterval", Label: "检查间隔", Value: g.CheckInterval, Type: "duration"},
-			{Name: "checkTolerance", Label: "检查容差", Value: g.CheckTolerance, Type: "duration"},
-			{Name: "tcpCheckUrl", Label: "TCP 检查 URL", Value: strings.Join(g.TcpCheckUrl, ","), Type: "array"},
-			{Name: "tcpCheckHttpMethod", Label: "TCP 检查方法", Value: g.TcpCheckHttpMethod, Type: "string"},
-			{Name: "udpCheckDns", Label: "UDP 检查 DNS", Value: strings.Join(g.UdpCheckDns, ","), Type: "array"},
-			{Name: "sniffingTimeout", Label: "探测超时", Value: g.SniffingTimeout, Type: "duration"},
-			{Name: "allowInsecure", Label: "允许不安全 TLS", Value: strconv.FormatBool(g.AllowInsecure), Type: "bool"},
-			{Name: "mptcp", Label: "MPTCP", Value: strconv.FormatBool(g.Mptcp), Type: "bool"},
-			{Name: "autoConfigKernelParameter", Label: "自动内核参数", Value: strconv.FormatBool(g.AutoConfigKernelParam), Type: "bool"},
-			{Name: "autoConfigFirewallRule", Label: "自动防火墙规则", Value: strconv.FormatBool(g.AutoConfigFirewallRule), Type: "bool"},
-			{Name: "pprofPort", Label: "pprof 端口", Value: strconv.Itoa(g.PprofPort), Type: "int"},
-		}
-		var b strings.Builder
-		for _, f := range fields {
-			line := f.Label + ": "
-			for len([]rune(line)) < 20 {
-				line += " "
-			}
-			b.WriteString(line + f.Value + "\n")
-		}
-		detail := fmt.Sprintf("log=%s lan=%v wan=%v", g.LogLevel, g.LanInterface, g.WanInterface)
+		fields := buildConfigFields(descs, c.Global)
+		detail := fmt.Sprintf("log=%v lan=%v wan=%v",
+			c.Global["logLevel"], c.Global["lanInterface"], c.Global["wanInterface"])
 		sel.Configs = append(sel.Configs, driver.ConfigItem{ID: c.ID, Name: c.Name, Selected: c.Selected,
-			Detail: detail, Body: strings.TrimRight(b.String(), "\n"), Fields: fields})
+			Detail: detail, Fields: fields})
 	}
 	for _, x := range out.Dnss {
-		sel.Dns = append(sel.Dns, driver.ConfigItem{ID: x.ID, Name: x.Name, Selected: x.Selected, Body: x.Dns.String})
+		sel.Dns = append(sel.Dns, driver.ConfigItem{ID: x.ID, Name: x.Name, Selected: x.Selected,
+			Body: x.Dns.String, Summary: upstreamSummary(x.Dns.Upstream)})
 	}
 	for _, x := range out.Routings {
-		sel.Routings = append(sel.Routings, driver.ConfigItem{ID: x.ID, Name: x.Name, Selected: x.Selected, Body: x.Routing.String})
+		sel.Routings = append(sel.Routings, driver.ConfigItem{ID: x.ID, Name: x.Name, Selected: x.Selected,
+			Body: x.Routing.String, Summary: routingSummary(x.Routing)})
 	}
 	return sel, nil
+}
+
+// configFieldDescs fetches the flat config field metadata. It is advisory:
+// any failure degrades to no metadata, and the field list is then derived
+// from the global response itself (older daed builds lack the query).
+func (d *Driver) configFieldDescs(ctx context.Context) []rawFlatDesc {
+	var out struct {
+		ConfigFlatDesc []rawFlatDesc `json:"configFlatDesc"`
+	}
+	if err := d.client.Do(ctx, qConfigFlatDesc, nil, &out); err != nil {
+		return nil
+	}
+	return out.ConfigFlatDesc
+}
+
+// globalInputKey converts a configFlatDesc mapping ("global.tproxy_port")
+// into the GraphQL globalInput key ("tproxyPort"). Only the global section
+// maps to globalInput; group/routing/dns entries are not editable here.
+func globalInputKey(mapping string) (string, bool) {
+	rest, ok := strings.CutPrefix(mapping, "global.")
+	if !ok || rest == "" || strings.Contains(rest, ".") {
+		return "", false
+	}
+	var b strings.Builder
+	for _, part := range strings.Split(rest, "_") {
+		if part == "" {
+			continue
+		}
+		if b.Len() == 0 {
+			b.WriteString(part)
+			continue
+		}
+		b.WriteString(strings.ToUpper(part[:1]))
+		b.WriteString(part[1:])
+	}
+	if b.Len() == 0 {
+		return "", false
+	}
+	return b.String(), true
+}
+
+// fieldType maps a configFlatDesc Go type onto the edit type taxonomy of
+// driver.ConfigField.Type.
+func fieldType(f rawFlatDesc) string {
+	switch {
+	case f.IsArray:
+		return "array"
+	case f.Type == "bool":
+		return "bool"
+	case f.Type == "time.Duration":
+		return "duration"
+	case f.Type == "int", f.Type == "int64",
+		f.Type == "uint16", f.Type == "uint32", f.Type == "uint64":
+		return "int"
+	default:
+		return "string"
+	}
+}
+
+// inferType guesses an edit type from a raw JSON value, for keys the flat
+// description did not cover.
+func inferType(v any) string {
+	switch v.(type) {
+	case bool:
+		return "bool"
+	case float64:
+		return "int"
+	case []any:
+		return "array"
+	default:
+		return "string"
+	}
+}
+
+// formatValue renders a global field value as editable text.
+func formatValue(v any) string {
+	switch t := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return t
+	case bool:
+		return strconv.FormatBool(t)
+	case float64:
+		return strconv.FormatFloat(t, 'f', -1, 64)
+	case []any:
+		parts := make([]string, 0, len(t))
+		for _, e := range t {
+			parts = append(parts, formatValue(e))
+		}
+		return strings.Join(parts, ", ")
+	default:
+		return fmt.Sprint(t)
+	}
+}
+
+// buildConfigFields joins the flat field metadata with the current values of
+// one config's global object. The response map is authoritative for which
+// keys exist: a metadata entry the backend did not echo back is skipped, and
+// keys without metadata are still offered with an inferred type, sorted for
+// a stable order.
+func buildConfigFields(descs []rawFlatDesc, global map[string]any) []driver.ConfigField {
+	var fields []driver.ConfigField
+	seen := map[string]bool{}
+	for _, f := range descs {
+		key, ok := globalInputKey(f.Mapping)
+		if !ok || seen[key] {
+			continue
+		}
+		v, ok := global[key]
+		if !ok {
+			continue
+		}
+		seen[key] = true
+		fields = append(fields, driver.ConfigField{
+			Name: key, Value: formatValue(v), Type: fieldType(f),
+			Default: f.DefaultValue, Desc: f.Desc, Required: f.Required,
+		})
+	}
+	leftover := make([]string, 0, len(global))
+	for k := range global {
+		if !seen[k] {
+			leftover = append(leftover, k)
+		}
+	}
+	sort.Strings(leftover)
+	for _, k := range leftover {
+		fields = append(fields, driver.ConfigField{
+			Name: k, Value: formatValue(global[k]), Type: inferType(global[k]),
+		})
+	}
+	return fields
+}
+
+// routingSummary renders the parsed rules of a routing profile as neutral
+// DSL-ish lines ("domain(example.com) -> proxy").
+func routingSummary(r rawDaeRouting) []string {
+	var out []string
+	for _, rule := range r.Rules {
+		conds := make([]string, 0, len(rule.Conditions.And))
+		for _, f := range rule.Conditions.And {
+			conds = append(conds, renderFunction(f))
+		}
+		if len(conds) == 0 {
+			continue
+		}
+		out = append(out, strings.Join(conds, " && ")+" -> "+renderFunction(rule.Outbound))
+	}
+	if fb := renderFunctionOrPlaintext(r.Fallback); fb != "" {
+		out = append(out, "fallback: "+fb)
+	}
+	return out
+}
+
+func upstreamSummary(ups []rawParam) []string {
+	out := make([]string, 0, len(ups))
+	for _, p := range ups {
+		out = append(out, p.Key+": "+p.Val)
+	}
+	return out
+}
+
+func renderFunction(f rawFunction) string {
+	prefix := ""
+	if f.Not {
+		prefix = "!"
+	}
+	// daed parses the must_direct outbound as function "direct" carrying the
+	// positional param "must"; render it back in its DSL spelling.
+	if f.Name == "direct" && len(f.Params) == 1 &&
+		f.Params[0].Key == "" && f.Params[0].Val == "must" {
+		return prefix + "must_direct"
+	}
+	if len(f.Params) == 0 {
+		return prefix + f.Name
+	}
+	parts := make([]string, 0, len(f.Params))
+	for _, p := range f.Params {
+		switch {
+		case p.Key != "" && p.Val != "":
+			parts = append(parts, p.Key+":"+p.Val)
+		case p.Key != "":
+			parts = append(parts, p.Key)
+		default:
+			parts = append(parts, p.Val)
+		}
+	}
+	return prefix + f.Name + "(" + strings.Join(parts, ", ") + ")"
+}
+
+func renderFunctionOrPlaintext(f rawFunctionOrPlaintext) string {
+	if f.Val != "" {
+		return f.Val
+	}
+	return renderFunction(rawFunction{Name: f.Name, Not: f.Not, Params: f.Params})
+}
+
+// ValidateRouting / ValidateDns parse raw DSL through the backend parser
+// without storing anything. daed reports syntax problems as GraphQL errors
+// carrying the line/column of the offending token.
+func (d *Driver) ValidateRouting(ctx context.Context, raw string) error {
+	var out struct {
+		ParsedRouting map[string]any `json:"parsedRouting"`
+	}
+	return d.client.Do(ctx, qParsedRouting, map[string]any{"raw": raw}, &out)
+}
+
+func (d *Driver) ValidateDns(ctx context.Context, raw string) error {
+	var out struct {
+		ParsedDns map[string]any `json:"parsedDns"`
+	}
+	return d.client.Do(ctx, qParsedDns, map[string]any{"raw": raw}, &out)
 }
 
 func (d *Driver) SelectConfig(ctx context.Context, id string) error {
@@ -597,9 +789,12 @@ func typedValue(f driver.ConfigField, value string) (any, error) {
 		}
 		return b, nil
 	case "array":
+		// A blank value is a valid empty list (e.g. lanInterface unset), not
+		// an error: cloning a config round-trips every field, unset ones
+		// included.
 		parts := strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ' ' })
-		if len(parts) == 0 {
-			return nil, fmt.Errorf("%s 需要至少一个值", f.Label)
+		if parts == nil {
+			parts = []string{}
 		}
 		return parts, nil
 	default: // string / duration pass through

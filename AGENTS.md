@@ -59,12 +59,36 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   节点 + 直接节点，按 ID 去重）。
 - 切固定节点：`groupSetPolicy(id, policy: fixed, policyParams: [{val: "<index>"}])`，
   **key 留空**才会渲染成 dae DSL 的位置参数 `fixed(<index>)`。index 相对
-  `group.nodes` 顺序。
+  `group.nodes` 顺序。**UI 已移除"固定节点"入口**（见下），但驱动仍保留该能力，
+  `driver.Policy.FixedIndex` 与 `Group.FixedIndex()/SelectedNode()` 仍在（只读展示
+  已有 fixed 组）。
+- daed v2 的 fixed 组只允许一个成员，"固定节点"因此是摘掉所有订阅挂载 → 移除其他
+  直接节点 → 确保目标节点是直接成员 → `fixed(0)` 的一串操作：整组被静默重组且无法
+  一键恢复。这就是 UI 去掉该功能的原因；要恢复需按同样顺序重放 mutation（历史上在
+  `msgs.go` 的 `pinNodeCmd`，已删除，git 历史可查）。
+- `configFlatDesc` 给出 config.dae 全部字段的元数据；`mapping`（如
+  `global.tproxy_port`）与 GraphQL `globalInput` 的 camelCase 键按 snake→camel 对应
+  （驱动里是 `globalInputKey`）。可编辑字段清单由它 + `configs { global }` 实际返回的
+  键交集决定，**不要**再把字段列表写死在代码里；`configFlatDesc` 查询失败时降级为
+  按返回键推断类型。
+- `parsedRouting(raw)` / `parsedDns(raw)` 只解析不落盘，语法错误是带行列号的 GraphQL
+  error。`$EDITOR` 改完 DSL 后先过 `ValidateRouting`/`ValidateDns` 再提交；校验失败时
+  **临时文件必须留着**（用户靠它恢复编辑），成功才删。解析结果也喂配置页的"结构概览"
+  视图（`v` 与 DSL 原文互斥显示，别又把两者上下叠一起）。
+- DSL 多条件的连接符是 `&&`（`dip(1.2.3.4) && domain(x) -> proxy`），不是逗号；键值参数
+  写法是 `geoip:private`（无空格）。`must_direct` 在解析结果里是 `direct` + 位置参数
+  `must`，渲染概览时要拼回 `must_direct`。
+- **路由预设**（首页快速切换，`internal/driver/daed/presets.go`）：模板照搬 daed web UI
+  的 simple mode，4 个（gfw/nonCn/cnOnly/global）都以同一段前缀开头
+  （`pname(NetworkManager, systemd-resolved, dnsmasq) -> must_direct` +
+  `dip(geoip:private) -> direct`）。组名是直接插值进 DSL 的，**必须先过
+  `validGroupName`**，否则生成出的 DSL 后端解析不了。`DetectRoutingPreset` 要求前缀
+  存在且每一行都是预设自身能产生的规则才识别——daed 自带默认模板的 pname 参数与我们的
+  不同（没有 dnsmasq），所以前缀按语义匹配而不是整行比对。改模板要同步改检测，两边都有
+  单测兜着（生成的 DSL 必须 round-trip 回同一预设）。
 - `run(dry: true)` 是**停止代理**，不是校验。别把它当 dry-run 用。
 - 节点列表是 connection，cursor 就是节点 ID；驱动内循环翻页（200/页，带防御性页数上限）。
 - `testNodeLatencies` 的 ID 列表超过 100 个要分块，否则 HTTP 超时。
-- daed v2 的 fixed 组只允许一个成员，所以"固定节点"是一串操作：摘掉所有订阅挂载 →
-  移除其他直接节点 → 确保目标节点是直接成员 → `fixed(0)`。见 `msgs.go` 的 `pinNodeCmd`。
 - 老版本 daed 没有 `GroupSubscription` 类型：`qGroupsRich` 会 schema 校验失败，驱动据此
   永久降级到 `qGroups`（`groupsFallback`）。
 
@@ -89,7 +113,7 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   列表、详情、标题、toast、确认框一处都不能漏。
 - 延迟色阶：未测/死亡 = 灰，<200ms 绿，<500ms 黄，其余红；自动策略下的"当前节点"是
   估算值，显示时加 `≈` 前缀。
-- 破坏性操作（删组/删节点/删配置/固定节点/停止代理/应用配置）都要 `y` 确认。
+- 破坏性操作（删组/删节点/删配置/停止代理/应用配置）都要 `y` 确认。
 
 ## 测试约定
 

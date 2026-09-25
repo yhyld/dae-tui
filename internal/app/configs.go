@@ -2,6 +2,7 @@ package app
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -16,7 +17,7 @@ import (
 
 // configsPage: master-detail. Left lists the three profile sections
 // (config / dns / routing) flat; the right pane shows the selected item's
-// content (global summary or DSL text), scrollable.
+// content (global fields or DSL text), scrollable.
 type configsPage struct {
 	sel   driver.Selections
 	err   error
@@ -25,6 +26,15 @@ type configsPage struct {
 	rows   []rowRef
 	cur    int
 	scroll int // right pane line offset
+
+	// summaryView shows the parsed structure of a dns/routing profile
+	// instead of its raw DSL (v toggles). Both at once would print every
+	// rule twice for an already-canonical DSL.
+	summaryView bool
+
+	// validateErr holds the backend parser's rejection of the last $EDITOR
+	// session, per profile ID, so it follows the cursor.
+	validateErr map[string]editRejection
 
 	// modal state
 	mode       int // 0 list, 1 fieldPicker, 2 fieldInput, 3 createInput, 4 renameInput, 5 deleteConfirm
@@ -40,7 +50,6 @@ type rowRef struct {
 	index   int
 }
 
-// items returns the profiles of a section.
 func itemsOf(sel driver.Selections, section string) []driver.ConfigItem {
 	switch section {
 	case "config":
@@ -51,6 +60,17 @@ func itemsOf(sel driver.Selections, section string) []driver.ConfigItem {
 		return sel.Routings
 	}
 	return nil
+}
+
+func newConfigsPage() configsPage {
+	return configsPage{validateErr: map[string]editRejection{}}
+}
+
+// editRejection is the backend parser's rejection of an $EDITOR session: the
+// temp file is kept so the edit can be recovered.
+type editRejection struct {
+	Path string
+	Err  string // flattened parser error, one display line
 }
 
 func (p *configsPage) setSize(leftW, rightW, h int) {
@@ -94,6 +114,7 @@ func (p *configsPage) handleSelections(sel driver.Selections, err error) {
 	}
 	p.err = nil
 	p.sel = sel
+	p.validateErr = map[string]editRejection{} // a reload retires stale edit errors
 	p.rebuild()
 }
 
@@ -178,11 +199,12 @@ func (p *configsPage) modalKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			return nil
 		}
 		it := p.item(*r)
+		fields := orderedFields(it.Fields)
 		switch msg.String() {
 		case "esc":
 			p.mode = 0
 		case "j", "down":
-			if p.pickCursor < len(it.Fields)-1 {
+			if p.pickCursor < len(fields)-1 {
 				p.pickCursor++
 			}
 		case "k", "up":
@@ -190,8 +212,8 @@ func (p *configsPage) modalKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 				p.pickCursor--
 			}
 		case "enter":
-			if p.pickCursor < len(it.Fields) {
-				p.editField = it.Fields[p.pickCursor]
+			if p.pickCursor < len(fields) {
+				p.editField = fields[p.pickCursor]
 				p.mode = 2
 				return p.openInput("新值 ("+p.editField.Type+")", p.editField.Value)
 			}
@@ -214,7 +236,7 @@ func (p *configsPage) modalKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 				return nil
 			}
 			it := p.item(*r)
-			return configFieldCmd(d, it.ID, f, val, "修改 "+f.Label)
+			return configFieldCmd(d, it.ID, f, val, "修改 "+fieldLabel(f))
 		}
 		var cmd tea.Cmd
 		p.input, cmd = p.input.Update(msg)
@@ -285,6 +307,7 @@ func editorCmd(path string) (*exec.Cmd, string, error) {
 
 // editInEditor hands the raw DSL to $VISUAL/$EDITOR via tea.ExecProcess.
 func (p *configsPage) editInEditor(d driver.Driver, r rowRef, it driver.ConfigItem) tea.Cmd {
+	delete(p.validateErr, it.ID) // a new session supersedes the last rejection
 	ext := ".conf"
 	if r.section == "dns" {
 		ext = ".dns"
@@ -313,21 +336,51 @@ func (p *configsPage) editInEditor(d driver.Driver, r rowRef, it driver.ConfigIt
 	})
 }
 
-// handleEditorDone reads the edited file back and submits when changed.
+// handleEditorDone reads the edited file back. Changed content is parsed by
+// the backend before it is submitted; the temp file stays on disk until the
+// new text is known to be valid, so a rejected edit is never lost.
 func (p *configsPage) handleEditorDone(msg editorDoneMsg, d driver.Driver) tea.Cmd {
-	defer os.Remove(msg.Path)
 	if msg.Err != nil {
+		os.Remove(msg.Path)
 		return func() tea.Msg { return opDoneMsg{Op: "编辑 " + msg.Editor, Err: msg.Err} }
 	}
 	raw, err := os.ReadFile(msg.Path)
 	if err != nil {
+		os.Remove(msg.Path)
 		return func() tea.Msg { return opDoneMsg{Op: "编辑", Err: err} }
 	}
 	text := strings.TrimSpace(string(raw))
 	if text == "" || text == strings.TrimSpace(msg.Old) {
+		os.Remove(msg.Path)
 		return nil // unchanged
 	}
-	return configTextCmd(d, msg.Section, msg.ID, text, "更新"+sectionName(msg.Section)+" 内容")
+	// The file is only removed once validation accepted the new text (see
+	// handleValidated).
+	return validateTextCmd(d, msg.Section, msg.ID, text, msg.Path)
+}
+
+// handleValidated submits the edited DSL once the backend parser accepted
+// it; otherwise the parser's error is shown in the detail pane and the
+// edited file is kept for recovery.
+func (p *configsPage) handleValidated(msg editorValidatedMsg, d driver.Driver) tea.Cmd {
+	if msg.Err != nil {
+		if p.validateErr == nil {
+			p.validateErr = map[string]editRejection{}
+		}
+		p.validateErr[msg.ID] = editRejection{Path: msg.Path, Err: flattenErr(msg.Err)}
+		return func() tea.Msg {
+			return opDoneMsg{Op: sectionName(msg.Section) + " 校验", Err: errors.New("校验未通过，未保存")}
+		}
+	}
+	os.Remove(msg.Path)
+	delete(p.validateErr, msg.ID)
+	return configTextCmd(d, msg.Section, msg.ID, msg.Text, "更新"+sectionName(msg.Section)+" 内容")
+}
+
+// flattenErr squeezes a multi-line parser error (daed points at the
+// offending token with a caret line) into a single display line.
+func flattenErr(err error) string {
+	return strings.Join(strings.Fields(err.Error()), " ")
 }
 
 func (p *configsPage) bodyLines() []string {
@@ -336,23 +389,44 @@ func (p *configsPage) bodyLines() []string {
 		return []string{ui.HelpStyle.Render("（无配置）")}
 	}
 	it := p.item(*r)
-	var title string
-	switch r.section {
-	case "config":
-		title = "全局配置"
-	case "dns":
-		title = "DNS (DSL 原文)"
-	case "routing":
-		title = "路由规则 (DSL 原文)"
+	if r.section == "config" {
+		lines := []string{ui.SelectedStyle.Render("全局配置 · " + it.Name)}
+		// The editable surface is the field list; rendering it here keeps
+		// labels a UI concern (the driver supplies keys and values only).
+		if fields := orderedFields(it.Fields); len(fields) > 0 {
+			for _, f := range fields {
+				// Values can be long (URL lists); never bleed past the pane.
+				lines = append(lines, ui.Truncate(" "+ui.PadRight(fieldLabel(f), 18)+f.Value,
+					max0(p.rightW-4)))
+			}
+			return lines
+		}
+		return append(lines, fallbackBody(it)...)
 	}
-	lines := []string{ui.SelectedStyle.Render(title + " · " + it.Name)}
+	title := sectionTitles[r.section]
+	lines := []string{}
+	if p.summaryView && len(it.Summary) > 0 {
+		lines = append(lines, ui.SelectedStyle.Render(title+" (结构概览) · "+it.Name))
+		for _, s := range it.Summary {
+			lines = append(lines, "  "+ui.Truncate(s, max0(p.rightW-6)))
+		}
+		return lines
+	}
+	lines = append(lines, ui.SelectedStyle.Render(title+" (DSL 原文) · "+it.Name))
+	return append(lines, fallbackBody(it)...)
+}
+
+// fallbackBody renders a profile's stored text, used when there is nothing
+// better to show (no fields, no parsed structure, or the raw view).
+func fallbackBody(it *driver.ConfigItem) []string {
 	body := it.Body
 	if body == "" {
 		body = it.Detail
 	}
 	if body == "" {
-		body = "（无内容：编辑请在 daed 完成）"
+		return []string{ui.HelpStyle.Render(" （无内容：编辑请在 daed 完成）")}
 	}
+	lines := make([]string, 0, 8)
 	for _, l := range strings.Split(body, "\n") {
 		lines = append(lines, " "+l)
 	}
@@ -363,6 +437,12 @@ func (p *configsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	// `A` (apply) is handled globally by the app model.
 	if p.mode != 0 {
 		return p.modalKey(msg, d)
+	}
+	switch msg.String() {
+	case "v": // toggle raw DSL / parsed structure
+		p.summaryView = !p.summaryView
+		p.scroll = 0
+		return nil
 	}
 	if p.focus == 0 {
 		switch msg.String() {
@@ -474,27 +554,52 @@ func (p configsPage) modalLines() []string {
 		if r == nil {
 			return []string{ui.HelpStyle.Render("（无配置）")}
 		}
-		it := p.item(*r)
-		lines := []string{ui.TitleStyle.Render(" 选择要修改的字段")}
-		for i, f := range it.Fields {
+		fields := orderedFields(p.item(*r).Fields)
+		lines := []string{ui.TitleStyle.Render(" 选择要修改的字段") +
+			ui.HelpStyle.Render(fmt.Sprintf("  (%d)", len(fields)))}
+		// Window the picker: a config exposes every global field, far more
+		// than fit on screen.
+		rowsH := max0(p.height - 6)
+		start := 0
+		if p.pickCursor >= rowsH {
+			start = p.pickCursor - rowsH + 1
+		}
+		end := min(start+rowsH, len(fields))
+		for i := start; i < end; i++ {
+			f := fields[i]
 			mark, style := "  ", ui.HelpStyle
 			if i == p.pickCursor {
 				mark, style = "❯ ", ui.CursorStyle
 			}
-			lines = append(lines, style.Render(mark+ui.PadRight(f.Label, 16))+
-				ui.HelpStyle.Render(ui.PadRight("["+f.Type+"]", 10))+f.Value)
+			line := style.Render(mark+ui.PadRight(fieldLabel(f), 16)) +
+				ui.HelpStyle.Render(ui.PadRight("["+f.Type+"]", 11)) + f.Value
+			if i == p.pickCursor && f.Default != "" {
+				line += ui.HelpStyle.Render("  默认 " + f.Default)
+			}
+			// Long values (URL lists) must not bleed past the pane.
+			lines = append(lines, ui.Truncate(line, max0(p.rightW-4)))
+		}
+		if start > 0 || end < len(fields) {
+			lines = append(lines, ui.HelpStyle.Render(fmt.Sprintf(" … %d-%d / %d，j/k 滚动", start+1, end, len(fields))))
 		}
 		return append(lines, ui.HelpStyle.Render(" Enter 编辑  esc 取消"))
 	case 2: // field input
 		f := p.editField
-		return []string{
-			ui.TitleStyle.Render(" 修改 " + f.Label),
+		lines := []string{
+			ui.TitleStyle.Render(" 修改 " + fieldLabel(f)),
 			"",
 			" 当前值  " + ui.HelpStyle.Render(f.Value),
 			" 新值    " + p.input.View(),
-			"",
-			ui.HelpStyle.Render(" 类型 " + f.Type + "（数组用逗号分隔）  Enter 提交  esc 返回"),
 		}
+		if f.Default != "" {
+			lines = append(lines, " 默认值  "+ui.HelpStyle.Render(f.Default))
+		}
+		if f.Desc != "" {
+			lines = append(lines, ui.HelpStyle.Render(" 说明    "+
+				ui.Truncate(firstLine(f.Desc), max0(p.rightW-14))))
+		}
+		return append(lines, "",
+			ui.HelpStyle.Render(" 类型 "+f.Type+"（数组用逗号分隔）  Enter 提交  esc 返回"))
 	case 3, 4: // create / rename
 		r := p.curRow()
 		title := "重命名"
@@ -508,9 +613,10 @@ func (p configsPage) modalLines() []string {
 		if p.mode == 3 && r != nil {
 			// Mirror what CreateProfile actually does: it clones the
 			// selected profile of the section, and only falls back to the
-			// built-in template when there is nothing to clone.
+			// built-in template when there is nothing to clone. Config
+			// profiles clone through their field list, not a DSL body.
 			what := "默认模板"
-			if src := p.srcProfile(r.section); src != nil && src.Body != "" {
+			if src := p.srcProfile(r.section); src != nil && (src.Body != "" || len(src.Fields) > 0) {
 				what = "当前选中" + sectionName(r.section) + "的内容"
 			}
 			hint = " 将复制" + what + "，之后可 e 编辑  Enter 确认  esc 取消"
@@ -566,17 +672,30 @@ func (p configsPage) rightLines() []string {
 	if p.mode != 0 {
 		return p.modalLines()
 	}
-	body := p.bodyLines()
+	var lines []string
+	// A rejected $EDITOR session stays visible until it is superseded.
+	if r := p.curRow(); r != nil {
+		if rej := p.validateErr[p.item(*r).ID]; rej.Err != "" {
+			lines = append(lines,
+				ui.ErrorStyle.Render(" ✗ "+sectionName(r.section)+" 校验未通过，未保存"),
+				ui.HelpStyle.Render("  编辑内容保留在 "+
+					ui.TruncateHead(rej.Path, max0(p.rightW-18))),
+				ui.ErrorStyle.Render("  "+ui.Truncate(rej.Err, max0(p.rightW-4))),
+				"",
+			)
+		}
+	}
+	lines = append(lines, p.bodyLines()...)
 	rowsH := max0(p.height - 2)
-	if p.scroll >= len(body) {
-		p.scroll = len(body) - 1
+	if p.scroll >= len(lines) {
+		p.scroll = len(lines) - 1
 	}
 	if p.scroll < 0 {
 		p.scroll = 0
 	}
 	end := p.scroll + rowsH
-	if end > len(body) {
-		end = len(body)
+	if end > len(lines) {
+		end = len(lines)
 	}
-	return body[p.scroll:end]
+	return lines[p.scroll:end]
 }

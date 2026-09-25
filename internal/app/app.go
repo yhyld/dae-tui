@@ -59,9 +59,11 @@ type Model struct {
 func New(drv driver.Driver, cfg *config.Config, cfgPath string) Model {
 	m := Model{drv: drv, cfg: cfg, cfgPath: cfgPath}
 	m.home = newHomePage()
+	m.home.presets = drv.RoutingPresets()
 	m.groups = newGroupsPage()
 	m.subs = newSubsPage()
 	m.nodes = newNodesPage()
+	m.configs = newConfigsPage()
 	return m
 }
 
@@ -190,10 +192,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case selectionsMsg:
 		m.configs.handleSelections(msg.Sel, msg.Err)
+		m.home.handleSelections(msg.Sel, msg.Err, m.drv)
 		return m, nil
 
 	case editorDoneMsg:
 		return m, m.configs.handleEditorDone(msg, m.drv)
+
+	case editorValidatedMsg:
+		return m, m.configs.handleValidated(msg, m.drv)
+
+	case presetValidatedMsg:
+		return m, m.home.handleValidated(msg, m.drv)
 
 	case opDoneMsg:
 		if msg.Err != nil {
@@ -388,6 +397,9 @@ func (m Model) anyModal() bool {
 		return m.nodes.mode != 0
 	case pageConfigs:
 		return m.configs.mode != 0
+	case pageHome:
+		// A confirmation must be answered before any global hotkey fires.
+		return m.home.confirmSwitch || m.home.confirmPreset >= 0
 	}
 	return false
 }
@@ -512,15 +524,15 @@ func (m Model) helpLine() string {
 	var keys string
 	switch m.page {
 	case pageHome:
-		keys = "o 开关代理  A 应用  r 刷新  1-5 切页"
+		keys = "o 开关代理  j/k+Enter 切换路由  g 换组  A 应用  r 刷新"
 	case pageTree:
-		keys = "j/k 移动  Tab/l 展开  Enter(分区)开合/(节点)固定  x 移除  c/R/D/p 建组/改名/删除/策略  s/n 挂订阅/加节点  t 测速"
+		keys = "j/k 移动  Tab/l 展开  Enter(分区)开合  a 自动策略  x 移除  c/R/D/p 建组/改名/删除/策略  s/n 挂订阅/加节点  t 测速"
 	case pageSubs:
 		keys = "j/k 移动  Tab/l 看节点  u 更新  n 新增  x 删除  c 定时刷新  t 测速"
 	case pageNodes:
 		keys = "j/k 移动  a 导入  x 删除  t/T 测速  Tab 后 G 加入群组"
 	case pageConfigs:
-		keys = "j/k 移动  Enter 选择  e 编辑  c/R/D 新建/改名/删除  Tab/l 滚动  A 应用(全局)"
+		keys = "j/k 移动  Enter 选择  e 编辑(DSL 先校验)  v 概览/原文  c/R/D 新建/改名/删除  Tab/l 滚动  A 应用(全局)"
 	default:
 		keys = "A 应用  1-5 切换页面  q 退出"
 	}

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -142,6 +143,39 @@ func (stubDriver) UpdateDnsText(_ context.Context, id, text string) error {
 func (stubDriver) UpdateRoutingText(_ context.Context, id, text string) error {
 	return nil
 }
+func (stubDriver) ValidateDns(_ context.Context, raw string) error     { return nil }
+func (stubDriver) ValidateRouting(_ context.Context, raw string) error { return nil }
+func (stubDriver) RoutingPresets() []driver.RoutingPreset {
+	return []driver.RoutingPreset{
+		{ID: "gfw", Group: true}, {ID: "nonCn", Group: true},
+		{ID: "cnOnly", Group: true}, {ID: "global", Group: true},
+	}
+}
+func (stubDriver) BuildRoutingPreset(id, proxyGroup string) (string, error) {
+	if proxyGroup == "" {
+		return "", errors.New("no proxy group")
+	}
+	rules := map[string]string{
+		"gfw":    "domain(geosite:gfw) -> " + proxyGroup + "\nfallback: direct",
+		"nonCn":  "dip(geoip:cn) -> direct\ndomain(geosite:cn) -> direct\nfallback: " + proxyGroup,
+		"cnOnly": "dip(geoip:cn) -> " + proxyGroup + "\ndomain(geosite:cn) -> " + proxyGroup + "\nfallback: direct",
+		"global": "fallback: " + proxyGroup,
+	}[id]
+	if rules == "" {
+		return "", fmt.Errorf("unknown preset %q", id)
+	}
+	return "pname(NetworkManager, systemd-resolved, dnsmasq) -> must_direct\n" +
+		"dip(geoip:private) -> direct\n" + rules, nil
+}
+func (stubDriver) DetectRoutingPreset(raw string) string {
+	switch {
+	case strings.Contains(raw, "geosite:gfw"):
+		return "gfw"
+	case strings.Contains(raw, "fallback: proxy"):
+		return "nonCn"
+	}
+	return ""
+}
 func (stubDriver) UpdateConfigField(_ context.Context, id string, field driver.ConfigField, value string) error {
 	return nil
 }
@@ -150,16 +184,22 @@ func (stubDriver) RemoveSubscriptions(_ context.Context, ids []string) error { r
 func (stubDriver) ListSelections(context.Context) (driver.Selections, error) {
 	return driver.Selections{
 		Configs: []driver.ConfigItem{{ID: "c1", Name: "默认", Selected: true, Detail: "log=info",
-			Body: "日志级别:       info",
 			Fields: []driver.ConfigField{
-				{Name: "logLevel", Label: "日志级别", Value: "info", Type: "string"},
-				{Name: "checkInterval", Label: "检查间隔", Value: "30s", Type: "duration"},
+				{Name: "logLevel", Label: "日志级别", Value: "info", Type: "string",
+					Default: "info", Desc: "Log level: error, warn, info, debug, trace."},
+				{Name: "checkInterval", Label: "检查间隔", Value: "30s", Type: "duration", Default: "30s"},
+				{Name: "lanInterface", Value: "eth0", Type: "array"},
 			}}},
 		Dns: []driver.ConfigItem{
-			{ID: "d1", Name: "默认DNS", Selected: true, Body: "upstream {}"},
+			{ID: "d1", Name: "默认DNS", Selected: true, Body: "upstream {}",
+				Summary: []string{"alidns: udp://223.5.5.5:53"}},
 			{ID: "d2", Name: "备用DNS", Selected: false, Body: "upstream {}"},
 		},
-		Routings: []driver.ConfigItem{{ID: "r1", Name: "默认路由", Selected: true, Body: "fallback: direct"}},
+		Routings: []driver.ConfigItem{{ID: "r1", Name: "默认路由", Selected: true,
+			Body: "pname(NetworkManager, systemd-resolved, dnsmasq) -> must_direct\n" +
+				"dip(geoip:private) -> direct\ndip(geoip:cn) -> direct\n" +
+				"domain(geosite:cn) -> direct\nfallback: proxy",
+			Summary: []string{"a(domain: example.com) -> proxy", "fallback: direct"}}},
 	}, nil
 }
 func (stubDriver) SelectConfig(_ context.Context, id string) error  { return nil }
@@ -167,10 +207,32 @@ func (stubDriver) SelectDns(_ context.Context, id string) error     { return nil
 func (stubDriver) SelectRouting(_ context.Context, id string) error { return nil }
 func (stubDriver) Run(ctx context.Context, dry bool) error          { return nil }
 
+// rejectingDriver fails DSL syntax validation, like a daed that cannot parse
+// what $EDITOR left behind.
+type rejectingDriver struct{ stubDriver }
+
+func (rejectingDriver) ValidateDns(_ context.Context, raw string) error {
+	return errors.New("line 1:24 upstream {{{\n                              ^: mismatched input '{' expecting '}'")
+}
+func (rejectingDriver) ValidateRouting(_ context.Context, raw string) error { return nil }
+
+// presetRejectingDriver fails validation of a rendered preset, as a daed
+// would for a proxy group name that cannot be written as DSL.
+type presetRejectingDriver struct{ stubDriver }
+
+func (presetRejectingDriver) ValidateRouting(_ context.Context, raw string) error {
+	return errors.New("line 4:10 fallback: bad group\n                  ^: no viable alternative")
+}
+
 func newTestModel(t *testing.T) tea.Model {
 	t.Helper()
+	return newTestModelWith(t, stubDriver{})
+}
+
+func newTestModelWith(t *testing.T, drv driver.Driver) tea.Model {
+	t.Helper()
 	cfg := &config.Config{Endpoint: "http://127.0.0.1:2023/graphql"}
-	m := New(stubDriver{}, cfg, "/tmp/dae-tui-test.toml")
+	m := New(drv, cfg, "/tmp/dae-tui-test.toml")
 	m2, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
 	m2, _ = m2.Update(bootMsg{Users: 1, Status: driver.Status{Version: "v2.1.1", Running: true}})
 	m2, _ = m2.Update(groupsMsg{Groups: mustGroups(t)})
@@ -342,26 +404,19 @@ func TestGroupsTreeNavigationAndSwitch(t *testing.T) {
 	}
 	m, _ = m.Update(key("enter")) // reopen for the rest of the test
 
-	// rc is on the sub header; j reaches n1; Enter opens the pin confirmation.
+	// Enter on a node row must not pin: the fixed-node flow was removed
+	// (a daed v2 fixed group allows exactly one member, so pinning rebuilt
+	// the whole group). No confirmation, no mutation.
 	m, _ = m.Update(key("j"))
 	m, cmd := m.Update(key("enter"))
-	if v := m.View(); !strings.Contains(v, "固定到节点") {
-		t.Fatalf("pin confirmation missing:\n%s", v)
+	if cmd != nil {
+		t.Fatal("enter on a node row should not fire a cmd")
 	}
-	m, _ = m.Update(key("n")) // decline
-	// Do it again and confirm: y fires pinNodeCmd.
-	m, _ = m.Update(key("enter"))
-	m, cmd = m.Update(key("y"))
-	if cmd == nil {
-		t.Fatal("y should fire pinNodeCmd")
-	}
-	if msg := cmd(); msg != nil {
-		m, _ = m.Update(msg)
+	if v := m.View(); strings.Contains(v, "固定到节点") {
+		t.Fatalf("pin confirmation should be gone:\n%s", v)
 	}
 
-	// g jumps to top (sub row), j to a node, T single-node test.
-	m, _ = m.Update(key("g"))
-	m, _ = m.Update(key("j"))
+	// T still tests the single node under the cursor.
 	m, cmd = m.Update(key("T"))
 	if cmd == nil {
 		t.Fatal("T on node row should fire a test")
@@ -850,9 +905,17 @@ func TestConfigsFieldEdit(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("e on config should not fire a cmd directly")
 	}
-	m, _ = m.Update(key("enter")) // first field (日志级别)
+	// The cursor row shows the backend default next to the current value.
+	if v := m.View(); !strings.Contains(v, "默认 info") {
+		t.Fatalf("field picker should show the default of the cursor row:\n%s", v)
+	}
+	m, _ = m.Update(key("enter")) // first field (日志级别, preferred order)
 	if v := m.View(); !strings.Contains(v, "新值") {
 		t.Fatalf("field input missing:\n%s", v)
+	}
+	// The edit modal carries the backend documentation for the field.
+	if v := m.View(); !strings.Contains(v, "Log level") {
+		t.Fatalf("field input should show the field description:\n%s", v)
 	}
 	m, _ = m.Update(key("d"))
 	m, _ = m.Update(key("e"))
@@ -868,6 +931,129 @@ func TestConfigsFieldEdit(t *testing.T) {
 	}
 }
 
+// A field without a Chinese label (a backend key this build does not know)
+// must still be reachable, falling back to the raw key.
+// The field picker windows its rows: a config exposes every global field
+// (31 on daed v2.1.1), far more than fit on screen, and the cursor must
+// stay visible while scrolling.
+func TestConfigsFieldPickerWindows(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("5"))
+	// Grow the stub's config to a realistic field count.
+	mm := m.(Model)
+	var fields []driver.ConfigField
+	for _, name := range []string{
+		"tproxyPort", "tproxyPortProtect", "soMarkFromDae", "soMarkFromDaeSet", "logLevel",
+		"tcpCheckUrl", "tcpCheckHttpMethod", "udpCheckDns", "checkInterval", "checkTolerance",
+		"lanInterface", "wanInterface", "allowInsecure", "dialMode", "disableWaitingNetwork",
+		"enableLocalTcpFastRedirect", "autoConfigKernelParameter", "autoConfigFirewallRule",
+		"sniffingTimeout", "tlsImplementation", "utlsImitate", "tlsFragment", "tlsFragmentLength",
+		"tlsFragmentInterval", "pprofPort", "mptcp", "bootstrapResolver", "fallbackResolver",
+		"bandwidthMaxTx", "bandwidthMaxRx", "udphopInterval",
+	} {
+		fields = append(fields, driver.ConfigField{Name: name, Value: "v", Type: "string"})
+	}
+	mm.configs.sel.Configs[0].Fields = fields
+	m = mm
+
+	m, _ = m.Update(key("e"))
+	v := m.View()
+	if !strings.Contains(v, "(31)") {
+		t.Fatalf("picker should report the field count:\n%s", v)
+	}
+	if !strings.Contains(v, "1-") || !strings.Contains(v, "/ 31") {
+		t.Fatalf("picker should show the window position:\n%s", v)
+	}
+	// Preferred fields lead, so 日志级别 is on the first screen.
+	if !strings.Contains(v, "日志级别") {
+		t.Fatalf("preferred field should lead the picker:\n%s", v)
+	}
+	// Walk to the bottom; the window follows and the cursor stays visible.
+	for i := 0; i < 40; i++ {
+		m, _ = m.Update(key("j"))
+	}
+	v = m.View()
+	if !strings.Contains(v, "❯") {
+		t.Fatalf("cursor must stay visible after scrolling:\n%s", v)
+	}
+	if !strings.Contains(v, "UDP 跳变间隔") { // last preferred field
+		t.Fatalf("scrolled window should reach the tail fields:\n%s", v)
+	}
+	if !strings.Contains(v, "/ 31，j/k 滚动") {
+		t.Fatalf("scroll hint missing:\n%s", v)
+	}
+}
+
+// A field without a Chinese label (a backend key this build does not know)
+// must still be reachable, falling back to the raw key.
+func TestConfigsFieldFallbackLabel(t *testing.T) {
+	if got := fieldLabel(driver.ConfigField{Name: "someNewField"}); got != "someNewField" {
+		t.Fatalf("fallback label = %q", got)
+	}
+	if got := fieldLabel(driver.ConfigField{Name: "someNewField", Label: "后端标签"}); got != "后端标签" {
+		t.Fatalf("backend label = %q", got)
+	}
+	if got := fieldLabel(driver.ConfigField{Name: "logLevel"}); got != "日志级别" {
+		t.Fatalf("known label = %q", got)
+	}
+	// Preferred fields lead, the rest keep backend order.
+	fields := []driver.ConfigField{
+		{Name: "zzzLast"}, {Name: "logLevel"}, {Name: "mptcp"}, {Name: "aaaFirst"},
+	}
+	ordered := orderedFields(fields)
+	want := []string{"logLevel", "mptcp", "zzzLast", "aaaFirst"}
+	for i, w := range want {
+		if ordered[i].Name != w {
+			t.Fatalf("ordered[%d] = %q, want %q (full: %+v)", i, ordered[i].Name, w, ordered)
+		}
+	}
+}
+
+// The routing/dns detail pane defaults to the raw DSL (what `e` edits); `v`
+// switches to the backend's parsed structure. Showing both at once would
+// print every rule twice for an already-canonical DSL.
+func TestConfigsRoutingSummaryToggle(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("5"))
+	// Flat row order: config c1, dns d1, dns d2, routing r1.
+	for i := 0; i < 3; i++ {
+		m, _ = m.Update(key("j"))
+	}
+	m, _ = m.Update(key("tab"))
+	v := m.View()
+	if !strings.Contains(v, "路由规则 (DSL 原文)") {
+		t.Fatalf("raw DSL should be the default view:\n%s", v)
+	}
+	if strings.Contains(v, "结构概览") {
+		t.Fatalf("summary must not stack on top of the DSL:\n%s", v)
+	}
+	// v switches to the parsed structure.
+	m, _ = m.Update(key("v"))
+	v = m.View()
+	for _, want := range []string{"路由规则 (结构概览)", "a(domain: example.com) -> proxy", "fallback: direct"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("summary view missing %q:\n%s", want, v)
+		}
+	}
+	if strings.Contains(v, "DSL 原文") {
+		t.Fatalf("summary view should replace the DSL, not join it:\n%s", v)
+	}
+	// v switches back.
+	m, _ = m.Update(key("v"))
+	if v := m.View(); !strings.Contains(v, "DSL 原文") || strings.Contains(v, "结构概览") {
+		t.Fatalf("v should toggle back to the raw DSL:\n%s", v)
+	}
+	// The dns profile summarizes its upstreams the same way.
+	m, _ = m.Update(key("h"))
+	m, _ = m.Update(key("g"))
+	m, _ = m.Update(key("j")) // dns d1
+	m, _ = m.Update(key("tab"))
+	m, _ = m.Update(key("v"))
+	if v := m.View(); !strings.Contains(v, "alidns: udp://223.5.5.5:53") {
+		t.Fatalf("dns summary missing:\n%s", v)
+	}
+}
+
 func TestConfigsEditorDoneSubmitsChange(t *testing.T) {
 	m := newTestModel(t)
 	m, _ = m.Update(key("5"))
@@ -877,10 +1063,29 @@ func TestConfigsEditorDoneSubmitsChange(t *testing.T) {
 	mm, cmd := m.Update(editorDoneMsg{Path: tmp, Section: "dns", ID: "d1", Old: "upstream {}"})
 	m = mm
 	if cmd == nil {
-		t.Fatal("changed content should fire configTextCmd")
+		t.Fatal("changed content should fire the syntax validation")
+	}
+	// The temp file must survive until the backend accepted the text.
+	if _, err := os.Stat(tmp); err != nil {
+		t.Fatalf("edited file removed before validation: %v", err)
+	}
+	msg := cmd() // editorValidatedMsg (stub accepts everything)
+	valMsg, ok := msg.(editorValidatedMsg)
+	if !ok {
+		t.Fatalf("msg = %T, want editorValidatedMsg", msg)
+	}
+	if valMsg.Err != nil {
+		t.Fatalf("stub validation should pass: %v", valMsg.Err)
+	}
+	m, cmd = m.Update(msg)
+	if cmd == nil {
+		t.Fatal("validated content should fire configTextCmd")
 	}
 	if msg := cmd(); msg != nil {
 		m, _ = m.Update(msg)
+	}
+	if _, err := os.Stat(tmp); !os.IsNotExist(err) {
+		t.Fatal("edited file should be removed after a successful submit")
 	}
 	// Unchanged content must not fire.
 	tmp2 := filepath.Join(t.TempDir(), "y.dns")
@@ -889,6 +1094,48 @@ func TestConfigsEditorDoneSubmitsChange(t *testing.T) {
 	_ = m2
 	if cmd2 != nil {
 		t.Fatal("unchanged content should not fire a cmd")
+	}
+}
+
+// A DSL the backend cannot parse must never reach updateDns/updateRouting:
+// the edit is rejected, its error shown in the detail pane, and the edited
+// file kept so the work is recoverable.
+func TestConfigsValidationRejectsBrokenDsl(t *testing.T) {
+	m := newTestModelWith(t, rejectingDriver{})
+	m, _ = m.Update(key("5"))
+	m, _ = m.Update(key("j")) // cursor onto the dns profile that gets edited
+	// A short path (t.TempDir embeds the test name) so the assertion can
+	// check the whole path survives the detail pane.
+	tmp := filepath.Join(os.TempDir(), fmt.Sprintf("dae-tui-test-%d.dns", time.Now().UnixNano()))
+	os.WriteFile(tmp, []byte("upstream {{{"), 0o600)
+	defer os.Remove(tmp)
+	mm, cmd := m.Update(editorDoneMsg{Path: tmp, Section: "dns", ID: "d1", Old: "upstream {}"})
+	m = mm
+	if cmd == nil {
+		t.Fatal("changed content should fire the syntax validation")
+	}
+	msg := cmd() // editorValidatedMsg with the parser error
+	valMsg, ok := msg.(editorValidatedMsg)
+	if !ok || valMsg.Err == nil {
+		t.Fatalf("msg = %+v, want a validation error", msg)
+	}
+	m, cmd = m.Update(msg)
+	if cmd == nil {
+		t.Fatal("rejection should surface a toast")
+	}
+	toast, ok := cmd().(opDoneMsg)
+	if !ok || toast.Err == nil {
+		t.Fatalf("expected an error toast, got %+v", toast)
+	}
+	m, _ = m.Update(toast)
+	v := m.View()
+	for _, want := range []string{"校验未通过，未保存", tmp, "mismatched input"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("rejection missing %q:\n%s", want, v)
+		}
+	}
+	if _, err := os.Stat(tmp); err != nil {
+		t.Fatalf("rejected edit must stay on disk: %v", err)
 	}
 }
 
@@ -964,5 +1211,142 @@ func TestFatalAndRetry(t *testing.T) {
 	m2, _ = m2.Update(key("r")) // retry re-boots
 	if v := m2.View(); !strings.Contains(v, "正在连接") && !strings.Contains(v, "无法连接") {
 		t.Fatalf("unexpected view after retry:\n%s", v)
+	}
+}
+
+// The home page's routing quick-switch: presets are listed, the current one
+// is detected, and confirming shows the exact DSL before it replaces the
+// selected routing profile.
+func TestHomeRoutingPresetSwitch(t *testing.T) {
+	m := newTestModel(t)
+	v := m.View()
+	for _, want := range []string{
+		"路由快速切换", "默认路由", "代理组: proxy",
+		"GFW 模式", "中国列表以外", "中国列表", "全局代理",
+		"当前: 中国列表以外", // the stub routing matches the nonCn preset
+	} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("home preset section missing %q:\n%s", want, v)
+		}
+	}
+
+	// j/k moves the preset cursor; enter opens the confirmation showing the
+	// exact DSL y would write.
+	m, _ = m.Update(key("j"))
+	m, _ = m.Update(key("j")) // cursor on 中国列表
+	m, cmd := m.Update(key("enter"))
+	if cmd != nil {
+		t.Fatal("enter should not fire a network cmd before confirmation")
+	}
+	v = m.View()
+	for _, want := range []string{
+		"替换为「中国列表」", "dip(geoip:cn) -> proxy",
+		"domain(geosite:cn) -> proxy", "fallback: direct",
+	} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("confirmation missing %q:\n%s", want, v)
+		}
+	}
+	// Global hotkeys must not fire while the confirmation is open.
+	m, _ = m.Update(key("2"))
+	if mm, _ := m.Update(key("A")); mm.(Model).page != pageHome {
+		t.Fatal("page switched while a confirmation was open")
+	}
+	if v := m.View(); strings.Contains(v, "确认应用当前选中") {
+		t.Fatalf("A fired while the preset confirmation was open:\n%s", v)
+	}
+
+	// g cycles the proxy group and re-renders the preview to match.
+	m, _ = m.Update(key("g"))
+	v = m.View()
+	if !strings.Contains(v, "代理组: direct") {
+		t.Fatalf("g should cycle the proxy group:\n%s", v)
+	}
+	if !strings.Contains(v, "dip(geoip:cn) -> direct") {
+		t.Fatalf("preview should follow the new group:\n%s", v)
+	}
+	m, _ = m.Update(key("g")) // back to proxy
+
+	// n cancels.
+	m, _ = m.Update(key("n"))
+	if v := m.View(); strings.Contains(v, "替换为") {
+		t.Fatalf("confirmation should be gone:\n%s", v)
+	}
+
+	// y validates, then submits: presetValidatedMsg → configTextCmd.
+	m, _ = m.Update(key("enter"))
+	m, cmd = m.Update(key("y"))
+	if cmd == nil {
+		t.Fatal("y should fire presetTextCmd")
+	}
+	msg, ok := cmd().(presetValidatedMsg)
+	if !ok {
+		t.Fatalf("msg = %T, want presetValidatedMsg", msg)
+	}
+	if msg.Err != nil || msg.Section != "routing" || msg.ID != "r1" {
+		t.Fatalf("validated msg = %+v", msg)
+	}
+	m, cmd = m.Update(msg)
+	if cmd == nil {
+		t.Fatal("validated preset should fire configTextCmd")
+	}
+	if done := cmd(); done != nil {
+		m, _ = m.Update(done) // selectionsMsg reload
+	}
+	// After the reload the mode is detected again (the stub's canned
+	// detector still reports nonCn for its routing body).
+	if v := m.View(); !strings.Contains(v, "当前: 中国列表以外") {
+		t.Fatalf("mode not refreshed after submit:\n%s", v)
+	}
+}
+
+// A preset the backend refuses (an unusable group name) must not be written;
+// the error surfaces as a toast and nothing is submitted.
+func TestHomeRoutingPresetRejected(t *testing.T) {
+	m := newTestModelWith(t, presetRejectingDriver{})
+	m, _ = m.Update(key("enter")) // cursor on gfw
+	if v := m.View(); !strings.Contains(v, "替换为「GFW 模式」") {
+		t.Fatalf("confirmation missing:\n%s", v)
+	}
+	m2, cmd := m.Update(key("y"))
+	if cmd == nil {
+		t.Fatal("y should fire the validation cmd")
+	}
+	msg := cmd()
+	m3, toast := m2.Update(msg)
+	if toast == nil {
+		t.Fatal("rejection should surface a toast")
+	}
+	done, ok := toast().(opDoneMsg)
+	if !ok || done.Err == nil {
+		t.Fatalf("expected an error toast, got %+v", done)
+	}
+	m3, _ = m3.Update(done) // the toast itself
+	if v := m3.View(); !strings.Contains(v, "✗ 切换路由") {
+		t.Fatalf("toast missing:\n%s", v)
+	}
+	if v := m3.View(); strings.Contains(v, "替换为") {
+		t.Fatalf("confirmation should be closed after rejection:\n%s", v)
+	}
+}
+
+// With no routing profile the section degrades to a hint instead of a dead
+// Enter.
+func TestHomeNoRoutingProfile(t *testing.T) {
+	m := newTestModel(t)
+	mm := m.(Model)
+	mm.configs.sel.Routings = nil
+	mm.home.handleSelections(mm.configs.sel, nil, stubDriver{})
+	m = mm
+	v := m.View()
+	if !strings.Contains(v, "无路由方案") {
+		t.Fatalf("missing no-routing hint:\n%s", v)
+	}
+	m, cmd := m.Update(key("enter"))
+	if cmd != nil {
+		t.Fatal("enter without a routing profile should do nothing")
+	}
+	if v := m.View(); strings.Contains(v, "替换为") {
+		t.Fatalf("no confirmation without a routing profile:\n%s", v)
 	}
 }

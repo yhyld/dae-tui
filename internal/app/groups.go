@@ -74,7 +74,6 @@ const (
 	pickDeleteGroup
 	inputCreate
 	inputRename
-	pickPin
 	pickRemoveNode
 )
 
@@ -429,7 +428,11 @@ func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			p.directOpen = !p.directOpen
 			p.rebuild()
 		case rowNode:
-			p.mode = pickPin
+			// Pinning a node was removed: daed v2 fixed groups allow
+			// exactly one member, so the old flow silently rebuilt the
+			// whole group (detaching every subscription). Existing fixed
+			// groups are still shown read-only; a/p switch them back to an
+			// automatic policy.
 		}
 	case "x":
 		r := p.cur()
@@ -476,21 +479,6 @@ func (p *groupsPage) pickerKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 				return nil
 			}
 			return groupMutateCmd(d, groupMutation{kind: 4, groupID: g.ID}, "删除群组 "+g.Name)
-		case "n", "esc", "enter":
-			p.mode = pickNone
-		}
-		return nil
-	}
-
-	if p.mode == pickPin {
-		switch msg.String() {
-		case "y":
-			r := p.cur()
-			p.mode = pickNone
-			if r == nil || r.kind != rowNode {
-				return nil
-			}
-			return pinNodeCmd(d, p.groups[r.gi].ID, r.node.ID, ui.SpaceAfterFlag(r.node.Name))
 		case "n", "esc", "enter":
 			p.mode = pickNone
 		}
@@ -685,16 +673,6 @@ func (p groupsPage) rightLines() []string {
 	if p.mode == pickDeleteGroup {
 		if g := p.curGroup(); g != nil {
 			return []string{ui.ErrorStyle.Render("确认删除群组 \"" + g.Name + "\"?  (y/n)")}
-		}
-	}
-	if p.mode == pickPin {
-		if r := p.cur(); r != nil && r.kind == rowNode {
-			return []string{
-				ui.ErrorStyle.Render("固定到节点 \"" + ui.SpaceAfterFlag(r.node.Name) + "\"?  (y/n)"),
-				ui.HelpStyle.Render(" daed v2 语义: fixed 组只能有一个成员节点。"),
-				ui.HelpStyle.Render(" 将移除该组的其他订阅挂载与节点，仅保留此节点"),
-				ui.HelpStyle.Render(" (策略 fixed)。之后可用 s 重新挂载订阅恢复。"),
-			}
 		}
 	}
 	if p.mode == pickRemoveNode {
