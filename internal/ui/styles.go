@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/mattn/go-runewidth"
 )
 
 var (
@@ -49,18 +48,18 @@ func LatencyStyle(ms int, alive, tested bool) lipgloss.Style {
 
 // PadRight pads s with spaces to display width w (CJK-aware).
 func PadRight(s string, w int) string {
-	d := w - runewidth.StringWidth(s)
+	d := w - width(s)
 	if d < 0 {
-		return runewidth.Truncate(s, w, "…")
+		return truncate(s, w)
 	}
 	return s + spaces(d)
 }
 
 // PadLeft right-aligns s in display width w (CJK-aware).
 func PadLeft(s string, w int) string {
-	d := w - runewidth.StringWidth(s)
+	d := w - width(s)
 	if d < 0 {
-		return runewidth.Truncate(s, w, "…")
+		return truncate(s, w)
 	}
 	return spaces(d) + s
 }

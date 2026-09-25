@@ -84,10 +84,11 @@ func fatal(format string, args ...any) {
 	os.Exit(1)
 }
 
-// runProbe exercises the driver end to end without a TTY. Against an
-// api-only daed instance (daed run --api-only) it is side-effect free;
-// against a live daed it only performs read-only calls unless
-// DAE_TUI_PROBE_MUTATE=1.
+// runProbe exercises the driver end to end without a TTY. Everything it
+// calls is read-only, except testNodeLatencies (a harmless probe trigger),
+// which only runs with DAE_TUI_PROBE_MUTATE=1. It deliberately never calls
+// run(): on daed, run(dry:true) stops the proxy, so a self-check must not
+// do it.
 func runProbe(d *daeddrv.Driver) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -150,11 +151,6 @@ func runProbe(d *daeddrv.Driver) {
 			fmt.Println("TestLatency(all):", err)
 		} else {
 			pr("testNodeLatencies triggered")
-		}
-		if err := d.Run(ctx, true); err != nil {
-			fmt.Println("Run(dry):", err)
-		} else {
-			pr("run(dry=true) OK")
 		}
 	}
 	fmt.Println("probe 完成")

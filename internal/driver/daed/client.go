@@ -22,6 +22,9 @@ type Client struct {
 
 	mu    sync.Mutex
 	token string
+	// reauthing marks a re-auth in flight. The hook issues its own requests
+	// through this client, so it must not be allowed to re-enter Do.
+	reauthing bool
 	// onReAuth is invoked when the backend answers "access denied"; it
 	// should refresh the token (e.g. re-run token() with stored
 	// credentials) or return an error.
@@ -72,10 +75,35 @@ func (c *Client) Do(ctx context.Context, query string, vars map[string]any, out 
 	if !isAccessDenied(err) || c.onReAuth == nil {
 		return err
 	}
+	// The re-auth hook talks to this same client, so guard against
+	// re-entry: a token request that itself answers "access denied" would
+	// otherwise send Do recursing without bound until the stack blows.
+	if !c.beginReAuth() {
+		return err
+	}
+	defer c.endReAuth()
 	if rerr := c.onReAuth(c); rerr != nil {
 		return fmt.Errorf("%w: %v", driver.ErrNeedAuth, rerr)
 	}
 	return c.roundTrip(ctx, query, vars, out)
+}
+
+// beginReAuth claims the re-auth slot, reporting false when another
+// goroutine is already refreshing the token.
+func (c *Client) beginReAuth() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.reauthing {
+		return false
+	}
+	c.reauthing = true
+	return true
+}
+
+func (c *Client) endReAuth() {
+	c.mu.Lock()
+	c.reauthing = false
+	c.mu.Unlock()
 }
 
 func (c *Client) roundTrip(ctx context.Context, query string, vars map[string]any, out any) error {

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"dae-tui/internal/driver"
@@ -174,6 +175,29 @@ func TestAccessDeniedWithoutCredentials(t *testing.T) {
 	}
 }
 
+// The re-auth hook refreshes the token by calling this same client. When the
+// token query itself is denied, Do must not re-enter itself: it used to
+// recurse until the goroutine stack ran out.
+func TestAccessDeniedOnTokenQueryDoesNotRecurse(t *testing.T) {
+	calls := 0
+	d, _ := newTestDriver(t, func(op string, vars map[string]any, auth string) (any, []gqlError) {
+		if op == "Token" {
+			calls++
+			return nil, []gqlError{{Message: "access denied"}}
+		}
+		return nil, []gqlError{{Message: "unexpected op " + op}}
+	})
+
+	_, err := d.Login(ctxT(t), "alice", "s3cret1")
+	if err == nil || !strings.Contains(err.Error(), "need authentication") {
+		t.Fatalf("want ErrNeedAuth, got %v", err)
+	}
+	// One attempt for the login itself, one for the re-auth it triggered.
+	if calls != 2 {
+		t.Fatalf("token query ran %d times, want 2 (no further recursion)", calls)
+	}
+}
+
 func TestListGroupsAndFixedIndex(t *testing.T) {
 	d, _ := newTestDriver(t, func(op string, vars map[string]any, auth string) (any, []gqlError) {
 		if op != "Groups" {
@@ -306,6 +330,47 @@ func TestListGroupsFallbackOnOldSchema(t *testing.T) {
 	if richCalls != 1 {
 		t.Fatalf("rich query retried after fallback: %d calls", richCalls)
 	}
+}
+
+// tea.Batch runs commands concurrently, so ListGroups calls overlap: the
+// schema-fallback flag is written by whichever call discovers the old
+// schema while others are still reading it. Run with -race.
+func TestListGroupsConcurrentSchemaFallback(t *testing.T) {
+	var rejected int32
+	d, _ := newTestDriver(t, func(op string, vars map[string]any, auth string) (any, []gqlError) {
+		if op != "Groups" {
+			return nil, []gqlError{{Message: "unexpected op " + op}}
+		}
+		// The first calls hit the rich query and are rejected like an old
+		// daed build would; the rest use the minimal one.
+		if atomic.AddInt32(&rejected, 1) <= 3 {
+			return nil, []gqlError{{Message: `Cannot query field "matchedNodes" on type "GroupSubscription".`}}
+		}
+		return map[string]any{"groups": []any{
+			map[string]any{"id": "1", "name": "proxy", "policy": "random", "nodes": []any{}},
+		}}, nil
+	})
+	ctx := ctxT(t)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 5; j++ {
+				gs, err := d.ListGroups(ctx)
+				if err != nil {
+					t.Errorf("ListGroups: %v", err)
+					return
+				}
+				if len(gs) != 1 || gs[0].Name != "proxy" {
+					t.Errorf("groups = %+v", gs)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func TestListManualNodesFiltersSubscriptionNodes(t *testing.T) {
@@ -473,13 +538,14 @@ func TestRunDryAndSelections(t *testing.T) {
 }
 
 func TestSubscriptionsMapping(t *testing.T) {
-	d, _ := newTestDriver(t, func(op string, vars map[string]any, auth string) (any, []gqlError) {
+	d, m := newTestDriver(t, func(op string, vars map[string]any, auth string) (any, []gqlError) {
 		if op != "Subscriptions" {
 			return nil, []gqlError{{Message: "unexpected op " + op}}
 		}
 		return map[string]any{"subscriptions": []any{map[string]any{
 			"id": "s1", "tag": "机场A", "link": "https://example.com/sub",
 			"status": "updated", "info": "3 nodes", "cronEnable": true,
+			"cronExp":   "0 */6 * * *",
 			"updatedAt": "2026-09-25T10:00:00Z",
 			"nodes":     map[string]any{"totalCount": 3},
 		}}}, nil
@@ -491,6 +557,15 @@ func TestSubscriptionsMapping(t *testing.T) {
 	}
 	if len(subs) != 1 || subs[0].NodeCount != 3 || subs[0].Tag != "机场A" || !subs[0].CronEnable {
 		t.Fatalf("subs = %+v", subs)
+	}
+	if subs[0].CronExp != "0 */6 * * *" {
+		t.Fatalf("CronExp = %q, want %q", subs[0].CronExp, "0 */6 * * *")
+	}
+	// The mock echoes every field it is handed, so a field the query never
+	// selects still unmarshals fine. Assert on the document itself: this is
+	// what catches a query that forgets to ask for cronExp.
+	if q := m.reqs()[0].query; !strings.Contains(q, "cronExp") {
+		t.Fatalf("qSubscriptions does not select cronExp:\n%s", q)
 	}
 }
 

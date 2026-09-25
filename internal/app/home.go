@@ -67,7 +67,7 @@ func (p *homePage) handleKey(msg tea.KeyMsg, d driver.Driver, running bool) tea.
 // currentNode describes what a group is using right now.
 func (p *homePage) currentNode(g driver.Group) (label string, style lipgloss.Style) {
 	if sel := g.SelectedNode(); sel != nil && g.Policy == "fixed" {
-		s := "手动: " + sel.Name
+		s := "手动: " + ui.SpaceAfterFlag(sel.Name)
 		if l, ok := p.lat[sel.ID]; ok && l.Alive && l.Ms > 0 {
 			s += fmt.Sprintf("  (%dms)", l.Ms)
 		}
@@ -78,7 +78,7 @@ func (p *homePage) currentNode(g driver.Group) (label string, style lipgloss.Sty
 	best, bestMs := "", -1
 	for _, n := range g.Members() {
 		if l, ok := p.lat[n.ID]; ok && l.Alive && l.Ms > 0 && (bestMs < 0 || l.Ms < bestMs) {
-			best, bestMs = n.Name, l.Ms
+			best, bestMs = ui.SpaceAfterFlag(n.Name), l.Ms
 		}
 	}
 	auto := map[string]string{

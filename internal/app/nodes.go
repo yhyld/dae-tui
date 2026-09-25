@@ -149,7 +149,7 @@ func (p *nodesPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 				return nil
 			}
 			p.busy = true
-			return nodeMutateCmd(d, nodeMutation{kind: 1, ids: []string{n.ID}}, "删除节点 "+n.Name)
+			return nodeMutateCmd(d, nodeMutation{kind: 1, ids: []string{n.ID}}, "删除节点 "+ui.SpaceAfterFlag(n.Name))
 		case "n", "esc", "enter":
 			p.mode = 0
 		}
@@ -176,7 +176,7 @@ func (p *nodesPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			g := p.groups[p.pickCursor]
 			p.mode = 0
 			return groupMutateCmd(d, groupMutation{kind: 2, groupID: g.ID, ids: []string{n.ID}},
-				"添加节点 "+n.Name+" 到组 "+g.Name)
+				"添加节点 "+ui.SpaceAfterFlag(n.Name)+" 到组 "+g.Name)
 		}
 		return nil
 	}
@@ -290,7 +290,7 @@ func (p nodesPage) View() string {
 	}
 	if p.mode == 2 {
 		if n := p.cur(); n != nil {
-			body += "\n" + ui.ErrorStyle.Render(" 确认删除节点 \""+n.Name+"\"? (y/n)")
+			body += "\n" + ui.ErrorStyle.Render(" 确认删除节点 \""+ui.SpaceAfterFlag(n.Name)+"\"? (y/n)")
 		}
 	}
 	return body
@@ -324,7 +324,7 @@ func (p nodesPage) leftLines() []string {
 			}
 			latStyle = ui.LatencyStyle(l.Ms, l.Alive, true)
 		}
-		lines = append(lines, cursor+" "+ui.PadRight(n.Name, max0(p.leftW-24))+
+		lines = append(lines, cursor+" "+ui.PadRight(ui.SpaceAfterFlag(n.Name), max0(p.leftW-24))+
 			ui.HelpStyle.Render(ui.PadRight(n.Protocol, 8))+
 			latStyle.Render(ui.PadLeft(latStr, 9)))
 	}
@@ -352,7 +352,7 @@ func (p nodesPage) rightLines() []string {
 		return []string{ui.HelpStyle.Render("（无节点）")}
 	}
 	lines := []string{
-		ui.SelectedStyle.Render("名称  ") + n.Name,
+		ui.SelectedStyle.Render("名称  ") + ui.SpaceAfterFlag(n.Name),
 		ui.SelectedStyle.Render("协议  ") + n.Protocol,
 		ui.SelectedStyle.Render("地址  ") + ui.Truncate(n.Address, max0(p.rightW-8)),
 	}

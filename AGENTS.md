@@ -21,7 +21,7 @@ go run ./cmd/dae-tui -probe         # 非交互自检，只读打印后端状态
 ```
 
 Go 1.27.1（go.mod 写 1.27.1）。直接依赖仅 5 个：bubbletea / bubbles / lipgloss /
-BurntSushi-toml / go-runewidth。**不要引入新依赖**，除非确有必要。
+BurntSushi-toml / charmbracelet/x/ansi。**不要引入新依赖**，除非确有必要。
 
 联调（无副作用）：`daed run --api-only -l 127.0.0.1:2024 -c /tmp/daed-dev` 起一个无
 eBPF 的纯 API 实例，再用 `-endpoint http://127.0.0.1:2024/graphql` 指向它。注意
@@ -79,8 +79,14 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   条会被挤出屏幕（这是最早修的滚动 bug）。
 - 弹窗/输入框打开时（`anyModal()`）所有按键——包括 `1`-`5` 翻页热键——必须进弹窗，
   因为名称、cron 表达式、分享链接里全是数字。
-- 宽度计算一律走 `ui.PadRight`/`ui.PadLeft`/`ui.Truncate`（基于 `runewidth`），
-  中文占两列，别用 `fmt` 的 `%*s`。
+- 宽度计算一律走 `ui.PadRight`/`ui.PadLeft`/`ui.Truncate`（内部走
+  `internal/ui/width.go` 的 `ansi.StringWidth`，与 `lipgloss.Width` 同一口径），
+  中文/国旗/emoji 都占两列，别用 `fmt` 的 `%*s`。不要直接引 `runewidth`：
+  它的 `StringWidth` 取每个 grapheme 簇第一个非零宽 rune 的宽度，会把国旗对和
+  "emoji+变体选择符" 少算一列，导致后一列被盖掉。
+- 节点名（`Node.Name`）在**任何**展示点都要过 `ui.SpaceAfterFlag`：订阅节点名常是
+  `🇩🇪Germany 01` 这种旗贴字格式，国旗占两列且字形顶到国家名上，看起来像重叠。
+  列表、详情、标题、toast、确认框一处都不能漏。
 - 延迟色阶：未测/死亡 = 灰，<200ms 绿，<500ms 黄，其余红；自动策略下的"当前节点"是
   估算值，显示时加 `≈` 前缀。
 - 破坏性操作（删组/删节点/删配置/固定节点/停止代理/应用配置）都要 `y` 确认。

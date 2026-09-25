@@ -251,7 +251,39 @@ func (p *configsPage) modalKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	return nil
 }
 
-// editInEditor hands the raw DSL to $EDITOR via tea.ExecProcess.
+// editorArgv resolves which editor to launch for DSL editing. POSIX
+// precedence is VISUAL over EDITOR; when neither is set we fall back to the
+// first editor that exists on this machine, so a minimal image without vi
+// still works. The value may carry arguments ("omarchy-launch-editor
+// --inline"), so it is split into words and exec'd directly: going through a
+// shell with the value quoted looks for one binary whose name contains the
+// spaces and fails with exit 127.
+func editorArgv() ([]string, error) {
+	for _, env := range []string{"VISUAL", "EDITOR"} {
+		if v := strings.TrimSpace(os.Getenv(env)); v != "" {
+			return strings.Fields(v), nil
+		}
+	}
+	for _, name := range []string{"sensible-editor", "editor", "nano", "vim", "vi", "nvim", "micro", "hx"} {
+		if p, err := exec.LookPath(name); err == nil {
+			return []string{p}, nil
+		}
+	}
+	return nil, errors.New("未找到可用的编辑器：请设置 $EDITOR（如 EDITOR=nvim）")
+}
+
+// editorCmd builds the command that opens path in the resolved editor, plus
+// the editor as a display string for error messages.
+func editorCmd(path string) (*exec.Cmd, string, error) {
+	argv, err := editorArgv()
+	if err != nil {
+		return nil, "", err
+	}
+	args := append(append([]string{}, argv[1:]...), path)
+	return exec.Command(argv[0], args...), strings.Join(argv, " "), nil
+}
+
+// editInEditor hands the raw DSL to $VISUAL/$EDITOR via tea.ExecProcess.
 func (p *configsPage) editInEditor(d driver.Driver, r rowRef, it driver.ConfigItem) tea.Cmd {
 	ext := ".conf"
 	if r.section == "dns" {
@@ -268,18 +300,16 @@ func (p *configsPage) editInEditor(d driver.Driver, r rowRef, it driver.ConfigIt
 	}
 	f.Close()
 
-	editor := os.Getenv("EDITOR")
-	if editor == "" {
-		editor = "vi"
+	c, editor, err := editorCmd(f.Name())
+	if err != nil {
+		os.Remove(f.Name())
+		return func() tea.Msg { return opDoneMsg{Op: "编辑", Err: err} }
 	}
 	old := it.Body
 	path, section, id := f.Name(), r.section, it.ID
-	// $EDITOR may carry arguments (e.g. "omarchy-launch-editor --inline"),
-	// so run it through a shell for word splitting.
-	c := exec.Command("sh", "-c", `exec "$EDITOR" "$@"`, "dae-tui-edit", path)
-	c.Env = append(os.Environ(), "EDITOR="+editor)
 	return tea.ExecProcess(c, func(err error) tea.Msg {
-		return editorDoneMsg{Path: path, Section: section, ID: id, Old: old, Err: err}
+		return editorDoneMsg{Path: path, Section: section, ID: id, Old: old, Err: err,
+			Editor: editor}
 	})
 }
 
@@ -287,7 +317,7 @@ func (p *configsPage) editInEditor(d driver.Driver, r rowRef, it driver.ConfigIt
 func (p *configsPage) handleEditorDone(msg editorDoneMsg, d driver.Driver) tea.Cmd {
 	defer os.Remove(msg.Path)
 	if msg.Err != nil {
-		return func() tea.Msg { return opDoneMsg{Op: "编辑", Err: msg.Err} }
+		return func() tea.Msg { return opDoneMsg{Op: "编辑 " + msg.Editor, Err: msg.Err} }
 	}
 	raw, err := os.ReadFile(msg.Path)
 	if err != nil {
@@ -475,8 +505,15 @@ func (p configsPage) modalLines() []string {
 			title += sectionName(r.section)
 		}
 		hint := " Enter 确认  esc 取消"
-		if p.mode == 3 && r != nil && r.section != "config" {
-			hint = " DNS/路由 将以默认模板创建，之后 e 编辑  Enter 确认  esc 取消"
+		if p.mode == 3 && r != nil {
+			// Mirror what CreateProfile actually does: it clones the
+			// selected profile of the section, and only falls back to the
+			// built-in template when there is nothing to clone.
+			what := "默认模板"
+			if src := p.srcProfile(r.section); src != nil && src.Body != "" {
+				what = "当前选中" + sectionName(r.section) + "的内容"
+			}
+			hint = " 将复制" + what + "，之后可 e 编辑  Enter 确认  esc 取消"
 		}
 		return []string{
 			ui.TitleStyle.Render(" " + title),

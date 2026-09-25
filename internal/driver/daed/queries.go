@@ -132,6 +132,7 @@ const qSubscriptions = `query Subscriptions {
 		status
 		info
 		updatedAt
+		cronExp
 		cronEnable
 		nodes { totalCount }
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -87,7 +88,15 @@ func (stubDriver) ListManualNodes(context.Context) ([]driver.Node, error) {
 		{ID: "m2", Name: "自建-SG", Protocol: "trojan"},
 	}, nil
 }
-func (stubDriver) TestLatency(_ context.Context, ids []string) error { return nil }
+
+// lastTestIDs records what the stub was last asked to probe, so tests can
+// tell a whole-group test (every member) from a direct-nodes-only one.
+var lastTestIDs []string
+
+func (stubDriver) TestLatency(_ context.Context, ids []string) error {
+	lastTestIDs = append([]string(nil), ids...)
+	return nil
+}
 func (stubDriver) Latencies(_ context.Context, ids []string) ([]driver.Latency, error) {
 	return []driver.Latency{
 		{NodeID: "n1", Ms: 88, Alive: true, TestedAt: time.Now()},
@@ -215,6 +224,11 @@ func key(s string) tea.KeyMsg {
 	}
 	if s == "shift+tab" {
 		return tea.KeyMsg{Type: tea.KeyShiftTab}
+	}
+	if s == "space" {
+		// What a terminal actually sends: KeyMsg.String() is " " for it,
+		// never the literal "space".
+		return tea.KeyMsg{Type: tea.KeySpace}
 	}
 	if s == "up" {
 		return tea.KeyMsg{Type: tea.KeyUp}
@@ -509,6 +523,25 @@ func TestGlobalApplyWorksFromAnyPage(t *testing.T) {
 	}
 }
 
+// t from the group list must probe every member of the group. daed v2 keeps
+// subscription-contributed nodes out of Group.Nodes, so testing only the
+// direct nodes would silently skip most of the group.
+func TestGroupsWholeGroupTestCoversAllMembers(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("2"))
+	lastTestIDs = nil
+
+	m, cmd := m.Update(key("t"))
+	if cmd == nil {
+		t.Fatal("t on the group list should fire a test")
+	}
+	cmd() // run the cmd against the stub driver
+	// g1: 订阅贡献 n1,n3 + 直接挂载 n2,n3 → 3 distinct members.
+	if len(lastTestIDs) != 3 {
+		t.Fatalf("whole-group test covered %d nodes (%v), want 3", len(lastTestIDs), lastTestIDs)
+	}
+}
+
 func TestGroupLifecycleManagement(t *testing.T) {
 	m := newTestModel(t)
 	m, _ = m.Update(key("2"))
@@ -634,18 +667,99 @@ func TestSubsCronEdit(t *testing.T) {
 	if !strings.Contains(v, "0 */6 * * *") {
 		t.Fatalf("cron modal should show the current expression:\n%s", v)
 	}
-	// type an expression, tab to the toggle, flip it on, submit.
+	// type an expression, tab to the toggle, flip it, submit.
 	m, _ = m.Update(key("0"))
 	m, _ = m.Update(key(" "))
 	m, _ = m.Update(key("tab"))
-	m, cmd := m.Update(key("space")) // toggle enable
-	_ = cmd
+	// The stub subscription starts with cronEnable=true, so the toggle line
+	// reads 启用 before the keypress.
+	if v := m.View(); !strings.Contains(v, "启用") || strings.Contains(v, "停用") {
+		t.Fatalf("toggle should start enabled:\n%s", v)
+	}
+	m, cmd := m.Update(key("space"))
+	if cmd != nil {
+		t.Fatal("space on the toggle should not fire a cmd")
+	}
+	if v := m.View(); !strings.Contains(v, "停用") {
+		t.Fatalf("space did not toggle the enable flag:\n%s", v)
+	}
 	m, cmd = m.Update(key("enter"))
 	if cmd == nil {
 		t.Fatal("cron submit should fire subMutateCmd")
 	}
 	if msg := cmd(); msg != nil {
 		m, _ = m.Update(msg)
+	}
+}
+
+func TestEditorArgvResolution(t *testing.T) {
+	// VISUAL wins over EDITOR, and arguments in the value must stay separate
+	// argv entries: quoting the whole value made the shell look for one
+	// binary literally named "omarchy-launch-editor --inline" (exit 127).
+	t.Setenv("VISUAL", "omarchy-launch-editor --inline")
+	t.Setenv("EDITOR", "vim")
+	argv, err := editorArgv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(argv, "|") != "omarchy-launch-editor|--inline" {
+		t.Fatalf("argv = %v", argv)
+	}
+	if p, err := exec.LookPath(argv[0]); err != nil {
+		t.Fatalf("editor %q is not an executable: %v", argv[0], err)
+	} else {
+		t.Logf("resolves to %s", p)
+	}
+
+	// A blank value counts as unset.
+	t.Setenv("VISUAL", "   ")
+	t.Setenv("EDITOR", "nvim -u NONE")
+	argv, err = editorArgv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(argv, "|") != "nvim|-u|NONE" {
+		t.Fatalf("argv = %v", argv)
+	}
+
+	// With neither set, the fallback must be a real executable.
+	t.Setenv("VISUAL", "")
+	t.Setenv("EDITOR", "")
+	argv, err = editorArgv()
+	if err != nil {
+		t.Skipf("no editor installed here: %v", err)
+	}
+	if _, err := exec.LookPath(argv[0]); err != nil {
+		t.Fatalf("fallback editor %q is not executable: %v", argv[0], err)
+	}
+}
+
+// The command must put the binary in argv[0] and the rest of $EDITOR plus the
+// file path behind it. Treating the whole value as one program name is what
+// produced "exit status 127".
+func TestEditorCmdSplitsArguments(t *testing.T) {
+	t.Setenv("VISUAL", "omarchy-launch-editor --inline")
+	t.Setenv("EDITOR", "vim")
+	c, name, err := editorCmd("/tmp/dae-tui-test.dns")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(c.Args, "|"); got != "omarchy-launch-editor|--inline|/tmp/dae-tui-test.dns" {
+		t.Fatalf("args = %q", got)
+	}
+	if c.Err != nil {
+		t.Fatalf("command not runnable: %v", c.Err)
+	}
+	if name != "omarchy-launch-editor --inline" {
+		t.Fatalf("display name = %q", name)
+	}
+
+	// No editor at all must be an error, not a bogus command.
+	t.Setenv("VISUAL", "")
+	t.Setenv("EDITOR", "")
+	t.Setenv("PATH", "") // hide every fallback candidate
+	if _, _, err := editorCmd("/tmp/x"); err == nil {
+		t.Fatal("expected an error when no editor can be found")
 	}
 }
 
@@ -674,6 +788,12 @@ func TestConfigsProfileManagement(t *testing.T) {
 	m, cmd := m.Update(key("c"))
 	if v := m.View(); !strings.Contains(v, "新建") {
 		t.Fatalf("create modal missing:\n%s", v)
+	}
+	// The hint must describe what CreateProfile really does: clone the
+	// selected profile of the section (the stub's selected dns has a body),
+	// not "created from the default template".
+	if v := m.View(); !strings.Contains(v, "复制当前选中") || strings.Contains(v, "默认模板") {
+		t.Fatalf("create hint should say it clones the selected profile:\n%s", v)
 	}
 	_ = cmd
 	m, _ = m.Update(key("n"))

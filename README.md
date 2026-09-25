@@ -21,7 +21,9 @@ dae 网络代理的终端管理界面（TUI），当前通过 **daed 的 GraphQL
 go build -o dae-tui ./cmd/dae-tui
 ```
 
-依赖：Go 1.22+（开发于 1.27）。仅 4 个直接依赖：bubbletea / bubbles / lipgloss / toml。
+依赖：Go 1.27.1+（go.mod 即此版本）。仅 5 个直接依赖：bubbletea / bubbles /
+lipgloss / toml / charmbracelet-x-ansi（终端单元格宽度计算，与 lipgloss 同口径，
+保证中文与国旗 emoji 占两列时列对齐）。
 
 ## 使用
 
@@ -101,6 +103,10 @@ go test ./...          # driver 单测（httptest mock GraphQL）+ TUI 无头渲
 daed run --api-only -l 127.0.0.1:2024 -c /tmp/daed-dev
 dae-tui -probe -endpoint http://127.0.0.1:2024/graphql
 ```
+
+`-probe` 全程只读，唯一例外是 `DAE_TUI_PROBE_MUTATE=1` 会额外触发一次全节点测速
+（`testNodeLatencies`）。它**永远不会调用 `run()`**：daed 的 `run(dry:true)` 是停止代理
+而不是校验，自检不能把用户的代理停掉。
 
 已知限制：`--api-only` 实例没有运行中的 dae 核心，`testNodeLatencies`/`nodeLatencies`
 会返回 "record not found"；测速需在真实运行的 daed 上验证。

@@ -287,7 +287,7 @@ func (p *subsPage) cronKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			return textinput.Blink
 		}
 		return nil
-	case "space", "j", "k":
+	case " ", "j", "k": // bubbletea reports the space key as " ", not "space"
 		if p.ifld == 1 {
 			p.cronOn = !p.cronOn
 			return nil
@@ -441,8 +441,11 @@ func (p subsPage) rightLines() []string {
 		return []string{ui.HelpStyle.Render("（无订阅）")}
 	}
 	var head []string
-	head = append(head, ui.SelectedStyle.Render("标签 ")+s.Tag+
-		ui.HelpStyle.Render("   cron ")+onOff(s.CronEnable))
+	cron := ui.HelpStyle.Render("   cron ") + onOff(s.CronEnable)
+	if s.CronExp != "" {
+		cron += ui.HelpStyle.Render(" (" + s.CronExp + ")")
+	}
+	head = append(head, ui.SelectedStyle.Render("标签 ")+s.Tag+cron)
 	head = append(head, ui.SelectedStyle.Render("状态 ")+s.Status)
 	head = append(head, ui.SelectedStyle.Render("链接 ")+ui.Truncate(s.Link, max0(p.rightW-8)))
 	if s.Info != "" {
@@ -486,7 +489,7 @@ func (p subsPage) rightLines() []string {
 			latStyle = ui.LatencyStyle(l.Ms, l.Alive, true)
 		}
 		nameW := max0(p.rightW - 24)
-		head = append(head, cursor+" "+ui.PadRight(n.Name, nameW)+
+		head = append(head, cursor+" "+ui.PadRight(ui.SpaceAfterFlag(n.Name), nameW)+
 			ui.HelpStyle.Render(ui.PadRight(n.Protocol, 8))+
 			latStyle.Render(ui.PadLeft(latStr, 9)))
 	}

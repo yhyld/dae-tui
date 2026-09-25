@@ -507,6 +507,7 @@ type editorDoneMsg struct {
 	ID      string
 	Old     string
 	Err     error
+	Editor  string // resolved editor command, for error messages
 }
 
 func runCmd(d driver.Driver, dry bool) tea.Cmd {

@@ -240,7 +240,11 @@ func (p *groupsPage) testIDsFor(onlySelected bool) []string {
 			}
 			return []string{r.node.ID}
 		}
-		nodes = g.Nodes
+		// "Whole group" means every member, including the nodes contributed
+		// by attached subscriptions: Group.Nodes holds only the directly
+		// attached ones in daed v2, while the left pane advertises
+		// len(Members()) as the group's node count.
+		nodes = g.Members()
 	} else {
 		r := p.cur()
 		if r == nil {
@@ -486,7 +490,7 @@ func (p *groupsPage) pickerKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			if r == nil || r.kind != rowNode {
 				return nil
 			}
-			return pinNodeCmd(d, p.groups[r.gi].ID, r.node.ID, r.node.Name)
+			return pinNodeCmd(d, p.groups[r.gi].ID, r.node.ID, ui.SpaceAfterFlag(r.node.Name))
 		case "n", "esc", "enter":
 			p.mode = pickNone
 		}
@@ -502,7 +506,7 @@ func (p *groupsPage) pickerKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 				return nil
 			}
 			return groupMutateCmd(d, groupMutation{kind: 7, groupID: p.groups[r.gi].ID,
-				ids: []string{r.node.ID}}, "移除组内节点 "+r.node.Name)
+				ids: []string{r.node.ID}}, "移除组内节点 "+ui.SpaceAfterFlag(r.node.Name))
 		case "n", "esc", "enter":
 			p.mode = pickNone
 		}
@@ -582,7 +586,7 @@ func (p *groupsPage) pickerKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			node := rows[p.pickCursor].node
 			p.mode = pickNone
 			return groupMutateCmd(d, groupMutation{kind: 2, groupID: g.ID, ids: []string{node.ID}},
-				"添加节点 "+node.Name+" 到组 "+g.Name)
+				"添加节点 "+ui.SpaceAfterFlag(node.Name)+" 到组 "+g.Name)
 		case pickPolicy:
 			choice := policyChoices[p.pickCursor]
 			p.mode = pickNone
@@ -650,7 +654,7 @@ func (p groupsPage) leftLines() []string {
 		}
 		cur := ""
 		if sel := g.SelectedNode(); sel != nil {
-			cur = " → " + sel.Name
+			cur = " → " + ui.SpaceAfterFlag(sel.Name)
 		} else if g.Policy != "fixed" {
 			cur = " · 自动"
 		}
@@ -686,7 +690,7 @@ func (p groupsPage) rightLines() []string {
 	if p.mode == pickPin {
 		if r := p.cur(); r != nil && r.kind == rowNode {
 			return []string{
-				ui.ErrorStyle.Render("固定到节点 \"" + r.node.Name + "\"?  (y/n)"),
+				ui.ErrorStyle.Render("固定到节点 \"" + ui.SpaceAfterFlag(r.node.Name) + "\"?  (y/n)"),
 				ui.HelpStyle.Render(" daed v2 语义: fixed 组只能有一个成员节点。"),
 				ui.HelpStyle.Render(" 将移除该组的其他订阅挂载与节点，仅保留此节点"),
 				ui.HelpStyle.Render(" (策略 fixed)。之后可用 s 重新挂载订阅恢复。"),
@@ -695,7 +699,7 @@ func (p groupsPage) rightLines() []string {
 	}
 	if p.mode == pickRemoveNode {
 		if r := p.cur(); r != nil && r.kind == rowNode {
-			return []string{ui.ErrorStyle.Render("确认将节点 \"" + r.node.Name + "\" 从组中移除?  (y/n)")}
+			return []string{ui.ErrorStyle.Render("确认将节点 \"" + ui.SpaceAfterFlag(r.node.Name) + "\" 从组中移除?  (y/n)")}
 		}
 	}
 	if p.mode == inputCreate {
@@ -796,7 +800,7 @@ func (p groupsPage) renderRow(g *driver.Group, i int) string {
 	if sel := g.SelectedNode(); sel != nil && sel.ID == n.ID {
 		mark = ui.OKStyle.Render("● ")
 	}
-	name := n.Name
+	name := ui.SpaceAfterFlag(n.Name)
 	if r.manual {
 		name += ui.HelpStyle.Render(" (手动)")
 	}
@@ -846,7 +850,7 @@ func (p groupsPage) candidateLines() []string {
 		} else {
 			src = "·手动"
 		}
-		lines = append(lines, style.Render(mark+ui.PadRight(r.node.Name, max0(p.rightW-32)))+
+		lines = append(lines, style.Render(mark+ui.PadRight(ui.SpaceAfterFlag(r.node.Name), max0(p.rightW-32)))+
 			ui.HelpStyle.Render(ui.PadRight(src, 16)+r.node.Protocol))
 	}
 	return append(lines, ui.HelpStyle.Render(" Enter 添加  esc 取消"))
@@ -888,7 +892,7 @@ func policyLabel(g *driver.Group) string {
 	switch g.Policy {
 	case "fixed":
 		if i := g.FixedIndex(); i >= 0 && i < len(g.Nodes) {
-			return "固定 → " + g.Nodes[i].Name
+			return "固定 → " + ui.SpaceAfterFlag(g.Nodes[i].Name)
 		}
 		return "固定"
 	case "min_moving_avg":

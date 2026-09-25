@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"dae-tui/internal/driver"
@@ -35,8 +36,10 @@ type Driver struct {
 	credHook func(username, password string)
 	// groupsFallback is set when the backend's schema lacks the
 	// GroupSubscription type (daed < 2026-04): ListGroups then permanently
-	// uses the minimal query without subscription info.
-	groupsFallback bool
+	// uses the minimal query without subscription info. It is atomic
+	// because tea.Batch runs commands concurrently, so several ListGroups
+	// calls may be in flight at once.
+	groupsFallback atomic.Bool
 }
 
 var _ driver.Driver = (*Driver)(nil)
@@ -137,7 +140,7 @@ func (d *Driver) ListGroups(ctx context.Context) ([]driver.Group, error) {
 	}
 	// Prefer the rich query (group→subscriptions→matched nodes); fall back
 	// to the minimal one on old daed builds that lack GroupSubscription.
-	if !d.groupsFallback {
+	if !d.groupsFallback.Load() {
 		err := d.client.Do(ctx, qGroupsRich, nil, &out)
 		if err == nil {
 			return mapGroups(out.Groups), nil
@@ -145,7 +148,7 @@ func (d *Driver) ListGroups(ctx context.Context) ([]driver.Group, error) {
 		if !strings.Contains(err.Error(), "Cannot query field") {
 			return nil, err
 		}
-		d.groupsFallback = true
+		d.groupsFallback.Store(true)
 		out = struct {
 			Groups []rawGroup `json:"groups"`
 		}{}

@@ -3,8 +3,6 @@ package ui
 import (
 	"fmt"
 	"time"
-
-	"github.com/mattn/go-runewidth"
 )
 
 // Rate formats a bytes/sec value for display.
@@ -55,11 +53,25 @@ func TimeAgo(t time.Time) string {
 
 // Truncate shortens s to display width w with an ellipsis (CJK-aware).
 func Truncate(s string, w int) string {
-	if runewidth.StringWidth(s) <= w {
+	return truncate(s, w)
+}
+
+// SpaceAfterFlag keeps a leading flag emoji from running into the text that
+// follows it. Subscription node names routinely arrive as "🇩🇪Germany 01":
+// a flag occupies two cells and its glyph ends up pressed against the
+// country name, which reads as the two overlapping.
+func SpaceAfterFlag(s string) string {
+	rs := []rune(s)
+	if len(rs) < 3 || !isRegionalIndicator(rs[0]) || !isRegionalIndicator(rs[1]) {
 		return s
 	}
-	if w <= 1 {
-		return "…"
+	// Already spaced, or a second flag follows — leave both alone.
+	if rs[2] == ' ' || isRegionalIndicator(rs[2]) {
+		return s
 	}
-	return runewidth.Truncate(s, w-1, "…")
+	return string(rs[:2]) + " " + string(rs[2:])
+}
+
+func isRegionalIndicator(r rune) bool {
+	return r >= 0x1F1E6 && r <= 0x1F1FF
 }
