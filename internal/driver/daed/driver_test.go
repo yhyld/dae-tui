@@ -76,8 +76,18 @@ func opName(q string) string {
 	return ""
 }
 
-// newTestDriver wires a Driver against a mock server, with credentials so
-// re-auth can be exercised.
+// richQuery reports whether the mock's most recent request was the rich
+// groups query (only it asks for matchedNodes), so a handler can reject
+// exactly what an old daed build would reject — and never a caller's
+// fallback query.
+func richQuery(m *mockGraphQL) bool {
+	reqs := m.reqs()
+	if len(reqs) == 0 {
+		return false
+	}
+	return strings.Contains(reqs[len(reqs)-1].query, "matchedNodes")
+}
+
 func newTestDriver(t *testing.T, handler func(op string, vars map[string]any, auth string) (any, []gqlError)) (*Driver, *mockGraphQL) {
 	t.Helper()
 	m := &mockGraphQL{handler: handler}
@@ -302,21 +312,23 @@ func TestSubscriptionNodesPagination(t *testing.T) {
 }
 
 func TestListGroupsFallbackOnOldSchema(t *testing.T) {
-	richCalls := 0
-	d, _ := newTestDriver(t, func(op string, vars map[string]any, auth string) (any, []gqlError) {
+	var m *mockGraphQL
+	m = &mockGraphQL{handler: func(op string, vars map[string]any, auth string) (any, []gqlError) {
 		if op != "Groups" {
 			return nil, []gqlError{{Message: "unexpected op " + op}}
 		}
-		// The first Groups call is the rich query (a fresh driver tries it
-		// first); reject it like an old daed build would.
-		if richCalls == 0 {
-			richCalls++
+		// Only the rich query (it alone asks for matchedNodes) is rejected,
+		// like an old daed build lacking the GroupSubscription type.
+		if richQuery(m) {
 			return nil, []gqlError{{Message: `Cannot query field "matchedNodes" on type "GroupSubscription".`}}
 		}
 		return map[string]any{"groups": []any{
 			map[string]any{"id": "1", "name": "proxy", "policy": "random", "nodes": []any{}},
 		}}, nil
-	})
+	}}
+	srv := httptest.NewServer(m)
+	t.Cleanup(srv.Close)
+	d := New(Options{Endpoint: srv.URL + "/graphql", Username: "alice", Password: "s3cret1"})
 
 	gs, err := d.ListGroups(ctxT(t))
 	if err != nil {
@@ -328,9 +340,6 @@ func TestListGroupsFallbackOnOldSchema(t *testing.T) {
 	if _, err := d.ListGroups(ctxT(t)); err != nil {
 		t.Fatalf("second ListGroups: %v", err)
 	}
-	if richCalls != 1 {
-		t.Fatalf("rich query retried after fallback: %d calls", richCalls)
-	}
 }
 
 // tea.Batch runs commands concurrently, so ListGroups calls overlap: the
@@ -338,19 +347,25 @@ func TestListGroupsFallbackOnOldSchema(t *testing.T) {
 // schema while others are still reading it. Run with -race.
 func TestListGroupsConcurrentSchemaFallback(t *testing.T) {
 	var rejected int32
-	d, _ := newTestDriver(t, func(op string, vars map[string]any, auth string) (any, []gqlError) {
+	var m *mockGraphQL
+	m = &mockGraphQL{handler: func(op string, vars map[string]any, auth string) (any, []gqlError) {
 		if op != "Groups" {
 			return nil, []gqlError{{Message: "unexpected op " + op}}
 		}
-		// The first calls hit the rich query and are rejected like an old
-		// daed build would; the rest use the minimal one.
-		if atomic.AddInt32(&rejected, 1) <= 3 {
+		// Reject the rich query a few times (concurrent callers all discover
+		// the old schema before the flag propagates). Keying off the query
+		// text — not a call counter — keeps a goroutine's fallback query from
+		// being rejected too, which would make the test racy.
+		if richQuery(m) && atomic.AddInt32(&rejected, 1) <= 3 {
 			return nil, []gqlError{{Message: `Cannot query field "matchedNodes" on type "GroupSubscription".`}}
 		}
 		return map[string]any{"groups": []any{
 			map[string]any{"id": "1", "name": "proxy", "policy": "random", "nodes": []any{}},
 		}}, nil
-	})
+	}}
+	srv := httptest.NewServer(m)
+	t.Cleanup(srv.Close)
+	d := New(Options{Endpoint: srv.URL + "/graphql", Username: "alice", Password: "s3cret1"})
 	ctx := ctxT(t)
 
 	var wg sync.WaitGroup
@@ -947,4 +962,219 @@ func TestDetectRoutingPresetEdgeCases(t *testing.T) {
 func preludeFor() string {
 	return "pname(NetworkManager, systemd-resolved, dnsmasq) -> must_direct\n" +
 		"dip(geoip:private) -> direct"
+}
+
+func TestImportNodesReportsPerLinkResults(t *testing.T) {
+	d, m := newTestDriver(t, func(op string, vars map[string]any, auth string) (any, []gqlError) {
+		if op != "ImportNodes" {
+			return nil, []gqlError{{Message: "unexpected op " + op}}
+		}
+		// Batch semantics: a bad link must not abort the rest.
+		if vars["rollbackError"] != false {
+			t.Errorf("rollbackError = %v, want false", vars["rollbackError"])
+		}
+		return map[string]any{"importNodes": []any{
+			map[string]any{"link": "ss://good", "node": map[string]any{
+				"id": "n1", "name": "good", "protocol": "ss", "link": "ss://good"}},
+			map[string]any{"link": "ss://bad", "error": "unsupported protocol"},
+		}}, nil
+	})
+
+	results, err := d.ImportNodes(ctxT(t), []string{"ss://good", "ss://bad"}, "tag1")
+	if err != nil {
+		t.Fatalf("ImportNodes: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("results = %+v", results)
+	}
+	if results[0].Error != "" || results[0].Node == nil || results[0].Node.ID != "n1" {
+		t.Fatalf("good link result = %+v", results[0])
+	}
+	if results[1].Error != "unsupported protocol" || results[1].Node != nil {
+		t.Fatalf("bad link result = %+v", results[1])
+	}
+	args, ok := m.reqs()[0].vars["args"].([]any)
+	if !ok || len(args) != 2 {
+		t.Fatalf("args = %#v", m.reqs()[0].vars["args"])
+	}
+	if arg, _ := args[0].(map[string]any); arg["tag"] != "tag1" {
+		t.Fatalf("tag not passed through: %#v", arg)
+	}
+
+	// Single-link import delegates to the batch mutation.
+	if err := d.ImportNode(ctxT(t), "ss://good", ""); err != nil {
+		t.Fatalf("ImportNode: %v", err)
+	}
+	last := m.reqs()[1]
+	if last.vars["rollbackError"] != false {
+		t.Fatalf("ImportNode should also use rollbackError=false: %+v", last.vars)
+	}
+}
+
+func TestNodeAndSubscriptionEditMutations(t *testing.T) {
+	d, m := newTestDriver(t, func(op string, vars map[string]any, auth string) (any, []gqlError) {
+		switch op {
+		case "TagNode":
+			return map[string]any{"tagNode": 0}, nil
+		case "UpdateNode":
+			return map[string]any{"updateNode": map[string]any{"id": vars["id"]}}, nil
+		case "TagSubscription":
+			return map[string]any{"tagSubscription": 0}, nil
+		case "UpdateSubscriptionLink":
+			return map[string]any{"updateSubscriptionLink": map[string]any{"id": vars["id"]}}, nil
+		}
+		return nil, []gqlError{{Message: "unexpected op " + op}}
+	})
+
+	if err := d.TagNode(ctxT(t), "n1", "新标签"); err != nil {
+		t.Fatalf("TagNode: %v", err)
+	}
+	if err := d.UpdateNode(ctxT(t), "n1", "ss://new"); err != nil {
+		t.Fatalf("UpdateNode: %v", err)
+	}
+	if err := d.TagSubscription(ctxT(t), "s1", "机场C"); err != nil {
+		t.Fatalf("TagSubscription: %v", err)
+	}
+	if err := d.UpdateSubscriptionLink(ctxT(t), "s1", "https://c.example/sub"); err != nil {
+		t.Fatalf("UpdateSubscriptionLink: %v", err)
+	}
+	reqs := m.reqs()
+	want := []struct{ op, field, val string }{
+		{"TagNode", "tag", "新标签"},
+		{"UpdateNode", "newLink", "ss://new"},
+		{"TagSubscription", "tag", "机场C"},
+		{"UpdateSubscriptionLink", "link", "https://c.example/sub"},
+	}
+	for i, w := range want {
+		if reqs[i].op != w.op {
+			t.Fatalf("req %d op = %q, want %q", i, reqs[i].op, w.op)
+		}
+		if reqs[i].vars[w.field] != w.val {
+			t.Fatalf("req %d %s = %v, want %q", i, w.field, reqs[i].vars[w.field], w.val)
+		}
+	}
+}
+
+func TestInterfacesMappingAndDegradation(t *testing.T) {
+	d, _ := newTestDriver(t, func(op string, vars map[string]any, auth string) (any, []gqlError) {
+		if op != "Interfaces" {
+			return nil, []gqlError{{Message: "unexpected op " + op}}
+		}
+		return map[string]any{"general": map[string]any{"interfaces": []any{
+			map[string]any{"name": "eth0", "ifindex": 2,
+				"ip": []any{"192.168.1.5", "fe80::1"},
+				"flag": map[string]any{"up": true,
+					"default": []any{map[string]any{"ipVersion": "4", "gateway": "192.168.1.1"}}}},
+			map[string]any{"name": "wlan0", "ifindex": 3, "ip": []any{},
+				"flag": map[string]any{"up": false}},
+		}}}, nil
+	})
+
+	ifaces, err := d.Interfaces(ctxT(t))
+	if err != nil {
+		t.Fatalf("Interfaces: %v", err)
+	}
+	if len(ifaces) != 2 {
+		t.Fatalf("ifaces = %+v", ifaces)
+	}
+	if !ifaces[0].Up || !ifaces[0].Default || ifaces[0].Gateway != "192.168.1.1" ||
+		len(ifaces[0].IPs) != 2 {
+		t.Fatalf("eth0 = %+v", ifaces[0])
+	}
+	if ifaces[1].Up || ifaces[1].Default {
+		t.Fatalf("wlan0 = %+v", ifaces[1])
+	}
+
+	// An older daed without general.interfaces degrades to an empty list.
+	old, _ := newTestDriver(t, func(op string, vars map[string]any, auth string) (any, []gqlError) {
+		return nil, []gqlError{{Message: `Cannot query field "interfaces" on type "General".`}}
+	})
+	ifaces, err = old.Interfaces(ctxT(t))
+	if err != nil || len(ifaces) != 0 {
+		t.Fatalf("degraded Interfaces = %+v, %v", ifaces, err)
+	}
+}
+
+func TestSelectionsReferenceGroups(t *testing.T) {
+	d, _ := newTestDriver(t, func(op string, vars map[string]any, auth string) (any, []gqlError) {
+		switch op {
+		case "Selections":
+			return map[string]any{
+				"configs": []any{map[string]any{"id": "c1", "name": "默认", "selected": true,
+					"global": map[string]any{"logLevel": "info"}}},
+				"dnss": []any{},
+				"routings": []any{
+					map[string]any{"id": "r1", "name": "默认路由", "selected": true,
+						"referenceGroups": []any{"proxy", "hk"},
+						"routing":         map[string]any{"string": "fallback: proxy"}},
+					map[string]any{"id": "r2", "name": "自定义", "selected": false,
+						"referenceGroups": []any{},
+						"routing":         map[string]any{"string": "fallback: direct"}},
+				}}, nil
+		case "ConfigFlatDesc":
+			return map[string]any{"configFlatDesc": []any{}}, nil
+		}
+		return nil, []gqlError{{Message: "unexpected op " + op}}
+	})
+
+	sel, err := d.ListSelections(ctxT(t))
+	if err != nil {
+		t.Fatalf("ListSelections: %v", err)
+	}
+	if got := sel.Routings[0].References; len(got) != 2 || got[0] != "proxy" || got[1] != "hk" {
+		t.Fatalf("references = %+v", got)
+	}
+	if len(sel.Routings[1].References) != 0 {
+		t.Fatalf("unexpected references = %+v", sel.Routings[1].References)
+	}
+}
+
+func TestUpdatePasswordPersistsNewToken(t *testing.T) {
+	var saved []string
+	d, m := newTestDriver(t, func(op string, vars map[string]any, auth string) (any, []gqlError) {
+		switch op {
+		case "Token":
+			return map[string]any{"token": "jwt-1"}, nil
+		case "UpdatePassword":
+			if vars["currentPassword"] != "s3cret1" || vars["newPassword"] != "n3wp4ssw0rd" {
+				t.Errorf("vars = %+v", vars)
+			}
+			return map[string]any{"updatePassword": "jwt-3"}, nil
+		}
+		return nil, []gqlError{{Message: "unexpected op " + op}}
+	})
+	d.opts.SaveToken = func(tok string) { saved = append(saved, tok) }
+
+	if err := d.UpdatePassword(ctxT(t), "s3cret1", "n3wp4ssw0rd"); err != nil {
+		t.Fatalf("UpdatePassword: %v", err)
+	}
+	if len(saved) != 1 || saved[0] != "jwt-3" {
+		t.Fatalf("SaveToken calls = %+v", saved)
+	}
+	if d.client.Token() != "jwt-3" {
+		t.Fatalf("client token = %q", d.client.Token())
+	}
+	if d.opts.Password != "n3wp4ssw0rd" {
+		t.Fatalf("stored password not rotated: %q", d.opts.Password)
+	}
+	_ = m
+}
+
+func TestLogoutClearsCredentials(t *testing.T) {
+	d, _ := newTestDriver(t, func(op string, vars map[string]any, auth string) (any, []gqlError) {
+		return map[string]any{"healthCheck": 1}, nil
+	})
+	d.client.SetToken("jwt-1")
+
+	if err := d.Logout(ctxT(t)); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+	if d.client.Token() != "" || d.opts.Username != "" || d.opts.Password != "" {
+		t.Fatalf("credentials survived logout: token=%q user=%q",
+			d.client.Token(), d.opts.Username)
+	}
+	// Subsequent requests go out unauthenticated.
+	if err := d.client.HealthCheck(ctxT(t)); err != nil {
+		t.Fatalf("HealthCheck: %v", err)
+	}
 }

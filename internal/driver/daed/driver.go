@@ -194,7 +194,7 @@ func mapGroups(raw []rawGroup) []driver.Group {
 func mapNode(n rawNode) driver.Node {
 	return driver.Node{
 		ID: n.ID, Name: n.Name, Tag: n.Tag, Protocol: n.Protocol,
-		Address: n.Address, SubscriptionID: n.SubscriptionID,
+		Address: n.Address, Link: n.Link, SubscriptionID: n.SubscriptionID,
 	}
 }
 
@@ -297,16 +297,63 @@ func (d *Driver) RenameGroup(ctx context.Context, groupID, name string) error {
 }
 
 func (d *Driver) ImportNode(ctx context.Context, link, tag string) error {
-	arg := map[string]any{"link": link}
-	if tag != "" {
-		arg["tag"] = tag
+	_, err := d.ImportNodes(ctx, []string{link}, tag)
+	return err
+}
+
+// ImportNodes parses a batch of share links. rollbackError is deliberately
+// false: a batch is usually a paste of many links, and one malformed entry
+// must not discard the good ones — the per-link results say which failed.
+func (d *Driver) ImportNodes(ctx context.Context, links []string, tag string) ([]driver.NodeImportResult, error) {
+	if len(links) == 0 {
+		return nil, nil
 	}
-	vars := map[string]any{"rollbackError": true, "args": []any{arg}}
-	return d.client.Do(ctx, mImportNodes, vars, nil)
+	args := make([]any, 0, len(links))
+	for _, link := range links {
+		arg := map[string]any{"link": link}
+		if tag != "" {
+			arg["tag"] = tag
+		}
+		args = append(args, arg)
+	}
+	var out struct {
+		ImportNodes []rawNodeImportResult `json:"importNodes"`
+	}
+	if err := d.client.Do(ctx, mImportNodes,
+		map[string]any{"rollbackError": false, "args": args}, &out); err != nil {
+		return nil, err
+	}
+	results := make([]driver.NodeImportResult, 0, len(out.ImportNodes))
+	for _, r := range out.ImportNodes {
+		res := driver.NodeImportResult{Link: r.Link}
+		if r.Error != nil {
+			// daed echoes raw parser bytes for malformed links; they are
+			// unprintable in a terminal, so keep only printable runes.
+			res.Error = printable(*r.Error)
+		}
+		if r.Node != nil {
+			n := mapNode(*r.Node)
+			res.Node = &n
+		}
+		results = append(results, res)
+	}
+	return results, nil
 }
 
 func (d *Driver) RemoveNodes(ctx context.Context, nodeIDs []string) error {
 	return d.client.Do(ctx, mRemoveNodes, map[string]any{"ids": nodeIDs}, nil)
+}
+
+// TagNode / UpdateNode edit a manual node in place. Keeping the node ID is
+// the whole point: group memberships reference nodes by ID, so the
+// remove-and-re-import workaround silently detached the node from its
+// groups (the new node carries a fresh ID).
+func (d *Driver) TagNode(ctx context.Context, id, tag string) error {
+	return d.client.Do(ctx, mTagNode, map[string]any{"id": id, "tag": tag}, nil)
+}
+
+func (d *Driver) UpdateNode(ctx context.Context, id, newLink string) error {
+	return d.client.Do(ctx, mUpdateNode, map[string]any{"id": id, "newLink": newLink}, nil)
 }
 
 // SubscriptionNodes walks the nodes connection (cursor = node ID) until
@@ -432,6 +479,17 @@ func (d *Driver) UpdateSubscriptionCron(ctx context.Context, id, cronExp string,
 		map[string]any{"id": id, "cronExp": cronExp, "cronEnable": enable}, nil)
 }
 
+// TagSubscription / UpdateSubscriptionLink edit a subscription in place.
+// Groups attach to subscriptions by ID, so editing (instead of removing and
+// re-adding) is what keeps those attachments alive.
+func (d *Driver) TagSubscription(ctx context.Context, id, tag string) error {
+	return d.client.Do(ctx, mTagSubscription, map[string]any{"id": id, "tag": tag}, nil)
+}
+
+func (d *Driver) UpdateSubscriptionLink(ctx context.Context, id, link string) error {
+	return d.client.Do(ctx, mUpdateSubscriptionLink, map[string]any{"id": id, "link": link}, nil)
+}
+
 func (d *Driver) ListSelections(ctx context.Context) (driver.Selections, error) {
 	var out struct {
 		Configs  []rawConfig      `json:"configs"`
@@ -456,7 +514,7 @@ func (d *Driver) ListSelections(ctx context.Context) (driver.Selections, error) 
 	}
 	for _, x := range out.Routings {
 		sel.Routings = append(sel.Routings, driver.ConfigItem{ID: x.ID, Name: x.Name, Selected: x.Selected,
-			Body: x.Routing.String, Summary: routingSummary(x.Routing)})
+			Body: x.Routing.String, Summary: routingSummary(x.Routing), References: x.ReferenceGroups})
 	}
 	return sel, nil
 }
@@ -828,6 +886,88 @@ func (d *Driver) UpdateConfigFields(ctx context.Context, id string, fields []dri
 
 func (d *Driver) Run(ctx context.Context, dry bool) error {
 	return d.client.Do(ctx, mRun, map[string]any{"dry": dry}, nil)
+}
+
+// Interfaces lists the NICs daed sees. A backend without the field (or one
+// that refuses the query) yields an empty list: interface data is advisory,
+// used for hints and the home page's network state.
+func (d *Driver) Interfaces(ctx context.Context) ([]driver.NetworkInterface, error) {
+	var out struct {
+		General rawGeneralWithInterfaces `json:"general"`
+	}
+	if err := d.client.Do(ctx, qInterfaces, nil, &out); err != nil {
+		if strings.Contains(err.Error(), "Cannot query field") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	ifaces := make([]driver.NetworkInterface, 0, len(out.General.Interfaces))
+	for _, i := range out.General.Interfaces {
+		iface := driver.NetworkInterface{Name: i.Name, Up: i.Flag.Up, IPs: stripPrefixLen(i.IP)}
+		for _, dr := range i.Flag.Default {
+			iface.Default = true
+			if iface.Gateway == "" {
+				iface.Gateway = dr.Gateway
+			}
+		}
+		ifaces = append(ifaces, iface)
+	}
+	return ifaces, nil
+}
+
+// stripPrefixLen turns "192.168.5.43/24" into "192.168.5.43": the prefix
+// length is routing trivia on a status line.
+func stripPrefixLen(ips []string) []string {
+	out := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		if i := strings.IndexByte(ip, '/'); i >= 0 {
+			ip = ip[:i]
+		}
+		out = append(out, ip)
+	}
+	return out
+}
+
+// printable drops control and other non-printable runes (daed's parser
+// errors embed raw bytes of the offending link).
+func printable(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+// UpdatePassword changes the signed-in account's password. daed answers with
+// a fresh token and invalidates the old one, so the new token and the new
+// password (what silent re-auth replays) must both be persisted.
+func (d *Driver) UpdatePassword(ctx context.Context, currentPassword, newPassword string) error {
+	var out struct {
+		UpdatePassword string `json:"updatePassword"`
+	}
+	if err := d.client.Do(ctx, mUpdatePassword,
+		map[string]any{"currentPassword": currentPassword, "newPassword": newPassword}, &out); err != nil {
+		return err
+	}
+	d.opts.Password = newPassword
+	d.client.SetToken(out.UpdatePassword)
+	if d.opts.SaveToken != nil {
+		d.opts.SaveToken(out.UpdatePassword)
+	}
+	if d.credHook != nil {
+		d.credHook(d.opts.Username, newPassword)
+	}
+	return nil
+}
+
+// Logout forgets the local session. daed has no logout mutation — the JWT
+// stays valid until it expires — so all this can do is stop replaying the
+// stored credentials.
+func (d *Driver) Logout(ctx context.Context) error {
+	d.opts.Username, d.opts.Password, d.opts.Token = "", "", ""
+	d.client.SetToken("")
+	return nil
 }
 
 // --- helpers ---

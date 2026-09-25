@@ -3,6 +3,7 @@
 package app
 
 import (
+	"context"
 	"strings"
 	"time"
 
@@ -104,6 +105,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.n%5 == 0 {
 				cmds = append(cmds, statusCmd(m.drv))
 			}
+			// NICs change rarely, but a DHCP renewal is exactly the kind of
+			// change worth seeing without a manual refresh.
+			if msg.n%10 == 0 {
+				cmds = append(cmds, loadInterfacesCmd(m.drv))
+			}
 			// Background latency data: probes are triggered once at
 			// startup (see initialLoad) and manually via t/T; results are
 			// polled every 3s so latency columns stay fresh.
@@ -142,8 +148,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		// credentials were persisted by the driver's SaveToken hook
+		m.home.user = m.cfg.Username
 		m.enterMain()
 		return m, m.initialLoad()
+
+	case logoutMsg:
+		// Forget the session locally: daed's JWT stays valid until it
+		// expires, but this machine must stop replaying the credentials.
+		m.cfg.Username, m.cfg.Password, m.cfg.Token = "", "", ""
+		if err := m.cfg.Save(m.cfgPath); err != nil {
+			m.showToast("✗ 清除本机凭据失败: " + shortErr(err))
+		}
+		m.drv.Logout(context.Background())
+		m.home.user = ""
+		m.phase = phaseLogin
+		m.login = newLoginForm(false)
+		return m, m.login.init()
 
 	case statusMsg:
 		if msg.Err == nil {
@@ -163,11 +183,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.groups.handleGroups(msg.Groups, msg.Err)
 		m.home.handleGroups(msg.Groups, msg.Err)
 		m.nodes.setGroups(msg.Groups)
+		m.configs.setGroups(msg.Groups)
 		return m, nil
 
 	case manualNodesMsg:
 		m.groups.handleManualNodes(msg.Nodes, msg.Err)
 		m.nodes.handleNodes(msg.Nodes, msg.Err)
+		return m, nil
+
+	case importDoneMsg:
+		m.nodes.handleImport(msg)
+		m.showToast(m.nodes.importToast())
+		return m, nil
+
+	case nodesChangedMsg:
+		m.nodes.handleNodes(msg.Nodes, msg.Err)
+		m.groups.handleGroups(msg.Groups, nil)
+		m.nodes.setGroups(msg.Groups)
 		return m, nil
 
 	case attachCandidatesMsg:
@@ -193,6 +225,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case selectionsMsg:
 		m.configs.handleSelections(msg.Sel, msg.Err)
 		m.home.handleSelections(msg.Sel, msg.Err, m.drv)
+		m.groups.setReferences(msg.Sel.Routings)
+		return m, nil
+
+	case ifacesMsg:
+		m.home.setInterfaces(msg.Ifaces)
+		m.configs.setInterfaces(msg.Ifaces)
 		return m, nil
 
 	case editorDoneMsg:
@@ -228,6 +266,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *Model) enterMain() {
 	m.phase = phaseMain
 	m.page = pageHome
+	m.home.user = m.cfg.Username
 }
 
 func (m *Model) initialLoad() tea.Cmd {
@@ -236,6 +275,7 @@ func (m *Model) initialLoad() tea.Cmd {
 		loadSubsCmd(m.drv),
 		loadSelectionsCmd(m.drv),
 		loadManualNodesCmd(m.drv),
+		loadInterfacesCmd(m.drv),
 		trafficCmd(m.drv),
 		testLatencyCmd(m.drv, nil), // populate latency data for the home page
 	)
@@ -390,16 +430,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) anyModal() bool {
 	switch m.page {
 	case pageTree:
-		return m.groups.mode != pickNone
+		return m.groups.mode != pickNone || m.groups.nodeView.open
 	case pageSubs:
-		return m.subs.mode != 0
+		return m.subs.mode != 0 || m.subs.nodeView.open
 	case pageNodes:
-		return m.nodes.mode != 0
+		return m.nodes.mode != 0 || m.nodes.nodeView.open
 	case pageConfigs:
 		return m.configs.mode != 0
 	case pageHome:
 		// A confirmation must be answered before any global hotkey fires.
-		return m.home.confirmSwitch || m.home.confirmPreset >= 0
+		return m.home.confirmSwitch || m.home.confirmPreset >= 0 || m.home.acct != 0
 	}
 	return false
 }
@@ -408,7 +448,7 @@ func (m Model) anyModal() bool {
 func (m *Model) forceRefresh() tea.Cmd {
 	switch m.page {
 	case pageHome:
-		return tea.Batch(statusCmd(m.drv), loadGroupsCmd(m.drv), trafficCmd(m.drv))
+		return tea.Batch(statusCmd(m.drv), loadGroupsCmd(m.drv), trafficCmd(m.drv), loadInterfacesCmd(m.drv))
 	case pageTree:
 		return loadGroupsCmd(m.drv)
 	case pageSubs:
@@ -416,7 +456,7 @@ func (m *Model) forceRefresh() tea.Cmd {
 	case pageNodes:
 		return loadManualNodesCmd(m.drv)
 	case pageConfigs:
-		return loadSelectionsCmd(m.drv)
+		return tea.Batch(loadSelectionsCmd(m.drv), loadInterfacesCmd(m.drv))
 	}
 	return nil
 }
@@ -524,13 +564,13 @@ func (m Model) helpLine() string {
 	var keys string
 	switch m.page {
 	case pageHome:
-		keys = "o 开关代理  j/k+Enter 切换路由  g 换组  A 应用  r 刷新"
+		keys = "o 开关代理  j/k+Enter 切换路由  g 换组  P 账户  A 应用  r 刷新"
 	case pageTree:
-		keys = "j/k 移动  Tab/l 展开  Enter(分区)开合  a 自动策略  x 移除  c/R/D/p 建组/改名/删除/策略  s/n 挂订阅/加节点  t 测速"
+		keys = "j/k 移动  Tab/l 展开  Enter(分区)开合  a 自动策略  x 移除  c/R/D/p 建组/改名/删除/策略  s/n 挂订阅/加节点  t 测速  / 过滤  o 排序"
 	case pageSubs:
-		keys = "j/k 移动  Tab/l 看节点  u 更新  n 新增  x 删除  c 定时刷新  t 测速"
+		keys = "j/k 移动  Tab/l 看节点  u 更新  e 编辑标签/链接  n 新增  x 删除  c 定时刷新  t 测速  / 过滤  o 排序"
 	case pageNodes:
-		keys = "j/k 移动  a 导入  x 删除  t/T 测速  Tab 后 G 加入群组"
+		keys = "j/k 移动  a 批量导入  e 编辑标签/链接  x 删除  t/T 测速  Tab 后 G 加入群组  / 过滤  o 排序"
 	case pageConfigs:
 		keys = "j/k 移动  Enter 选择  e 编辑(DSL 先校验)  v 概览/原文  c/R/D 新建/改名/删除  Tab/l 滚动  A 应用(全局)"
 	default:

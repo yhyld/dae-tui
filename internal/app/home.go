@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -20,7 +21,25 @@ type homePage struct {
 	lat    map[string]driver.Latency
 	trafficPage
 
+	// network state: the NICs the backend sees, plus the interfaces the
+	// selected config binds to. daed binds by interface name, so a config
+	// pointing at a NIC that no longer exists is a classic silent breakage.
+	ifaces []driver.NetworkInterface
+	lanIf  []string
+	wanIf  []string
+
 	confirmSwitch bool
+
+	// account menu (P): password change and logout. daed allows exactly one
+	// user, so the menu only needs those two entries.
+	acct     int // 0 none, 1 menu, 2 password form, 3 logout confirm
+	acctCur  int
+	user     string
+	pwFocus  int // 0 current, 1 new, 2 confirm
+	pwCur    textinput.Model
+	pwNew    textinput.Model
+	pwRepeat textinput.Model
+	pwErr    string
 
 	// routing quick-switch: the selected routing profile plus the presets
 	// that can replace it.
@@ -41,7 +60,21 @@ type homePage struct {
 }
 
 func newHomePage() homePage {
-	return homePage{lat: map[string]driver.Latency{}, confirmPreset: -1}
+	p := homePage{lat: map[string]driver.Latency{}, confirmPreset: -1}
+	p.pwCur = newPasswordInput("当前密码")
+	p.pwNew = newPasswordInput("新密码 (至少6位, 含字母和数字)")
+	p.pwRepeat = newPasswordInput("确认新密码")
+	return p
+}
+
+func newPasswordInput(placeholder string) textinput.Model {
+	ti := textinput.New()
+	ti.Placeholder = placeholder
+	ti.EchoMode = textinput.EchoPassword
+	ti.EchoCharacter = '•'
+	ti.CharLimit = 128
+	ti.Width = 28
+	return ti
 }
 
 func (p *homePage) setSize(w, h int) {
@@ -58,10 +91,20 @@ func (p *homePage) handleGroups(groups []driver.Group, err error) {
 }
 
 // handleSelections tracks the selected routing profile: which preset (if
-// any) it currently is, and which proxy group the presets should target.
+// any) it currently is, and which proxy group the presets should target. It
+// also records the interfaces the selected config binds to, so the home page
+// can flag a NIC that no longer exists.
 func (p *homePage) handleSelections(sel driver.Selections, err error, d driver.Driver) {
 	if err != nil {
 		return
+	}
+	for _, c := range sel.Configs {
+		if !c.Selected {
+			continue
+		}
+		p.lanIf = ifaceNames(c, "lanInterface")
+		p.wanIf = ifaceNames(c, "wanInterface")
+		break
 	}
 	for _, r := range sel.Routings {
 		if !r.Selected {
@@ -73,6 +116,72 @@ func (p *homePage) handleSelections(sel driver.Selections, err error, d driver.D
 		return
 	}
 	p.routingID, p.routingName, p.routingBody, p.routingMode = "", "", "", ""
+}
+
+func (p *homePage) setInterfaces(ifaces []driver.NetworkInterface) {
+	p.ifaces = ifaces
+}
+
+// ifaceNames lists the NICs an interface field binds to ("auto" excluded).
+func ifaceNames(it driver.ConfigItem, key string) []string {
+	for _, f := range it.Fields {
+		if f.Name != key {
+			continue
+		}
+		return configuredIfaces(f.Value)
+	}
+	return nil
+}
+
+func (p homePage) hasIface(name string) bool {
+	for _, i := range p.ifaces {
+		if i.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// netSection shows the NICs the backend sees (with addresses and default
+// routes) and warns when the selected config binds to an interface that is
+// gone — DHCP renames and replugged USB NICs make that common, and the
+// symptom (proxy silently passing nothing) is invisible without this.
+func (p homePage) netSection() string {
+	if len(p.ifaces) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(p.ifaces))
+	for _, i := range p.ifaces {
+		s := i.Name + " "
+		if i.Up {
+			s += "↑"
+		} else {
+			s += "↓"
+		}
+		if ips := strings.Join(i.IPs, ","); ips != "" {
+			s += " " + ips
+		}
+		if i.Default {
+			s += " 默认路由"
+		}
+		parts = append(parts, s)
+	}
+	var b strings.Builder
+	b.WriteString(ui.TitleStyle.Render(" 网络") + "  " +
+		ui.Truncate(strings.Join(parts, "   "), max0(p.width-8)) + "\n")
+	for _, w := range []struct {
+		label string
+		names []string
+	}{{"WAN", p.wanIf}, {"LAN", p.lanIf}} {
+		for _, n := range w.names {
+			if p.hasIface(n) {
+				continue
+			}
+			b.WriteString(ui.ErrorStyle.Render(" ⚠ 配置的 "+w.label+" 接口 "+n+
+				" 不存在（daed 按网卡名绑定，DHCP 改名或换网口后需更新配置）") + "\n")
+		}
+	}
+	return b.String()
 }
 
 // rederiveGroupIdx points the proxy group at one the current routing already
@@ -152,6 +261,9 @@ func (p *homePage) handleLatencies(lats []driver.Latency) {
 }
 
 func (p *homePage) handleKey(msg tea.KeyMsg, d driver.Driver, running bool) tea.Cmd {
+	if p.acct != 0 {
+		return p.acctKey(msg, d)
+	}
 	if p.confirmPreset >= 0 {
 		switch msg.String() {
 		case "y":
@@ -187,6 +299,9 @@ func (p *homePage) handleKey(msg tea.KeyMsg, d driver.Driver, running bool) tea.
 	switch msg.String() {
 	case "o":
 		p.confirmSwitch = true
+	case "P":
+		p.acct = 1
+		p.acctCur = 0
 	case "j", "down":
 		if p.presetCursor < len(p.presets)-1 {
 			p.presetCursor++
@@ -219,6 +334,157 @@ func (p *homePage) handleValidated(msg presetValidatedMsg, d driver.Driver) tea.
 		return func() tea.Msg { return opDoneMsg{Op: "切换路由", Err: msg.Err} }
 	}
 	return configTextCmd(d, msg.Section, msg.ID, msg.Text, msg.Label)
+}
+
+// acctKey drives the account menu (P), the password form and the logout
+// confirmation.
+func (p *homePage) acctKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
+	switch p.acct {
+	case 1: // menu
+		switch msg.String() {
+		case "esc":
+			p.acct = 0
+		case "j", "down":
+			if p.acctCur < 1 {
+				p.acctCur++
+			}
+		case "k", "up":
+			if p.acctCur > 0 {
+				p.acctCur--
+			}
+		case "enter":
+			if p.acctCur == 0 {
+				p.acct = 2
+				p.pwFocus = 0
+				p.pwErr = ""
+				p.pwCur.SetValue("")
+				p.pwNew.SetValue("")
+				p.pwRepeat.SetValue("")
+				p.pwCur.Focus()
+				p.pwNew.Blur()
+				p.pwRepeat.Blur()
+				return textinput.Blink
+			}
+			p.acct = 3
+		}
+		return nil
+
+	case 2: // password form
+		switch msg.String() {
+		case "esc":
+			p.acct = 1
+			p.pwCur.Blur()
+			p.pwNew.Blur()
+			p.pwRepeat.Blur()
+			return nil
+		case "tab", "shift+tab", "up", "down":
+			delta := 1
+			if msg.String() == "shift+tab" || msg.String() == "up" {
+				delta = -1
+			}
+			p.pwFocus = (p.pwFocus + delta + 3) % 3
+			p.setPwFocus()
+			return textinput.Blink
+		case "enter":
+			cur := p.pwCur.Value()
+			nw := p.pwNew.Value()
+			if cur == "" || nw == "" {
+				p.pwErr = "当前密码和新密码不能为空"
+				return nil
+			}
+			if nw != p.pwRepeat.Value() {
+				p.pwErr = "两次输入的新密码不一致"
+				return nil
+			}
+			if len(nw) < 6 {
+				p.pwErr = "新密码至少 6 位"
+				return nil
+			}
+			p.pwErr = ""
+			p.acct = 0
+			p.pwCur.Blur()
+			p.pwNew.Blur()
+			p.pwRepeat.Blur()
+			return passwordCmd(d, cur, nw)
+		}
+		var cmd tea.Cmd
+		switch p.pwFocus {
+		case 0:
+			p.pwCur, cmd = p.pwCur.Update(msg)
+		case 1:
+			p.pwNew, cmd = p.pwNew.Update(msg)
+		case 2:
+			p.pwRepeat, cmd = p.pwRepeat.Update(msg)
+		}
+		return cmd
+
+	case 3: // logout confirm
+		switch msg.String() {
+		case "y":
+			p.acct = 0
+			return func() tea.Msg { return logoutMsg{} }
+		case "n", "esc":
+			p.acct = 1
+		}
+		return nil
+	}
+	return nil
+}
+
+func (p *homePage) setPwFocus() {
+	p.pwCur.Blur()
+	p.pwNew.Blur()
+	p.pwRepeat.Blur()
+	switch p.pwFocus {
+	case 0:
+		p.pwCur.Focus()
+	case 1:
+		p.pwNew.Focus()
+	case 2:
+		p.pwRepeat.Focus()
+	}
+}
+
+// acctSection renders the account UI inside the home page.
+func (p homePage) acctSection() string {
+	switch p.acct {
+	case 1:
+		lines := []string{ui.TitleStyle.Render(" 账户"), "",
+			ui.HelpStyle.Render(" 当前用户  " + p.user), ""}
+		items := []string{"修改密码", "退出登录"}
+		for i, it := range items {
+			mark, style := "  ", ui.HelpStyle
+			if i == p.acctCur {
+				mark, style = "❯ ", ui.CursorStyle
+			}
+			lines = append(lines, style.Render(mark+it))
+		}
+		return strings.Join(lines, "\n") + "\n" +
+			ui.HelpStyle.Render(" j/k 选择  Enter 确认  esc 返回") + "\n"
+	case 2:
+		var b strings.Builder
+		b.WriteString(ui.TitleStyle.Render(" 修改密码") + "\n\n")
+		for i, f := range []struct {
+			label string
+			input textinput.Model
+		}{
+			{"当前密码", p.pwCur}, {"新密码", p.pwNew}, {"确认新密码", p.pwRepeat},
+		} {
+			style := ui.HelpStyle
+			if i == p.pwFocus {
+				style = ui.SelectedStyle
+			}
+			b.WriteString(style.Render(" "+ui.PadRight(f.label, 10)) + " " + f.input.View() + "\n")
+		}
+		if p.pwErr != "" {
+			b.WriteString("\n" + ui.ErrorStyle.Render(" ✗ "+p.pwErr) + "\n")
+		}
+		b.WriteString("\n" + ui.HelpStyle.Render(" Tab 切换  Enter 提交  esc 返回") + "\n")
+		return b.String()
+	case 3:
+		return ui.ErrorStyle.Render(" ▸ 确认退出登录? 将清除本机保存的密码与 token (y/n)") + "\n"
+	}
+	return ""
 }
 
 var presetLabels = map[string]string{
@@ -304,6 +570,9 @@ func (p homePage) View(status driver.Status) string {
 		}
 		b.WriteString(ui.ErrorStyle.Render(" ▸ 确认"+verb+"代理? (y/n)") + "\n")
 	}
+	if acct := p.acctSection(); acct != "" {
+		b.WriteString(acct)
+	}
 	b.WriteString("\n")
 
 	// --- traffic charts (smaller than the old full page) ---
@@ -324,6 +593,12 @@ func (p homePage) View(status driver.Status) string {
 		"\n\n" + ui.HelpStyle.Render("每秒自动刷新 (runtimeOverview)")
 	b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, left, "    ", right))
 	b.WriteString("\n\n")
+
+	// --- network state ---
+	if net := p.netSection(); net != "" {
+		b.WriteString(net)
+		b.WriteString("\n")
+	}
 
 	// --- routing quick-switch ---
 	b.WriteString(p.routingSection())

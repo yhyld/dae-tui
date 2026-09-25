@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -70,7 +71,27 @@ func (stubDriver) CreateGroup(_ context.Context, name string, policy string) err
 func (stubDriver) RemoveGroup(_ context.Context, groupID string) error             { return nil }
 func (stubDriver) RenameGroup(_ context.Context, groupID, name string) error       { return nil }
 func (stubDriver) ImportNode(_ context.Context, link, tag string) error            { return nil }
-func (stubDriver) RemoveNodes(_ context.Context, nodeIDs []string) error           { return nil }
+func (stubDriver) ImportNodes(_ context.Context, links []string, tag string) ([]driver.NodeImportResult, error) {
+	out := make([]driver.NodeImportResult, 0, len(links))
+	for i, l := range links {
+		r := driver.NodeImportResult{Link: l}
+		if strings.Contains(l, "bad") {
+			r.Error = "unsupported protocol"
+			out = append(out, r)
+			continue
+		}
+		n := driver.Node{ID: fmt.Sprintf("imp%d", i), Name: "导入-" + fmt.Sprint(i+1),
+			Protocol: "vmess", Link: l, Tag: tag}
+		r.Node = &n
+		out = append(out, r)
+	}
+	return out, nil
+}
+func (stubDriver) RemoveNodes(_ context.Context, nodeIDs []string) error { return nil }
+func (stubDriver) TagNode(_ context.Context, id, tag string) error       { return nil }
+func (stubDriver) UpdateNode(_ context.Context, id, newLink string) error {
+	return nil
+}
 func (stubDriver) AddGroupSubscriptions(_ context.Context, groupID string, subIDs []string, filter string) error {
 	return nil
 }
@@ -181,6 +202,20 @@ func (stubDriver) UpdateConfigField(_ context.Context, id string, field driver.C
 }
 func (stubDriver) UpdateSubscription(_ context.Context, id string) error     { return nil }
 func (stubDriver) RemoveSubscriptions(_ context.Context, ids []string) error { return nil }
+func (stubDriver) TagSubscription(_ context.Context, id, tag string) error   { return nil }
+func (stubDriver) UpdateSubscriptionLink(_ context.Context, id, link string) error {
+	return nil
+}
+func (stubDriver) Interfaces(context.Context) ([]driver.NetworkInterface, error) {
+	return []driver.NetworkInterface{
+		{Name: "eth0", Up: true, Default: true, Gateway: "192.168.1.1", IPs: []string{"192.168.1.5"}},
+		{Name: "wlan0", Up: false, IPs: []string{}},
+	}, nil
+}
+func (stubDriver) UpdatePassword(_ context.Context, currentPassword, newPassword string) error {
+	return nil
+}
+func (stubDriver) Logout(context.Context) error { return nil }
 func (stubDriver) ListSelections(context.Context) (driver.Selections, error) {
 	return driver.Selections{
 		Configs: []driver.ConfigItem{{ID: "c1", Name: "默认", Selected: true, Detail: "log=info",
@@ -199,7 +234,9 @@ func (stubDriver) ListSelections(context.Context) (driver.Selections, error) {
 			Body: "pname(NetworkManager, systemd-resolved, dnsmasq) -> must_direct\n" +
 				"dip(geoip:private) -> direct\ndip(geoip:cn) -> direct\n" +
 				"domain(geosite:cn) -> direct\nfallback: proxy",
-			Summary: []string{"a(domain: example.com) -> proxy", "fallback: direct"}}},
+			Summary: []string{"a(domain: example.com) -> proxy", "fallback: direct"},
+			// daed's referenceGroups mixes group names with dae built-ins.
+			References: []string{"proxy", "must_direct"}}},
 	}, nil
 }
 func (stubDriver) SelectConfig(_ context.Context, id string) error  { return nil }
@@ -554,6 +591,37 @@ func TestSubsDetailPaneAndModal(t *testing.T) {
 	}
 }
 
+func TestSubsEditTagAndLink(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("3"))
+
+	// e opens the edit form prefilled with the subscription's tag and link.
+	m, cmd := m.Update(key("e"))
+	if cmd == nil {
+		t.Fatal("e should focus the edit form (blink)")
+	}
+	v := m.View()
+	if !strings.Contains(v, "编辑订阅") || !strings.Contains(v, "机场A") ||
+		!strings.Contains(v, "https://a.example/sub") {
+		t.Fatalf("edit form missing or not prefilled:\n%s", v)
+	}
+	m, _ = m.Update(key("esc"))
+
+	// Submitting fires the edit mutation (kind 4) and reloads the list.
+	m, _ = m.Update(key("e"))
+	m, _ = m.Update(key("x")) // type into the tag field
+	m, cmd = m.Update(key("enter"))
+	if cmd == nil {
+		t.Fatal("edit submit should fire subMutateCmd")
+	}
+	if msg := cmd(); msg != nil {
+		m, _ = m.Update(msg)
+	}
+	if v := m.View(); strings.Contains(v, "编辑订阅") {
+		t.Fatalf("edit form should be closed:\n%s", v)
+	}
+}
+
 func TestGlobalApplyWorksFromAnyPage(t *testing.T) {
 	m := newTestModel(t)
 	// On the groups page, A opens the global confirmation; y fires runCmd.
@@ -658,6 +726,51 @@ func TestGroupLifecycleManagement(t *testing.T) {
 	}
 }
 
+func TestGroupReferenceWarnings(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("2"))
+
+	// The collapsed detail names the routing profiles referencing the group.
+	if v := m.View(); !strings.Contains(v, "引用") || !strings.Contains(v, "默认路由") {
+		t.Fatalf("reference note missing:\n%s", v)
+	}
+
+	// R shows the warning inside the rename modal.
+	m, _ = m.Update(key("R"))
+	if v := m.View(); !strings.Contains(v, "静默失效") {
+		t.Fatalf("rename reference warning missing:\n%s", v)
+	}
+	m, _ = m.Update(key("esc"))
+
+	// D shows it in the delete confirmation.
+	m, _ = m.Update(key("D"))
+	if v := m.View(); !strings.Contains(v, "静默失效") {
+		t.Fatalf("delete reference warning missing:\n%s", v)
+	}
+	m, _ = m.Update(key("n"))
+
+	// A group no routing references gets no warning.
+	m, _ = m.Update(key("j")) // direct
+	if v := m.View(); strings.Contains(v, "静默失效") {
+		t.Fatalf("unreferenced group should not warn:\n%s", v)
+	}
+
+	// The configs page lists the referenced groups of a routing profile;
+	// dae built-ins are labeled, never flagged as missing.
+	m, _ = m.Update(key("5"))
+	m, _ = m.Update(key("G")) // last row: the routing profile
+	v := m.View()
+	if !strings.Contains(v, "引用组") || !strings.Contains(v, "proxy") {
+		t.Fatalf("routing references missing on configs page:\n%s", v)
+	}
+	if !strings.Contains(v, "must_direct (内置)") {
+		t.Fatalf("built-in outbound not labeled:\n%s", v)
+	}
+	if strings.Contains(v, "已不存在") {
+		t.Fatalf("built-in outbound flagged as missing:\n%s", v)
+	}
+}
+
 func TestManualNodesPage(t *testing.T) {
 	m := newTestModel(t)
 	m, _ = m.Update(key("4"))
@@ -687,16 +800,48 @@ func TestManualNodesPage(t *testing.T) {
 		m, _ = m.Update(msg)
 	}
 
-	// a opens the import form; x asks for delete confirmation.
+	// a opens the import form; a pasted batch submits from the tag field.
 	m, _ = m.Update(key("h"))
 	m, _ = m.Update(key("a"))
+	if v := m.View(); !strings.Contains(v, "导入手动节点") {
+		t.Fatalf("import form missing:\n%s", v)
+	}
 	m, _ = m.Update(key("s"))
-	m, cmd = m.Update(key("enter"))
+	m, _ = m.Update(key("s"))
+	m, _ = m.Update(key(":"))
+	m, _ = m.Update(key("/"))
+	m, _ = m.Update(key("/"))
+	m, _ = m.Update(key("1"))
+	m, _ = m.Update(key("enter")) // newline inside the link box
+	m, _ = m.Update(key("s"))
+	m, _ = m.Update(key("s"))
+	m, _ = m.Update(key(":"))
+	m, _ = m.Update(key("/"))
+	m, _ = m.Update(key("/"))
+	m, _ = m.Update(key("2"))
+	m, _ = m.Update(key("enter"))
+	m, _ = m.Update(key("s"))
+	m, _ = m.Update(key("s"))
+	m, _ = m.Update(key(":"))
+	m, _ = m.Update(key("/"))
+	m, _ = m.Update(key("/"))
+	m, _ = m.Update(key("b"))
+	m, _ = m.Update(key("a"))
+	m, _ = m.Update(key("d"))
+	m, cmd = m.Update(key("tab")) // move to the tag field
+	if cmd == nil {
+		t.Fatal("tab should refocus (blink)")
+	}
+	m, cmd = m.Update(key("enter")) // submit from the tag field
 	if cmd == nil {
 		t.Fatal("import submit should fire nodeMutateCmd")
 	}
 	if msg := cmd(); msg != nil {
-		m, _ = m.Update(msg)
+		m, _ = m.Update(msg) // importDoneMsg
+	}
+	// The batch report names the failed link in the detail pane.
+	if v := m.View(); !strings.Contains(v, "上次导入") || !strings.Contains(v, "2 成功 / 1 失败") {
+		t.Fatalf("batch import report missing:\n%s", v)
 	}
 	m, _ = m.Update(key("x"))
 	if v := m.View(); !strings.Contains(v, "确认删除节点") {
@@ -708,6 +853,113 @@ func TestManualNodesPage(t *testing.T) {
 	}
 	if msg := cmd(); msg != nil {
 		m, _ = m.Update(msg)
+	}
+}
+
+func TestManualNodeEditKeepsID(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("4"))
+
+	// e opens the edit form prefilled with the node's tag and link.
+	m, cmd := m.Update(key("e"))
+	if cmd == nil {
+		t.Fatal("e should focus the edit form (blink)")
+	}
+	v := m.View()
+	if !strings.Contains(v, "编辑手动节点") || !strings.Contains(v, "自建-HK") {
+		t.Fatalf("edit form missing:\n%s", v)
+	}
+	m, _ = m.Update(key("esc"))
+
+	// Also reachable from the detail pane.
+	m, _ = m.Update(key("tab"))
+	m, cmd = m.Update(key("e"))
+	if cmd == nil {
+		t.Fatal("e in detail pane should open the edit form")
+	}
+	if v := m.View(); !strings.Contains(v, "标签") || !strings.Contains(v, "链接") {
+		t.Fatalf("edit fields missing:\n%s", v)
+	}
+	// Change the tag, then submit: nodeMutateCmd fires (kind 2 edit).
+	m, _ = m.Update(key("x"))
+	m, cmd = m.Update(key("enter"))
+	if cmd == nil {
+		t.Fatal("edit submit should fire nodeMutateCmd")
+	}
+	if msg := cmd(); msg != nil {
+		m, _ = m.Update(msg)
+	}
+	// The edit refreshes both the node list and the groups.
+	if v := m.View(); strings.Contains(v, "编辑手动节点") {
+		t.Fatalf("edit form should be closed:\n%s", v)
+	}
+}
+
+func TestHomeAccountMenuAndLogout(t *testing.T) {
+	cfg := &config.Config{Endpoint: "http://127.0.0.1:2023/graphql", Username: "admin"}
+	var m tea.Model = New(stubDriver{}, cfg, "/tmp/dae-tui-test.toml")
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	m2, _ = m2.Update(bootMsg{Users: 1, Status: driver.Status{Version: "v2.1.1", Running: true}})
+	m2, _ = m2.Update(groupsMsg{Groups: mustGroups(t)})
+	m2, _ = m2.Update(selectionsMsg{Sel: mustSel(t)})
+	m = m2
+
+	// P opens the account menu; global hotkeys must not leak through it.
+	m, _ = m.Update(key("P"))
+	v := m.View()
+	for _, want := range []string{"账户", "admin", "修改密码", "退出登录"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("account menu missing %q:\n%s", want, v)
+		}
+	}
+	m, _ = m.Update(key("2")) // swallowed while the menu is open
+	if v := m.View(); !strings.Contains(v, "账户") {
+		t.Fatalf("page hotkey leaked into the account menu:\n%s", v)
+	}
+
+	// Enter opens the password form; submitting fires passwordCmd.
+	m, _ = m.Update(key("enter"))
+	if v := m.View(); !strings.Contains(v, "当前密码") || !strings.Contains(v, "确认新密码") {
+		t.Fatalf("password form missing:\n%s", v)
+	}
+	for _, k := range []string{"o", "l", "d"} {
+		m, _ = m.Update(key(k))
+	}
+	m, _ = m.Update(key("tab"))
+	for _, k := range []string{"n", "e", "w", "p", "w", "1"} {
+		m, _ = m.Update(key(k))
+	}
+	m, _ = m.Update(key("tab"))
+	for _, k := range []string{"n", "e", "w", "p", "w", "1"} {
+		m, _ = m.Update(key(k))
+	}
+	m, cmd := m.Update(key("enter"))
+	if cmd == nil {
+		t.Fatal("password submit should fire passwordCmd")
+	}
+	if msg := cmd(); msg != nil {
+		m, _ = m.Update(msg)
+	}
+	if v := m.View(); !strings.Contains(v, "✓ 修改密码") {
+		t.Fatalf("password success toast missing:\n%s", v)
+	}
+
+	// Logout: menu → second entry → confirm → y returns to the login form.
+	m, _ = m.Update(key("P"))
+	m, _ = m.Update(key("j"))
+	m, _ = m.Update(key("enter"))
+	if v := m.View(); !strings.Contains(v, "确认退出登录") {
+		t.Fatalf("logout confirmation missing:\n%s", v)
+	}
+	m, cmd = m.Update(key("y"))
+	if cmd == nil {
+		t.Fatal("y should fire the logout command")
+	}
+	if msg := cmd(); msg != nil {
+		m, _ = m.Update(msg) // logoutMsg
+	}
+	if v := m.View(); !strings.Contains(v, "登录 daed") {
+		t.Fatalf("expected the login form after logout:\n%s", v)
 	}
 }
 
@@ -892,6 +1144,58 @@ func TestConfigsProfileManagement(t *testing.T) {
 	}
 	if msg := cmd(); msg != nil {
 		m, _ = m.Update(msg)
+	}
+}
+
+func TestHomeNetworkStateWarnsMissingInterface(t *testing.T) {
+	m := newTestModel(t)
+	m2, _ := m.Update(ifacesMsg{Ifaces: []driver.NetworkInterface{
+		{Name: "eth0", Up: true, Default: true, Gateway: "192.168.1.1", IPs: []string{"192.168.1.5"}},
+		{Name: "wlan0", Up: false},
+	}})
+	m = m2
+	v := m.View()
+	for _, want := range []string{"网络", "eth0", "192.168.1.5", "默认路由"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("home network state missing %q:\n%s", want, v)
+		}
+	}
+
+	// A selected config binding to a NIC that no longer exists is flagged on
+	// the home page and in the config detail.
+	sel := mustSel(t)
+	sel.Configs[0].Fields = append(sel.Configs[0].Fields,
+		driver.ConfigField{Name: "wanInterface", Value: "ppp0", Type: "array"})
+	m2, _ = m.Update(selectionsMsg{Sel: sel})
+	m = m2
+	if v := m.View(); !strings.Contains(v, "ppp0 不存在") {
+		t.Fatalf("missing-interface warning missing on home:\n%s", v)
+	}
+	m2, _ = m.Update(key("5"))
+	m = m2
+	if v := m.View(); !strings.Contains(v, "ppp0 不存在") {
+		t.Fatalf("missing-interface warning missing on configs page:\n%s", v)
+	}
+
+	// "auto" is dae's "detect it yourself" placeholder, not a NIC name: it
+	// must never be flagged, alone or mixed with real names.
+	sel = mustSel(t)
+	for i := range sel.Configs[0].Fields {
+		if sel.Configs[0].Fields[i].Name == "lanInterface" {
+			sel.Configs[0].Fields[i].Value = "auto"
+		}
+	}
+	sel.Configs[0].Fields = append(sel.Configs[0].Fields,
+		driver.ConfigField{Name: "wanInterface", Value: "auto, eth0", Type: "array"})
+	m2, _ = m.Update(selectionsMsg{Sel: sel})
+	m = m2
+	if v := m.View(); strings.Contains(v, "不存在") {
+		t.Fatalf("auto must not be reported as a missing NIC:\n%s", v)
+	}
+	m2, _ = m.Update(key("5"))
+	m = m2
+	if v := m.View(); strings.Contains(v, "不存在") {
+		t.Fatalf("auto must not be reported on the configs page:\n%s", v)
 	}
 }
 
@@ -1348,5 +1652,292 @@ func TestHomeNoRoutingProfile(t *testing.T) {
 	}
 	if v := m.View(); strings.Contains(v, "替换为") {
 		t.Fatalf("no confirmation without a routing profile:\n%s", v)
+	}
+}
+
+// --- node list filter / sort ---
+
+// The shared filter/sort: matching by any recognizable field, latency
+// ordering with unmeasured nodes trailing, and the key contract of the
+// filter box.
+func TestNodeViewFilterAndSort(t *testing.T) {
+	nodes := []driver.Node{
+		{ID: "a", Name: "HK-01", Protocol: "vmess"},
+		{ID: "b", Name: "东京-02", Protocol: "ss", Tag: "机场A"},
+		{ID: "c", Name: "SG-03", Protocol: "trojan", Address: "sg.example.com:443"},
+	}
+	lat := map[string]driver.Latency{
+		"a": {NodeID: "a", Ms: 300, Alive: true, TestedAt: time.Now()},
+		"b": {NodeID: "b", Ms: 50, Alive: true, TestedAt: time.Now()},
+		"c": {NodeID: "c", Alive: false, TestedAt: time.Now()}, // dead
+	}
+	ids := func(v nodeView) []string {
+		out := []string{}
+		for _, n := range v.visible(nodes, lat) {
+			out = append(out, n.ID)
+		}
+		return out
+	}
+
+	v := newNodeView()
+	if got := ids(v); !reflect.DeepEqual(got, []string{"a", "b", "c"}) {
+		t.Fatalf("no filter: %v", got)
+	}
+	// Match on name, protocol, tag, address — case-insensitively.
+	for q, want := range map[string][]string{
+		"hk":           {"a"},
+		"SS":           {"a", "b"}, // substring: vmess contains "ss"
+		"机场":           {"b"},
+		"example.com":  {"c"},
+		"":             {"a", "b", "c"},
+		"nomatchatall": {},
+	} {
+		v = newNodeView()
+		v.applied = q
+		if got := ids(v); !reflect.DeepEqual(got, want) {
+			t.Errorf("filter %q: %v, want %v", q, got, want)
+		}
+	}
+	// Latency sort: measured first (asc/desc), dead last in both.
+	v = newNodeView()
+	v.sortBy = sortLatencyAsc
+	if got := ids(v); !reflect.DeepEqual(got, []string{"b", "a", "c"}) {
+		t.Fatalf("latency asc: %v", got)
+	}
+	v.sortBy = sortLatencyDesc
+	if got := ids(v); !reflect.DeepEqual(got, []string{"a", "b", "c"}) {
+		t.Fatalf("latency desc: %v", got)
+	}
+
+	// Filter box keys: / opens, typing filters live, enter keeps, esc clears.
+	v = newNodeView()
+	if _, consumed := v.handleKey(key("j")); consumed {
+		t.Fatal("j must not be consumed by the filter")
+	}
+	if cmd, consumed := v.handleKey(key("/")); !consumed || cmd == nil {
+		t.Fatal("/ should open the box (and blink)")
+	}
+	if !v.open {
+		t.Fatal("box should be open")
+	}
+	for _, r := range "hk" {
+		v.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	if v.filter() != "hk" {
+		t.Fatalf("live filter = %q", v.filter())
+	}
+	// While the box is open every key belongs to it: 'o' is typed into the
+	// filter, not a sort toggle.
+	if _, consumed := v.handleKey(key("o")); !consumed {
+		t.Fatal("keys must be consumed by the open box")
+	}
+	if v.sortBy != sortBackend {
+		t.Fatal("o must not toggle sort while the box is open")
+	}
+	if v.filter() != "hko" {
+		t.Fatalf("o should have been typed: %q", v.filter())
+	}
+	v.handleKey(tea.KeyMsg{Type: tea.KeyBackspace})
+	if v.filter() != "hk" {
+		t.Fatalf("backspace should remove the o: %q", v.filter())
+	}
+	v.handleKey(key("enter"))
+	if v.open || v.filter() != "hk" {
+		t.Fatalf("enter should close and keep: open=%v filter=%q", v.open, v.filter())
+	}
+	v.handleKey(key("/")) // reopen with the text
+	if v.input.Value() != "hk" {
+		t.Fatalf("reopen should prefill: %q", v.input.Value())
+	}
+	v.handleKey(key("esc"))
+	if v.open || v.filter() != "" {
+		t.Fatalf("esc should close and clear: open=%v filter=%q", v.open, v.filter())
+	}
+	// o cycles the sort only while the box is closed.
+	v = newNodeView()
+	for _, want := range []int{sortLatencyAsc, sortLatencyDesc, sortBackend} {
+		v.handleKey(key("o"))
+		if v.sortBy != want {
+			t.Fatalf("sortBy = %d, want %d", v.sortBy, want)
+		}
+	}
+
+	// Titles and prompt.
+	v = newNodeView()
+	if got := v.countTitle(3, 10); got != " (10)" {
+		t.Fatalf("countTitle = %q", got)
+	}
+	if got := v.sortTitle(); got != "" {
+		t.Fatalf("sortTitle = %q", got)
+	}
+	v.applied = "hk"
+	if got := v.countTitle(1, 10); got != " (1/10)" {
+		t.Fatalf("filtered countTitle = %q", got)
+	}
+	if got := v.prompt(); got == "" || !strings.Contains(got, "hk") {
+		t.Fatalf("prompt = %q", got)
+	}
+	v.sortBy = sortLatencyAsc
+	if got := v.sortTitle(); got != " · 延迟↑" {
+		t.Fatalf("sortTitle asc = %q", got)
+	}
+}
+
+// Subscription page: the filter narrows the node list, `t` probes only what
+// is visible, and the cursor cannot escape the filtered list.
+func TestSubsNodeFilterAndSort(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("3"))
+	m, cmd := m.Update(key("l")) // expand → fetch nodes
+	if cmd == nil {
+		t.Fatal("expanding should fetch nodes")
+	}
+	m, _ = m.Update(cmd()) // subNodesMsg
+	v := m.View()
+	for _, want := range []string{"机场A-01", "机场A-02"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("subscription nodes missing %q:\n%s", want, v)
+		}
+	}
+
+	// Filter to the first node only.
+	m, _ = m.Update(key("/"))
+	for _, r := range "01" {
+		mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = mm
+	}
+	v = m.View()
+	if !strings.Contains(v, "机场A-01") || strings.Contains(v, "机场A-02") {
+		t.Fatalf("filter did not narrow the list:\n%s", v)
+	}
+	if !strings.Contains(v, "(1/2)") {
+		t.Fatalf("pane title should show matched/total:\n%s", v)
+	}
+	// Global hotkeys must not fire while the box is open.
+	if mm, _ := m.Update(key("3")); mm.(Model).page != pageSubs {
+		t.Fatal("page switched while the filter box was open")
+	}
+	// enter closes the box but keeps the filter.
+	m, _ = m.Update(key("enter"))
+	if v := m.View(); !strings.Contains(v, "机场A-01") || strings.Contains(v, "机场A-02") {
+		t.Fatalf("filter should survive closing the box:\n%s", v)
+	}
+
+	// t probes exactly the visible nodes.
+	lastTestIDs = nil
+	m, cmd = m.Update(key("t"))
+	if cmd == nil {
+		t.Fatal("t should fire a test")
+	}
+	cmd()
+	if len(lastTestIDs) != 1 || lastTestIDs[0] != "x1" {
+		t.Fatalf("tested %v, want only x1", lastTestIDs)
+	}
+
+	// The cursor cannot point past the filtered list.
+	mm := m.(Model)
+	mm.subs.nc = 99
+	mm.subs.clampNodeCursor()
+	if mm.subs.nc != 0 {
+		t.Fatalf("nc = %d, want clamped to 0", mm.subs.nc)
+	}
+	m = mm
+	// esc inside the box clears the filter and the full list is back.
+	m, _ = m.Update(key("/"))
+	m, _ = m.Update(key("esc"))
+	if v := m.View(); !strings.Contains(v, "机场A-02") {
+		t.Fatalf("esc should clear the filter:\n%s", v)
+	}
+}
+
+// Manual nodes page: the same filter narrows the left list, and the detail
+// pane follows the filtered cursor.
+func TestManualNodesFilter(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("4"))
+	m, _ = m.Update(key("/"))
+	for _, r := range "sg" {
+		mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = mm
+	}
+	v := m.View()
+	if !strings.Contains(v, "自建-SG") || strings.Contains(v, "自建-HK") {
+		t.Fatalf("filter did not narrow the manual list:\n%s", v)
+	}
+	m, _ = m.Update(key("enter"))
+	// The cursor now sits on the only visible node.
+	m, _ = m.Update(key("tab"))
+	if v := m.View(); !strings.Contains(v, "自建-SG") {
+		t.Fatalf("detail should show the filtered node:\n%s", v)
+	}
+}
+
+// Group page: the filter applies to the detail pane's nodes — sections
+// without matches drop out, matched ones open — and to the `n` picker.
+func TestGroupsNodeFilter(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("2"))
+	m, _ = m.Update(key("l"))     // expand the group
+	m, _ = m.Update(key("g"))     // rc=0: sub header
+	m, _ = m.Update(key("enter")) // open the subscription section
+	m, _ = m.Update(key("j"))     // 东京-01
+	m, _ = m.Update(key("j"))     // SG-03
+	m, _ = m.Update(key("j"))     // direct section header
+	m, _ = m.Update(key("enter")) // open the direct section
+	v := m.View()
+	for _, want := range []string{"东京-01", "SG-03", "HK-02"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("group nodes missing %q:\n%s", want, v)
+		}
+	}
+
+	// Filter "hk": only the direct node matches, so the subscription
+	// section (no matches) disappears entirely.
+	m, _ = m.Update(key("/"))
+	for _, r := range "hk" {
+		mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = mm
+	}
+	v = m.View()
+	if !strings.Contains(v, "HK-02") {
+		t.Fatalf("matched node missing:\n%s", v)
+	}
+	for _, hidden := range []string{"东京-01", "SG-03", "机场A"} {
+		if strings.Contains(v, hidden) {
+			t.Fatalf("non-matching content should be hidden, found %q:\n%s", hidden, v)
+		}
+	}
+	m, _ = m.Update(key("enter")) // close the box, keep the filter
+	m, _ = m.Update(key("esc"))   // collapse back to the group list
+	if v := m.View(); !strings.Contains(v, "HK-02") {
+		t.Fatalf("filter should keep applying after collapsing:\n%s", v)
+	}
+	m, _ = m.Update(key("/"))
+	m, _ = m.Update(key("esc")) // clear
+
+	// The `n` picker filters its candidates too.
+	m, cmd := m.Update(key("n"))
+	if cmd == nil {
+		t.Fatal("n should load candidates")
+	}
+	m, _ = m.Update(cmd())
+	v = m.View()
+	if !strings.Contains(v, "机场A-01") || !strings.Contains(v, "自建-HK") {
+		t.Fatalf("picker should list manual + subscription nodes:\n%s", v)
+	}
+	m, _ = m.Update(key("/"))
+	for _, r := range "机场" {
+		mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = mm
+	}
+	v = m.View()
+	if !strings.Contains(v, "机场A-01") || strings.Contains(v, "自建-HK") {
+		t.Fatalf("picker filter failed:\n%s", v)
+	}
+	// enter adds the filtered candidate.
+	m, _ = m.Update(key("enter"))
+	m, cmd = m.Update(key("enter"))
+	if cmd == nil {
+		t.Fatal("enter in the picker should add the node")
 	}
 }

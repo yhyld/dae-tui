@@ -23,6 +23,9 @@ type configsPage struct {
 	err   error
 	focus int // 0 left, 1 right (scroll)
 
+	groups []driver.Group // for reference-existence checks in routing profiles
+	ifaces []driver.NetworkInterface
+
 	rows   []rowRef
 	cur    int
 	scroll int // right pane line offset
@@ -116,6 +119,69 @@ func (p *configsPage) handleSelections(sel driver.Selections, err error) {
 	p.sel = sel
 	p.validateErr = map[string]editRejection{} // a reload retires stale edit errors
 	p.rebuild()
+}
+
+// setGroups keeps the group list for reference checks: a routing profile
+// that references a group which no longer exists has silently dead rules.
+func (p *configsPage) setGroups(groups []driver.Group) { p.groups = groups }
+
+// setInterfaces keeps the NIC list for lan/wan interface hints.
+func (p *configsPage) setInterfaces(ifaces []driver.NetworkInterface) { p.ifaces = ifaces }
+
+func (p *configsPage) hasGroup(name string) bool {
+	for _, g := range p.groups {
+		if g.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *configsPage) hasIface(name string) bool {
+	for _, i := range p.ifaces {
+		if i.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// ifaceHint lists the backend's NICs for the lan/wan interface fields, where
+// a mistyped name is the classic "config applies but nothing is proxied"
+// misconfiguration.
+func (p configsPage) ifaceHint(f driver.ConfigField) string {
+	if !isIfaceField(f.Name) || len(p.ifaces) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(p.ifaces))
+	for _, i := range p.ifaces {
+		s := i.Name
+		if !i.Up {
+			s += "(down)"
+		}
+		if i.Default {
+			s += "(默认路由)"
+		}
+		parts = append(parts, s)
+	}
+	return "可用: " + strings.Join(parts, ", ")
+}
+
+// ifaceWarning flags a configured interface name the backend does not have.
+func (p configsPage) ifaceWarning(f driver.ConfigField) string {
+	if !isIfaceField(f.Name) || len(p.ifaces) == 0 {
+		return ""
+	}
+	for _, n := range configuredIfaces(f.Value) {
+		if !p.hasIface(n) {
+			return "⚠ 接口 " + n + " 不存在"
+		}
+	}
+	return ""
+}
+
+func isIfaceField(name string) bool {
+	return name == "lanInterface" || name == "wanInterface"
 }
 
 func (p *configsPage) item(r rowRef) *driver.ConfigItem {
@@ -398,6 +464,9 @@ func (p *configsPage) bodyLines() []string {
 				// Values can be long (URL lists); never bleed past the pane.
 				lines = append(lines, ui.Truncate(" "+ui.PadRight(fieldLabel(f), 18)+f.Value,
 					max0(p.rightW-4)))
+				if warn := p.ifaceWarning(f); warn != "" {
+					lines = append(lines, ui.ErrorStyle.Render("   "+warn))
+				}
 			}
 			return lines
 		}
@@ -405,6 +474,28 @@ func (p *configsPage) bodyLines() []string {
 	}
 	title := sectionTitles[r.section]
 	lines := []string{}
+	if r.section == "routing" && len(it.References) > 0 {
+		// daed's referenceGroups lists every name the DSL targets — dae
+		// built-ins (direct, must_direct, …) included. A referenced group
+		// that no longer exists means every rule aimed at it is dead weight,
+		// so say so; a built-in is valid without any group, so label it
+		// instead of flagging it.
+		parts := make([]string, 0, len(it.References))
+		for _, g := range it.References {
+			switch {
+			case p.hasGroup(g):
+				parts = append(parts, g)
+			case isBuiltinOutbound(g):
+				parts = append(parts, ui.HelpStyle.Render(g+" (内置)"))
+			case len(p.groups) > 0:
+				parts = append(parts, ui.ErrorStyle.Render(g+" (已不存在)"))
+			default:
+				parts = append(parts, g) // group list not loaded yet
+			}
+		}
+		lines = append(lines, ui.Truncate(ui.SelectedStyle.Render("引用组 ")+
+			strings.Join(parts, ", "), max0(p.rightW-4)))
+	}
 	if p.summaryView && len(it.Summary) > 0 {
 		lines = append(lines, ui.SelectedStyle.Render(title+" (结构概览) · "+it.Name))
 		for _, s := range it.Summary {
@@ -576,6 +667,14 @@ func (p configsPage) modalLines() []string {
 			if i == p.pickCursor && f.Default != "" {
 				line += ui.HelpStyle.Render("  默认 " + f.Default)
 			}
+			if warn := p.ifaceWarning(f); warn != "" {
+				line += ui.ErrorStyle.Render("  " + warn)
+			}
+			if i == p.pickCursor {
+				if hint := p.ifaceHint(f); hint != "" {
+					line += ui.HelpStyle.Render("  " + hint)
+				}
+			}
 			// Long values (URL lists) must not bleed past the pane.
 			lines = append(lines, ui.Truncate(line, max0(p.rightW-4)))
 		}
@@ -593,6 +692,12 @@ func (p configsPage) modalLines() []string {
 		}
 		if f.Default != "" {
 			lines = append(lines, " 默认值  "+ui.HelpStyle.Render(f.Default))
+		}
+		if hint := p.ifaceHint(f); hint != "" {
+			lines = append(lines, ui.HelpStyle.Render(" "+hint))
+		}
+		if warn := p.ifaceWarning(f); warn != "" {
+			lines = append(lines, ui.ErrorStyle.Render(" "+warn))
 		}
 		if f.Desc != "" {
 			lines = append(lines, ui.HelpStyle.Render(" 说明    "+

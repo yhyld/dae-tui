@@ -114,6 +114,34 @@ type rawNodesConn struct {
 	PageInfo   rawPageInfo `json:"pageInfo"`
 }
 
+type rawNodeImportResult struct {
+	Link  string   `json:"link"`
+	Error *string  `json:"error"`
+	Node  *rawNode `json:"node"`
+}
+
+type rawDefaultRoute struct {
+	IPVersion string `json:"ipVersion"`
+	Gateway   string `json:"gateway"`
+	Source    string `json:"source"`
+}
+
+type rawInterfaceFlag struct {
+	Up      bool              `json:"up"`
+	Default []rawDefaultRoute `json:"default"`
+}
+
+type rawInterface struct {
+	Name    string           `json:"name"`
+	Ifindex int              `json:"ifindex"`
+	IP      []string         `json:"ip"`
+	Flag    rawInterfaceFlag `json:"flag"`
+}
+
+type rawGeneralWithInterfaces struct {
+	Interfaces []rawInterface `json:"interfaces"`
+}
+
 type rawSubscription struct {
 	ID         string       `json:"id"`
 	UpdatedAt  string       `json:"updatedAt"`
@@ -188,8 +216,9 @@ type rawDnsItem struct {
 }
 
 type rawRoutingItem struct {
-	ID       string        `json:"id"`
-	Name     string        `json:"name"`
-	Selected bool          `json:"selected"`
-	Routing  rawDaeRouting `json:"routing"`
+	ID              string        `json:"id"`
+	Name            string        `json:"name"`
+	Selected        bool          `json:"selected"`
+	ReferenceGroups []string      `json:"referenceGroups"`
+	Routing         rawDaeRouting `json:"routing"`
 }

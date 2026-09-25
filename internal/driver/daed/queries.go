@@ -28,7 +28,7 @@ const qGroups = `query Groups {
 		name
 		policy
 		policyParams { key val }
-		nodes { id name address protocol tag subscriptionID }
+		nodes { id name address protocol tag subscriptionID link }
 	}
 }`
 
@@ -42,19 +42,19 @@ const qGroupsRich = `query Groups {
 		name
 		policy
 		policyParams { key val }
-		nodes { id name address protocol tag subscriptionID }
+		nodes { id name address protocol tag subscriptionID link }
 		subscriptions {
 			nameFilterRegex
 			matchedCount
 			subscription { id tag }
-			matchedNodes { id name address protocol tag subscriptionID }
+			matchedNodes { id name address protocol tag subscriptionID link }
 		}
 	}
 }`
 
 const qAllNodes = `query AllNodes($first: Int, $after: ID) {
 	nodes(first: $first, after: $after) {
-		edges { id name address protocol tag subscriptionID }
+		edges { id name address protocol tag subscriptionID link }
 		pageInfo { endCursor hasNextPage }
 	}
 }`
@@ -84,7 +84,15 @@ const mRemoveGroup = `mutation RemoveGroup($id: ID!) { removeGroup(id: $id) }`
 const mRenameGroup = `mutation RenameGroup($id: ID!, $name: String!) { renameGroup(id: $id, name: $name) }`
 
 const mImportNodes = `mutation ImportNodes($rollbackError: Boolean!, $args: [ImportArgument!]!) {
-	importNodes(rollbackError: $rollbackError, args: $args) { link }
+	importNodes(rollbackError: $rollbackError, args: $args) { link error node { id name address protocol tag subscriptionID link } }
+}`
+
+const mTagNode = `mutation TagNode($id: ID!, $tag: String!) {
+	tagNode(id: $id, tag: $tag)
+}`
+
+const mUpdateNode = `mutation UpdateNode($id: ID!, $newLink: String!) {
+	updateNode(id: $id, newLink: $newLink) { id }
 }`
 
 const mRemoveNodes = `mutation RemoveNodes($ids: [ID!]!) { removeNodes(ids: $ids) }`
@@ -150,6 +158,14 @@ const mRemoveSubscriptions = `mutation RemoveSubscriptions($ids: [ID!]!) {
 	removeSubscriptions(ids: $ids)
 }`
 
+const mTagSubscription = `mutation TagSubscription($id: ID!, $tag: String!) {
+	tagSubscription(id: $id, tag: $tag)
+}`
+
+const mUpdateSubscriptionLink = `mutation UpdateSubscriptionLink($id: ID!, $link: String!) {
+	updateSubscriptionLink(id: $id, link: $link) { id }
+}`
+
 const mUpdateSubscriptionCron = `mutation UpdateSubscriptionCron($id: ID!, $cronExp: String!, $cronEnable: Boolean!) {
 	updateSubscriptionCron(id: $id, cronExp: $cronExp, cronEnable: $cronEnable) { id }
 }`
@@ -183,6 +199,7 @@ const qSelections = `query Selections {
 		id
 		name
 		selected
+		referenceGroups
 		routing {
 			string
 			rules {
@@ -192,6 +209,25 @@ const qSelections = `query Selections {
 			fallback { ... on Function { name not params { key val } } ... on Plaintext { val } }
 		}
 	}
+}`
+
+// qInterfaces lists the NICs daed sees. onlyGlobalScope drops link-local
+// addresses, which are noise for lan/wan configuration.
+const qInterfaces = `query Interfaces {
+	general {
+		interfaces {
+			name
+			ifindex
+			ip(onlyGlobalScope: true)
+			flag { up default { ipVersion gateway source } }
+		}
+	}
+}`
+
+// mUpdatePassword changes the signed-in account's password and returns a
+// fresh token (daed invalidates the old one).
+const mUpdatePassword = `mutation UpdatePassword($currentPassword: String!, $newPassword: String!) {
+	updatePassword(currentPassword: $currentPassword, newPassword: $newPassword)
 }`
 
 // qConfigFlatDesc describes every config.dae field: name is the Go field

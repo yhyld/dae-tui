@@ -1,6 +1,6 @@
 # dae-tui
 
-dae 网络代理的终端管理界面（TUI），当前通过 **daed 的 GraphQL API** 管理代理：切换路由组节点、测速、实时流量、订阅管理、config/DNS/routing 方案切换与应用。
+dae 网络代理的终端管理界面（TUI），当前通过 **daed 的 GraphQL API** 管理代理：切换路由组节点、测速、实时流量、订阅管理、节点/订阅原地编辑、config/DNS/routing 方案切换与应用、账户管理。
 
 ```
 ┌ dae-tui (http://127.0.0.1:2023/graphql)  ● 运行中 dae v2.1.1   ↑12KB/s ↓1.9MB/s ┐
@@ -68,7 +68,8 @@ lipgloss / toml / charmbracelet-x-ansi（终端单元格宽度计算，与 lipgl
 
 首次启动：若 daed 尚无账号则进入初始化表单（创建账号），否则显示登录表单。登录成功后
 用户名/密码/JWT（30 天有效期）保存在 `~/.config/dae-tui/config.toml`（权限 0600），
-token 过期后自动用保存的凭据静默续期。
+token 过期后自动用保存的凭据静默续期。首页 `P` 可修改密码（旧 JWT 失效、新 token 自动
+落盘）或退出登录（清除本机保存的密码与 token，回到登录表单）。
 
 ### 按键
 
@@ -84,21 +85,33 @@ token 过期后自动用保存的凭据静默续期。
 | 首页 | `o` | 启动/停止代理（`run`；停止=dry，需 `y` 确认） |
 | 首页 | `j/k` `Enter` | 路由快速切换：选预设替换当前路由方案（先展示将写入的 DSL，需 `y` 确认） |
 | 首页 | `g` | 切换预设使用的代理组（默认取当前路由已在引用的组） |
-| 首页 | — | 实时流量图、各组当前节点（fixed=精确；自动=按已测延迟估计 `≈`） |
-| 群组 | `c` `R` `D` | 创建群组 / 重命名 / 删除（确认） |
+| 首页 | `P` | 账户：修改密码（`updatePassword`，自动换新 token）/ 退出登录（清除本机保存的密码与 token） |
+| 首页 | — | 实时流量图、各组当前节点（fixed=精确；自动=按已测延迟估计 `≈`）、网络状态（各网卡地址与默认路由；配置里写了的网卡不存在时告警） |
+| 群组 | `c` `R` `D` | 创建群组 / 重命名 / 删除（确认）。组被路由方案引用时，`R`/`D` 确认框会点名——改名/删除会让那些规则静默失效 |
 | 群组 | `p` / `a` | 修改群组策略 / 快捷切回自动策略 |
 | 群组 | `Enter`（分区头） | 展开/收起订阅或直接节点分区（默认收起） |
 | 群组 | `t` / `T` | 整组或订阅内测速 / 单节点测速 |
 | 群组 | `s` / `n` / `x` | 挂订阅 / 加节点（手动 + 订阅内节点）/ 移除订阅或直接挂载的节点 |
-| 手动节点 | `a` `x` `t` | 导入分享链接 / 删除 / 测速 |
+| 手动节点 | `a` | 批量导入：每行一个分享链接可整段粘贴；坏链接逐条报错（右栏列明细），不影响其他链接 |
+| 手动节点 | `e` | 编辑节点标签与链接（`tagNode`/`updateNode`，保留节点 ID：删了重导会丢群组挂载） |
+| 手动节点 | `x` `t` | 删除 / 测速 |
 | 手动节点 | `Tab` 后 `G` | 把选中节点加入群组 |
 | 订阅 | `t`（右栏） | 对该订阅全部节点测速 |
 | 订阅 | `u` `n` `x` `c` | 更新 / 新增 / 删除（确认）/ 编辑定时刷新 cron（表达式+开关） |
+| 订阅 | `e` | 编辑订阅标签与链接（`tagSubscription`/`updateSubscriptionLink`，保留订阅 ID；改链接不重新拉节点） |
 | 配置 | `Enter` | 切换选中项（应用用全局 `A`）。注意：daed 的 run(dry) 是"停止代理"而非校验，已移除该键 |
 | 配置 | `c` `R` `D` | 新建（克隆当前选中配置）/ 重命名 / 删除（确认；选中的与最后一个条目受保护） |
-| 配置 | `e` | config 逐字段编辑（字段清单来自 `configFlatDesc`，含类型/默认值/说明，覆盖全部 global 字段）；DNS/路由调 `$EDITOR` 编辑 DSL 原文，退出后先后端语法校验再提交 |
-| 配置 | `v` | DNS/路由右栏切换：DSL 原文 ↔ 解析后的结构概览（规则清单，默认显示原文） |
+| 配置 | `e` | config 逐字段编辑（字段清单来自 `configFlatDesc`，含类型/默认值/说明，覆盖全部 global 字段；lan/wan 接口字段会列出本机网卡并标出不存在者）；DNS/路由调 `$EDITOR` 编辑 DSL 原文，退出后先后端语法校验再提交 |
+| 配置 | `v` | DNS/路由右栏切换：DSL 原文 ↔ 解析后的结构概览（规则清单，默认显示原文）。路由方案还会列出它引用的名字（`referenceGroups`）：群组消失的标红，dae 内置方向（direct 等）标"内置" |
 | 配置 | `Tab` 后 `j/k` | 滚动查看右栏内容（config 字段摘要 / DNS、路由 DSL 原文） |
+| 节点列表 | `/` | 过滤框：按 名称/协议/标签/地址 子串实时过滤（不区分大小写），标题显示 `命中/总数` |
+| 节点列表 | `enter` / `esc` | 关闭过滤框并保留结果 / 关闭并清空 |
+| 节点列表 | `o` | 循环排序：默认顺序 → 延迟↑ → 延迟↓（未测/死亡节点始终排最后） |
+| 节点列表 | `t` | 测速只测当前可见的节点（过滤后剩下几个就测几个） |
+
+“节点列表”指群组页右栏的成员节点、`n` 添加节点选择器、订阅页右栏节点、手动节点页
+左栏列表——四处的过滤与排序行为完全一致（过滤状态下群组页会自动展开分区，无命中的
+分区直接隐藏）。
 
 ## 架构
 
@@ -136,6 +149,21 @@ clash-api 驱动（honk / mihomo）。纯网络客户端不链接 dae/daed 源�
 - 流量：轮询 `general { runtimeOverview(windowSec, maxPoints) }`；注意
   `uploadTotal/downloadTotal` 在 SDL 中是 String。
 - 测速：`testNodeLatencies(ids)` 触发，`nodeLatencies(ids)` 读回（以 `testedAt` 变新为准）。
+- 原地编辑（保留 ID，群组/订阅挂载不丢）：`tagNode` / `updateNode`（手动节点）、
+  `tagSubscription` / `updateSubscriptionLink`（订阅，改链接不重新拉节点）。对应的
+  "删了重导" 会拿到新 ID，`groupAddNodes`/`groupAddSubscriptions` 按 ID 绑定，成员关系
+  会静默丢失。
+- 批量导入：`importNodes(rollbackError: false, args: [...])`——rollbackError 必须是
+  false，否则一条坏链接让整批回滚；返回 `[NodeImportResult!]!`（`link`/`error`/`node`）
+  正好逐条渲染成 "3/10 成功"。
+- 路由引用：`routings { referenceGroups }` 给出每个路由方案按名字引用的群组。改名/删组
+  daed 不报错，只是规则静默失效——UI 据此在 `R`/`D` 确认框和配置页告警。
+- 网卡：`general { interfaces { name ip flag { up default { gateway } } } }`，
+  lanInterface/wanInterface 按名字绑定，DHCP 改名后代理会静默不通——首页网络块与配置页
+  字段提示都靠它。
+- 账户：`updatePassword(currentPassword, newPassword)` 返回新 token（旧 token 随即失效），
+  驱动会把新 token 与新密码都落盘（静默续期靠保存的密码）；`Logout` 只是清本地会话，
+  daed 没有 logout mutation。
 - schema 以 `daed export schema` 导出，或运行时 `general { schema }` / introspection。
 
 ## 开发与测试
@@ -159,8 +187,9 @@ dae-tui -probe -endpoint http://127.0.0.1:2024/graphql
 在 daed 给出更合理的语义（或有优雅的交互方案）之前不提供该入口；**已有的 fixed 组仍
 然只读展示**（首页/群组页显示当前固定节点），用 `p`/`a` 可随时切回自动策略。
 
-`parsedRouting`/`parsedDns` 只做**语法**校验：引用了不存在的组名之类要等 `A` 应用时
-才会暴露。
+`parsedRouting`/`parsedDns` 只做**语法**校验：引用了不存在的组名要等 `A` 应用时才暴露。
+为此 UI 在两边补齐了提示——群组页 `R`/`D` 用 `routings { referenceGroups }` 点名会受
+影响的方案，配置页路由右栏直接列出引用组（已消失的标红）。
 
 ## 安全须知（重要）
 

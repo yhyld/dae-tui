@@ -91,14 +91,52 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
 - `testNodeLatencies` 的 ID 列表超过 100 个要分块，否则 HTTP 超时。
 - 老版本 daed 没有 `GroupSubscription` 类型：`qGroupsRich` 会 schema 校验失败，驱动据此
   永久降级到 `qGroups`（`groupsFallback`）。
+- **routing 按名字引用组**：`routings { referenceGroups }` 给出每个路由方案引用的名字。
+  改名/删组 daed 不报错、只是规则静默失效，所以群组页 `R`/`D` 确认框（`refNote`）和配置页
+  路由右栏都要点名。注意 referenceGroups **把 dae 内置 outbound（direct/must_direct/block/
+  must_proxy）也列进来**——它们不需要群组存在，配置页渲染时用 `isBuiltinOutbound` 区分
+  （标"内置"而不是"已不存在"）；群组页只在用户真有同名组时才告警，方向保守。组名是 DSL
+  标识符，检测/生成都别假设它能安全插值。
+- **原地编辑保留 ID**：`tagNode`/`updateNode`（手动节点）、`tagSubscription`/
+  `updateSubscriptionLink`（订阅）。`groupAddNodes`/`groupAddSubscriptions` 按 ID 绑定，
+  所以"删了重导"会静默丢掉群组挂载——这就是 UI 提供编辑入口的原因。`updateSubscriptionLink`
+  不重新拉节点（要重新拉用 `updateSubscription`）。
+- **批量导入**：`importNodes(rollbackError: false, args: [...])`，返回
+  `[NodeImportResult!]!`（link/error/node）。rollbackError 必须 false——批量的意义就是
+  "能进的进，不能进的报出来"；坏链接的 error 里可能有原始字节，驱动侧用 `printable` 过滤。
+- **网卡**：`general { interfaces { name ip(onlyGlobalScope: true) flag { up default { gateway } } } }`。
+  `lanInterface`/`wanInterface` 按名字绑定，DHCP 改名后代理静默不通；首页网络块与配置页
+  字段提示（`ifaceHint`/`ifaceWarning`）都靠它。查询失败（老 daed 无此字段）降级为空列表，
+  不要报错打断页面。**`auto` 是 dae 的“自动探测”占位值（daed 默认 wan_interface 就是它），
+  不是网卡名**——拆分接口字段值一律走 `configuredIfaces`，它负责把 `auto` 剔掉，别直接
+  `FieldsFunc` 拆分后当网卡名去比对。
+- **账户**：`updatePassword(currentPassword, newPassword)` 返回新 token 且旧 token 随即
+  失效；驱动必须把新 token 和新密码都落盘（静默续期重放的是保存的密码）。daed 没有 logout
+  mutation，`Logout` 只清本地会话（opts + client token）。
 
 ## TUI 约定
 
 - 每个内容页都是**左列表 + 右详情**双栏：左栏 `j/k` 移动（默认折叠），`Tab/l/Enter`
   展开到右栏（右栏有自己的高度与滚动），`h/esc` 收起。右栏内容用 `ui.Pane` 渲染。
+- **节点列表的过滤/排序统一走 `internal/app/nodelist.go` 的 `nodeView`**（`/` 开过滤框，
+  `enter` 保留、`esc` 清空，`o` 循环排序，未测/死亡节点排序时殿后）。群组页右栏、`n`
+  选择器、订阅页右栏、手动节点页四处都内嵌它；新增节点列表必须复用，不要另写一套。
+  过滤框打开时所有按键归它（并计入 `anyModal()`），`t` 测速只测可见节点。群组页在过滤
+  状态下要把分区视为展开、无命中分区直接不建行（见 `rebuild`），并且换组时必须
+  `rebuild()`——否则右栏会残留上一个组的行。
 - 所有 IO 走 `tea.Cmd`（`msgs.go` 的 `withCtx`/`withCtxT`，默认 12s 超时），
   **`Update` 永不阻塞**。mutation 成功后由同一个 cmd 顺带重新拉列表，返回
   `groupsMsg`/`subsMsg`/`selectionsMsg` 等。
+- 改节点/订阅用**原地编辑**（`e`，`tagNode`/`updateNode`、`tagSubscription`/
+  `updateSubscriptionLink`）：ID 不变，群组挂载才不丢。删除 + 重新导入看起来等价，
+  实际会静默断掉 `groupAddNodes`/`groupAddSubscriptions` 的 ID 绑定——别为省一个表单
+  把它改回"删了重导"。
+- 批量导入框（手动节点页 `a`）是 bubbles 的 **textarea**（每行一条链接；ctrl+s 或切到
+  标签框后 enter 提交，框内 enter 是换行）。导入结果走 `importDoneMsg`：成功数进 toast，
+  失败明细渲染在右栏（`importFail`）——一行 toast 说不完逐条报错。
+- 首页 `P` 是账户状态机（`homePage.acct`：0 无 / 1 菜单 / 2 改密码 / 3 退出确认），
+  已计入 `anyModal()`；退出登录由根模型处理（`logoutMsg`：清 cfg + 存盘 + `drv.Logout` +
+  回 `phaseLogin`），页面自己不能改 phase。
 - **`Model.View()` 末尾的硬钳制不能删**：body 行数超过 `height-4` 就截断，否则页签/帮助
   条会被挤出屏幕（这是最早修的滚动 bug）。
 - 弹窗/输入框打开时（`anyModal()`）所有按键——包括 `1`-`5` 翻页热键——必须进弹窗，

@@ -125,6 +125,14 @@ func runProbe(d *daeddrv.Driver) {
 		}
 	}
 
+	if ifaces, err := d.Interfaces(ctx); err != nil {
+		fmt.Println("Interfaces:", err)
+	} else {
+		for _, i := range ifaces {
+			pr("iface %s up=%v default=%v ips=%v", i.Name, i.Up, i.Default, i.IPs)
+		}
+	}
+
 	sel, err := d.ListSelections(ctx)
 	if err != nil {
 		fmt.Println("ListSelections:", err)
@@ -136,7 +144,7 @@ func runProbe(d *daeddrv.Driver) {
 			pr("dns %q selected=%v", x.Name, x.Selected)
 		}
 		for _, x := range sel.Routings {
-			pr("routing %q selected=%v", x.Name, x.Selected)
+			pr("routing %q selected=%v refs=%v", x.Name, x.Selected, x.References)
 		}
 	}
 

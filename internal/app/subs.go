@@ -27,10 +27,12 @@ type subsPage struct {
 	subErr   map[string]error
 	nc       int // node cursor in right pane
 
+	nodeView // filter/sort for the right pane's node list
+
 	err  error
 	busy bool
 
-	mode      int // 0 list, 1 add form, 2 delete confirm, 3 cron edit
+	mode      int // 0 list, 1 add form, 2 delete confirm, 3 cron edit, 4 edit form
 	link      textinput.Model
 	tag       textinput.Model
 	ifld      int
@@ -67,6 +69,7 @@ func newSubsPage() subsPage {
 		subErr:   map[string]error{},
 		lat:      map[string]driver.Latency{},
 		baseline: map[string]time.Time{},
+		nodeView: newNodeView(),
 	}
 }
 
@@ -147,6 +150,9 @@ func (p *subsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	if p.mode == 1 {
 		return p.addFormKey(msg, d)
 	}
+	if p.mode == 4 {
+		return p.editFormKey(msg, d)
+	}
 	if p.mode == 2 {
 		switch msg.String() {
 		case "y":
@@ -164,6 +170,13 @@ func (p *subsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	}
 	if p.mode == 3 {
 		return p.cronKey(msg, d)
+	}
+
+	// The node filter box swallows every key while it is open, like any
+	// other modal on this page.
+	if cmd, consumed := p.nodeView.handleKey(msg); consumed {
+		p.clampNodeCursor()
+		return cmd
 	}
 
 	// Global to this page.
@@ -224,12 +237,21 @@ func (p *subsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			if p.cur() != nil {
 				p.mode = 2
 			}
+		case "e":
+			if s := p.cur(); s != nil {
+				return p.openEdit(s)
+			}
 		}
 		return nil
 	}
 
-	nodes := p.curNodes()
+	// `t` probes exactly what is on screen: the filtered, sorted view.
+	nodes := p.visibleNodes()
 	switch msg.String() {
+	case "e":
+		if s := p.cur(); s != nil {
+			return p.openEdit(s)
+		}
 	case "j", "down":
 		if p.nc < len(nodes)-1 {
 			p.nc++
@@ -325,6 +347,20 @@ func (p *subsPage) curNodes() []driver.Node {
 	return nil
 }
 
+// visibleNodes is the subscription's node list as the filter and sort
+// currently present it.
+func (p *subsPage) visibleNodes() []driver.Node {
+	return p.nodeView.visible(p.curNodes(), p.lat)
+}
+
+// clampNodeCursor keeps the node cursor inside the filtered list, which can
+// shrink under it while the user types.
+func (p *subsPage) clampNodeCursor() {
+	if n := len(p.visibleNodes()); p.nc >= n {
+		p.nc = max0(n - 1)
+	}
+}
+
 func (p *subsPage) addFormKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	switch msg.String() {
 	case "esc":
@@ -360,9 +396,69 @@ func (p *subsPage) addFormKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	return cmd
 }
 
+// openEdit prefills the edit form with the subscription's tag and link.
+// Editing in place keeps the subscription ID, which is what groups attach
+// to — removing and re-adding mints a new ID and silently detaches the
+// subscription from every group.
+func (p *subsPage) openEdit(s *driver.Subscription) tea.Cmd {
+	p.mode = 4
+	p.ifld = 0
+	p.tag.SetValue(s.Tag)
+	p.link.SetValue(s.Link)
+	p.tag.Focus()
+	p.link.Blur()
+	return textinput.Blink
+}
+
+func (p *subsPage) editFormKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
+	switch msg.String() {
+	case "esc":
+		p.mode = 0
+		return nil
+	case "tab", "shift+tab":
+		if p.ifld == 0 {
+			p.ifld = 1
+			p.tag.Blur()
+			p.link.Focus()
+		} else {
+			p.ifld = 0
+			p.link.Blur()
+			p.tag.Focus()
+		}
+		return nil
+	case "enter":
+		s := p.cur()
+		if s == nil {
+			p.mode = 0
+			return nil
+		}
+		tag := strings.TrimSpace(p.tag.Value())
+		link := strings.TrimSpace(p.link.Value())
+		p.mode = 0
+		p.busy = true
+		m := subMutation{kind: 4, id: s.ID, tag: tag, link: link}
+		if link != "" && link != s.Link {
+			m.doLink = true
+		}
+		return subMutateCmd(d, m, "编辑订阅 "+s.Tag)
+	}
+	var cmd tea.Cmd
+	if p.ifld == 0 {
+		p.tag, cmd = p.tag.Update(msg)
+	} else {
+		p.link, cmd = p.link.Update(msg)
+	}
+	return cmd
+}
+
 func (p subsPage) View() string {
+	rvTitle := " 详情 "
+	if s := p.cur(); s != nil && p.expanded {
+		rvTitle = " 节点" + p.nodeView.countTitle(len(p.visibleNodes()), len(p.subNodes[s.ID])) +
+			p.nodeView.sortTitle() + " "
+	}
 	lv := ui.Pane(" 订阅 ("+strconv.Itoa(len(p.subs))+") ", p.focus == 0, p.leftW, p.height, p.leftLines())
-	rv := ui.Pane(" 详情 ", p.focus == 1, p.rightW, p.height, p.rightLines())
+	rv := ui.Pane(rvTitle, p.focus == 1, p.rightW, p.height, p.rightLines())
 	body := lipgloss.JoinHorizontal(lipgloss.Top, lv, " ", rv)
 
 	if p.mode == 1 {
@@ -374,6 +470,18 @@ func (p subsPage) View() string {
 		form := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).
 			BorderForeground(ui.Accent).Padding(1, 2).Render(f.String())
 		body += "\n" + form
+	}
+	if p.mode == 4 {
+		if s := p.cur(); s != nil {
+			var f strings.Builder
+			f.WriteString(ui.TitleStyle.Render(" 编辑订阅 · "+s.Tag) + "\n\n")
+			f.WriteString(" 标签  " + p.tag.View() + "\n")
+			f.WriteString(" 链接  " + p.link.View() + "\n\n")
+			f.WriteString(ui.HelpStyle.Render(" 改链接不会重新拉取节点（u 才会）") + "\n")
+			f.WriteString(ui.HelpStyle.Render(" Tab 切换字段  Enter 提交  esc 取消"))
+			body += "\n" + lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).
+				BorderForeground(ui.Accent).Padding(1, 2).Render(f.String())
+		}
 	}
 	if p.mode == 2 {
 		if s := p.cur(); s != nil {
@@ -452,6 +560,9 @@ func (p subsPage) rightLines() []string {
 		head = append(head, ui.SelectedStyle.Render("信息 ")+ui.Truncate(firstLine(s.Info), max0(p.rightW-8)))
 	}
 	head = append(head, ui.SelectedStyle.Render("更新 ")+ui.TimeAgo(s.UpdatedAt))
+	if p.focus == 0 {
+		head = append(head, ui.HelpStyle.Render(" u 更新  e 编辑标签/链接  x 删除  c 定时刷新"))
+	}
 	head = append(head, "")
 
 	if !p.expanded {
@@ -460,12 +571,19 @@ func (p subsPage) rightLines() []string {
 	if err := p.subErr[s.ID]; err != nil {
 		return append(head, ui.ErrorStyle.Render("✗ 拉取节点失败: "+shortErr(err)))
 	}
-	nodes := p.subNodes[s.ID]
-	if p.loading == s.ID && nodes == nil {
+	all := p.subNodes[s.ID]
+	if p.loading == s.ID && all == nil {
 		return append(head, ui.HelpStyle.Render(" 拉取节点中…"))
 	}
-	if len(nodes) == 0 {
+	if len(all) == 0 {
 		return append(head, ui.HelpStyle.Render(" 无节点（u 更新订阅后重试）"))
+	}
+	if prompt := p.nodeView.prompt(); prompt != "" {
+		head = append(head, ui.HelpStyle.Render(prompt))
+	}
+	nodes := p.visibleNodes()
+	if len(nodes) == 0 {
+		return append(head, ui.ErrorStyle.Render(" 没有匹配的节点（/ 重新编辑，框内 esc 清空）"))
 	}
 
 	rowsH := max0(p.height - len(head) - 3)

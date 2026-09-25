@@ -22,6 +22,11 @@ import (
 type groupsPage struct {
 	groups []driver.Group
 	subs   []driver.Subscription
+	// refs maps a group name to the routing profiles whose DSL references
+	// it. Renaming or deleting such a group breaks those profiles silently
+	// (daed accepts the change; the rules just stop matching), so the R/D
+	// confirmations must name them.
+	refs map[string][]string
 
 	gi       int  // left cursor: group index
 	focus    int  // 0 left, 1 right
@@ -54,6 +59,8 @@ type groupsPage struct {
 	candBusy   bool
 	pickErr    string
 	input      textinput.Model // inputCreate / inputRename
+
+	nodeView // filter/sort for the detail pane's nodes and the `n` picker
 
 	leftW, rightW, height int
 }
@@ -95,7 +102,9 @@ func newGroupsPage() groupsPage {
 		lat:      map[string]driver.Latency{},
 		baseline: map[string]time.Time{},
 		subOpen:  map[int]bool{},
+		refs:     map[string][]string{},
 		input:    ti,
+		nodeView: newNodeView(),
 	}
 }
 
@@ -112,27 +121,42 @@ func (p *groupsPage) setSize(leftW, rightW, h int) {
 	p.leftW, p.rightW, p.height = leftW, rightW, h
 }
 
-// rebuild regenerates the right-pane rows for the selected group.
+// rebuild regenerates the right-pane rows for the selected group. While a
+// node filter is active, sections behave as expanded and drop out entirely
+// when nothing in them matches, so the filter result is never hidden behind
+// a collapsed section.
 func (p *groupsPage) rebuild() {
 	p.rows = p.rows[:0]
 	if p.gi >= len(p.groups) {
 		return
 	}
 	g := &p.groups[p.gi]
+	filtering := p.nodeView.filter() != ""
 	for si := range g.Subscriptions {
+		nodes := g.Subscriptions[si].Nodes
+		if filtering {
+			nodes = p.nodeView.visible(nodes, p.lat)
+			if len(nodes) == 0 {
+				continue
+			}
+		}
 		p.rows = append(p.rows, trow{kind: rowSub, gi: p.gi, si: si})
-		if p.subOpen[si] {
-			for _, n := range g.Subscriptions[si].Nodes {
+		if p.subOpen[si] || filtering {
+			for _, n := range nodes {
 				p.rows = append(p.rows, trow{kind: rowNode, gi: p.gi, si: si, node: n})
 			}
 		}
 	}
 	// Group.nodes is exactly the set of directly-attached nodes (manual
 	// imports plus nodes picked out of subscriptions).
-	if len(g.Nodes) > 0 {
+	direct := g.Nodes
+	if filtering {
+		direct = p.nodeView.visible(direct, p.lat)
+	}
+	if len(direct) > 0 {
 		p.rows = append(p.rows, trow{kind: rowDirect, gi: p.gi})
-		if p.directOpen {
-			for _, n := range g.Nodes {
+		if p.directOpen || filtering {
+			for _, n := range direct {
 				p.rows = append(p.rows, trow{kind: rowNode, gi: p.gi, node: n,
 					manual: n.SubscriptionID == "", direct: true})
 			}
@@ -183,6 +207,51 @@ func (p *groupsPage) setSubs(subs []driver.Subscription, err error) {
 		return
 	}
 	p.subs = subs
+	// A subscription's tag is displayed inside groups too; patch it in place
+	// so a rename does not leave the group pane showing the old tag until the
+	// next full refresh.
+	for gi := range p.groups {
+		for si := range p.groups[gi].Subscriptions {
+			gs := &p.groups[gi].Subscriptions[si]
+			for _, s := range subs {
+				if s.ID == gs.SubscriptionID {
+					gs.Tag = s.Tag
+				}
+			}
+		}
+	}
+	p.rebuild()
+}
+
+// setReferences records which routing profiles reference which group names,
+// from the backend's referenceGroups field.
+func (p *groupsPage) setReferences(routings []driver.ConfigItem) {
+	refs := map[string][]string{}
+	for _, r := range routings {
+		for _, g := range r.References {
+			refs[g] = append(refs[g], r.Name)
+		}
+	}
+	p.refs = refs
+}
+
+// refNote names the routing profiles that reference a group, or "" when none
+// do. Renaming or deleting such a group breaks those profiles silently
+// (daed accepts the change; the rules just stop matching).
+func (p *groupsPage) refNote(name string) string {
+	profiles := p.refs[name]
+	if len(profiles) == 0 {
+		return ""
+	}
+	return "该组被路由方案 " + strings.Join(quoteAll(profiles), "、") + " 引用，改名/删除后这些规则将静默失效"
+}
+
+func quoteAll(items []string) []string {
+	out := make([]string, len(items))
+	for i, s := range items {
+		out[i] = "「" + s + "」"
+	}
+	return out
 }
 
 func (p *groupsPage) handleManualNodes(nodes []driver.Node, err error) {
@@ -299,6 +368,20 @@ func (p *groupsPage) pickableSubs(g *driver.Group) []driver.Subscription {
 }
 
 func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
+	// The filter box applies to node lists, which exist both in the detail
+	// pane and in the add-node picker; it swallows every key while open.
+	if p.mode == pickNone || p.mode == pickNode {
+		if cmd, consumed := p.nodeView.handleKey(msg); consumed {
+			if p.mode == pickNode {
+				if n := len(p.visibleCandidates()); p.pickCursor >= n {
+					p.pickCursor = max0(n - 1)
+				}
+			} else {
+				p.rebuild()
+			}
+			return cmd
+		}
+	}
 	if p.mode != pickNone {
 		return p.pickerKey(msg, d)
 	}
@@ -316,31 +399,29 @@ func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	}
 
 	if p.focus == 0 {
+		// The detail rows follow the selected group; without this the right
+		// pane would render the previous group's nodes whenever a filter
+		// keeps it visible across a group change.
+		selectGroup := func(next int) {
+			p.gi = next
+			p.rc = 0
+			p.expanded = false
+			p.collapseSections()
+			p.rebuild()
+		}
 		switch msg.String() {
 		case "j", "down":
 			if p.gi < len(p.groups)-1 {
-				p.gi++
-				p.rc = 0
-				p.expanded = false
-				p.collapseSections()
+				selectGroup(p.gi + 1)
 			}
 		case "k", "up":
 			if p.gi > 0 {
-				p.gi--
-				p.rc = 0
-				p.expanded = false
-				p.collapseSections()
+				selectGroup(p.gi - 1)
 			}
 		case "g":
-			p.gi = 0
-			p.rc = 0
-			p.expanded = false
-			p.collapseSections()
+			selectGroup(0)
 		case "G":
-			p.gi = max0(len(p.groups) - 1)
-			p.rc = 0
-			p.expanded = false
-			p.collapseSections()
+			selectGroup(max0(len(p.groups) - 1))
 		case "tab", "l", "right", "enter":
 			if len(p.groups) > 0 {
 				p.expanded = true
@@ -538,7 +619,7 @@ func (p *groupsPage) pickerKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			n = len(p.pickableSubs(g))
 		}
 	case pickNode:
-		n = len(p.candidateRows())
+		n = len(p.visibleCandidates())
 	case pickPolicy:
 		n = len(policyChoices)
 	}
@@ -566,7 +647,7 @@ func (p *groupsPage) pickerKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			return groupMutateCmd(d, groupMutation{kind: 0, groupID: g.ID, ids: []string{sub.ID}},
 				"添加订阅 "+sub.Tag+" 到组 "+g.Name)
 		case pickNode:
-			rows := p.candidateRows()
+			rows := p.visibleCandidates()
 			if p.pickCursor >= len(rows) {
 				p.mode = pickNone
 				return nil
@@ -672,7 +753,11 @@ func (p groupsPage) rightLines() []string {
 	}
 	if p.mode == pickDeleteGroup {
 		if g := p.curGroup(); g != nil {
-			return []string{ui.ErrorStyle.Render("确认删除群组 \"" + g.Name + "\"?  (y/n)")}
+			lines := []string{ui.ErrorStyle.Render("确认删除群组 \"" + g.Name + "\"?  (y/n)")}
+			if note := p.refNote(g.Name); note != "" {
+				lines = append(lines, ui.ErrorStyle.Render(" ⚠ "+note))
+			}
+			return lines
 		}
 	}
 	if p.mode == pickRemoveNode {
@@ -686,9 +771,14 @@ func (p groupsPage) rightLines() []string {
 			ui.HelpStyle.Render(" Enter 确认  esc 取消")}
 	}
 	if p.mode == inputRename {
-		return []string{ui.TitleStyle.Render(" 重命名群组"),
-			"", " 名称  " + p.input.View(), "",
-			ui.HelpStyle.Render(" Enter 确认  esc 取消")}
+		lines := []string{ui.TitleStyle.Render(" 重命名群组"),
+			"", " 名称  " + p.input.View(), ""}
+		if g := p.curGroup(); g != nil {
+			if note := p.refNote(g.Name); note != "" {
+				lines = append(lines, ui.ErrorStyle.Render(" ⚠ "+note), "")
+			}
+		}
+		return append(lines, ui.HelpStyle.Render(" Enter 确认  esc 取消"))
 	}
 	if p.mode == pickPolicy {
 		lines := []string{ui.TitleStyle.Render(" 选择群组策略")}
@@ -706,25 +796,38 @@ func (p groupsPage) rightLines() []string {
 	if g == nil {
 		return []string{ui.HelpStyle.Render("（无组）")}
 	}
-	if !p.expanded {
+	if !p.expanded && p.nodeView.filter() == "" {
 		direct := len(g.Nodes)
-		return []string{
+		lines := []string{
 			ui.HelpStyle.Render(fmt.Sprintf("策略   ") + policyLabel(g)),
 			ui.HelpStyle.Render(fmt.Sprintf("成员   %d（订阅挂载 %d 个，直接挂载 %d 个）", len(g.Members()), len(g.Subscriptions), direct)),
-			"",
-			ui.SelectedStyle.Render("按 Tab/l/Enter 展开查看订阅与节点"),
 		}
+		if note := p.refNote(g.Name); note != "" {
+			lines = append(lines, ui.HelpStyle.Render(" 引用   "+note))
+		}
+		lines = append(lines, "",
+			ui.SelectedStyle.Render("按 Tab/l/Enter 展开查看订阅与节点"))
+		return lines
 	}
 	if len(p.rows) == 0 {
+		if p.nodeView.filter() != "" {
+			return []string{ui.HelpStyle.Render(p.nodeView.prompt()),
+				ui.ErrorStyle.Render(" 没有匹配的节点（/ 重新编辑，框内 esc 清空）")}
+		}
 		return []string{ui.HelpStyle.Render(" 组为空：按 s 挂订阅 / n 加手动节点")}
 	}
 
-	rowsH := max0(p.height - 2)
+	var head []string
+	if prompt := p.nodeView.prompt(); prompt != "" {
+		head = append(head, ui.HelpStyle.Render(prompt))
+	}
+	rowsH := max0(p.height - 2 - len(head))
 	start := 0
 	if p.rc >= rowsH {
 		start = p.rc - rowsH + 1
 	}
-	lines := make([]string, 0, rowsH)
+	lines := make([]string, 0, rowsH+len(head))
+	lines = append(lines, head...)
 	for i := start; i < len(p.rows) && i < start+rowsH; i++ {
 		lines = append(lines, p.renderRow(g, i))
 	}
@@ -802,16 +905,48 @@ func (p groupsPage) subPickRows() [][2]string {
 	return out
 }
 
+// visibleCandidates applies the shared filter/sort to the add-node picker's
+// rows, mapping the surviving nodes back to their rows (a node is listed
+// once per source; the first occurrence wins).
+func (p *groupsPage) visibleCandidates() []candidateRow {
+	rows := p.candidateRows()
+	nodes := make([]driver.Node, len(rows))
+	for i, r := range rows {
+		nodes[i] = r.node
+	}
+	byID := map[string]candidateRow{}
+	for _, r := range rows {
+		if _, dup := byID[r.node.ID]; !dup {
+			byID[r.node.ID] = r
+		}
+	}
+	visible := p.nodeView.visible(nodes, p.lat)
+	out := make([]candidateRow, 0, len(visible))
+	for _, n := range visible {
+		out = append(out, byID[n.ID])
+	}
+	return out
+}
+
 func (p groupsPage) candidateLines() []string {
-	lines := []string{ui.TitleStyle.Render(" 选择要添加到组的节点") + ui.HelpStyle.Render("  (手动 + 各订阅)")}
+	title := " 选择要添加到组的节点" + ui.HelpStyle.Render("  (手动 + 各订阅)")
+	lines := []string{ui.TitleStyle.Render(title)}
 	if p.candBusy {
 		return append(lines, ui.HelpStyle.Render(" 拉取中…"))
 	}
-	rows := p.candidateRows()
-	if len(rows) == 0 {
+	rows := p.visibleCandidates()
+	if len(p.candidateRows()) == 0 {
 		return append(lines, ui.HelpStyle.Render(" （没有可添加的节点）"))
 	}
-	rowsH := max0(p.height - 5)
+	if prompt := p.nodeView.prompt(); prompt != "" {
+		lines = append(lines, ui.HelpStyle.Render(prompt))
+	}
+	if len(rows) == 0 {
+		return append(lines, ui.ErrorStyle.Render(" 没有匹配的节点（/ 重新编辑，框内 esc 清空）"))
+	}
+	lines[0] += p.nodeView.countTitle(len(rows), len(p.candidateRows())) +
+		p.nodeView.sortTitle()
+	rowsH := max0(p.height - 5 - len(lines))
 	start := 0
 	if p.pickCursor >= rowsH {
 		start = p.pickCursor - rowsH + 1

@@ -39,6 +39,7 @@ type Node struct {
 	Tag            string
 	Protocol       string
 	Address        string
+	Link           string // raw share link; only meaningful for manual nodes
 	SubscriptionID string // empty for manually imported nodes
 }
 
@@ -143,6 +144,24 @@ type TrafficSnapshot struct {
 	UpdatedAt   time.Time
 }
 
+// NetworkInterface is a NIC the backend sees, with its addresses. The backend
+// binds to interfaces by name (lanInterface/wanInterface), so this is what
+// makes those config fields checkable instead of guesswork.
+type NetworkInterface struct {
+	Name    string
+	Up      bool
+	Default bool   // carries a default route
+	Gateway string // gateway of the first default route, when known
+	IPs     []string
+}
+
+// NodeImportResult is the per-link outcome of a batch node import.
+type NodeImportResult struct {
+	Link  string
+	Error string // empty on success
+	Node  *Node  // the imported node, when the backend reports it
+}
+
 // Subscription is a subscription source fetched periodically by the backend.
 type Subscription struct {
 	ID         string
@@ -165,6 +184,11 @@ type ConfigItem struct {
 	Body     string        // full DSL text for detail panes (dns/routing)
 	Fields   []ConfigField // editable global fields (config section only)
 	Summary  []string      // neutral structured overview lines (routing rules / dns upstreams)
+	// References lists the group names this profile's DSL refers to (rule
+	// outbounds and fallback). Renaming or deleting one of those groups
+	// breaks the profile silently: daed accepts the change and the rules
+	// simply stop matching anything.
+	References []string
 }
 
 // ConfigField describes one editable global config field.
@@ -240,7 +264,17 @@ type Driver interface {
 
 	// Manual node management.
 	ImportNode(ctx context.Context, link, tag string) error
+	// ImportNodes imports several links at once and reports each link's
+	// outcome individually: a link the backend cannot parse must not
+	// discard the rest of a pasted batch.
+	ImportNodes(ctx context.Context, links []string, tag string) ([]NodeImportResult, error)
 	RemoveNodes(ctx context.Context, nodeIDs []string) error
+	// TagNode gives a manual node a new tag; UpdateNode replaces its link.
+	// Both keep the node ID, so group memberships survive — unlike
+	// remove + re-import, which mints a new ID and silently detaches the
+	// node from every group it was in.
+	TagNode(ctx context.Context, id, tag string) error
+	UpdateNode(ctx context.Context, id, newLink string) error
 
 	TestLatency(ctx context.Context, nodeIDs []string) error
 	Latencies(ctx context.Context, nodeIDs []string) ([]Latency, error)
@@ -253,6 +287,11 @@ type Driver interface {
 	RemoveSubscriptions(ctx context.Context, ids []string) error
 	// UpdateSubscriptionCron changes the auto-update schedule.
 	UpdateSubscriptionCron(ctx context.Context, id, cronExp string, enable bool) error
+	// TagSubscription gives a subscription a new tag;
+	// UpdateSubscriptionLink replaces its URL without re-fetching nodes.
+	// Both keep the subscription ID, so group attachments survive.
+	TagSubscription(ctx context.Context, id, tag string) error
+	UpdateSubscriptionLink(ctx context.Context, id, link string) error
 
 	ListSelections(ctx context.Context) (Selections, error)
 	SelectConfig(ctx context.Context, id string) error
@@ -286,6 +325,20 @@ type Driver interface {
 	// UpdateConfigFields applies a partial globalInput update for several
 	// fields at once (used to clone configs).
 	UpdateConfigFields(ctx context.Context, id string, fields []ConfigField) error
+	// Interfaces lists the NICs the backend sees (empty when the backend
+	// cannot report them). The UI uses it to validate lanInterface /
+	// wanInterface and to show network state on the home page.
+	Interfaces(ctx context.Context) ([]NetworkInterface, error)
 	// Run applies the selected config+dns+routing; dry validates only.
 	Run(ctx context.Context, dry bool) error
+
+	// Account management. UpdatePassword changes the signed-in account's
+	// password; the backend answers with a fresh token, which the driver
+	// persists through its SaveToken hook (and the credentials hook, since
+	// the stored password is what silent re-auth replays).
+	UpdatePassword(ctx context.Context, currentPassword, newPassword string) error
+	// Logout drops locally stored credentials and tokens. Backends without
+	// a logout endpoint simply forget the session; daed's JWT stays valid
+	// until it expires.
+	Logout(ctx context.Context) error
 }

@@ -27,6 +27,10 @@ type authMsg struct {
 	Err   error
 }
 
+// logoutMsg asks the root model to drop the local session: clear the stored
+// credentials/token and fall back to the login form.
+type logoutMsg struct{}
+
 type statusMsg struct {
 	Status driver.Status
 	Err    error
@@ -40,6 +44,22 @@ type groupsMsg struct {
 type manualNodesMsg struct {
 	Nodes []driver.Node
 	Err   error
+}
+
+// importDoneMsg reports a batch node import: the per-link outcomes plus the
+// refreshed manual node list.
+type importDoneMsg struct {
+	Results []driver.NodeImportResult
+	Nodes   []driver.Node
+	Err     error
+}
+
+// nodesChangedMsg refreshes the manual node list together with the groups:
+// removing or editing a node also changes what group memberships display.
+type nodesChangedMsg struct {
+	Nodes  []driver.Node
+	Groups []driver.Group
+	Err    error
 }
 
 // subNodes is one subscription's node list, for the attach picker.
@@ -80,6 +100,11 @@ type subsMsg struct {
 type selectionsMsg struct {
 	Sel driver.Selections
 	Err error
+}
+
+type ifacesMsg struct {
+	Ifaces []driver.NetworkInterface
+	Err    error
 }
 
 // opDoneMsg reports completion of a fire-and-forget mutation.
@@ -137,6 +162,16 @@ func loginCmd(d driver.Driver, setup bool, username, password string) tea.Cmd {
 	})
 }
 
+// passwordCmd changes the signed-in account's password. The driver persists
+// the fresh token (and the new password, which silent re-auth replays), so
+// success needs no extra bookkeeping here.
+func passwordCmd(d driver.Driver, currentPassword, newPassword string) tea.Cmd {
+	return withCtx(func(ctx context.Context) tea.Msg {
+		err := d.UpdatePassword(ctx, currentPassword, newPassword)
+		return opDoneMsg{Op: "修改密码", Err: err}
+	})
+}
+
 func statusCmd(d driver.Driver) tea.Cmd {
 	return withCtx(func(ctx context.Context) tea.Msg {
 		st, err := d.Connect(ctx)
@@ -153,19 +188,37 @@ func loadGroupsCmd(d driver.Driver) tea.Cmd {
 
 // nodeMutation manages manual (subscription-less) nodes.
 type nodeMutation struct {
-	kind      int // 0 import, 1 remove
-	link, tag string
-	ids       []string
+	kind   int // 0 import, 1 remove, 2 edit
+	links  []string
+	link   string // edit: replacement link (empty = keep)
+	tag    string
+	ids    []string
+	doLink bool // edit: the link actually changed
 }
 
 func nodeMutateCmd(d driver.Driver, nm nodeMutation, label string) tea.Cmd {
 	return withCtxT(30*time.Second, func(ctx context.Context) tea.Msg {
+		if nm.kind == 0 {
+			report, err := d.ImportNodes(ctx, nm.links, nm.tag)
+			if err != nil {
+				return opDoneMsg{Op: label, Err: err}
+			}
+			nodes, lerr := d.ListManualNodes(ctx)
+			if lerr != nil {
+				return opDoneMsg{Op: label, Err: lerr}
+			}
+			return importDoneMsg{Results: report, Nodes: nodes}
+		}
 		var err error
 		switch nm.kind {
-		case 0:
-			err = d.ImportNode(ctx, nm.link, nm.tag)
 		case 1:
 			err = d.RemoveNodes(ctx, nm.ids)
+		case 2:
+			// Edit in place: the node ID survives, so the groups it belongs
+			// to keep their membership (remove + re-import would not).
+			if err = d.TagNode(ctx, nm.ids[0], nm.tag); err == nil && nm.doLink {
+				err = d.UpdateNode(ctx, nm.ids[0], nm.link)
+			}
 		}
 		if err != nil {
 			return opDoneMsg{Op: label, Err: err}
@@ -174,7 +227,11 @@ func nodeMutateCmd(d driver.Driver, nm nodeMutation, label string) tea.Cmd {
 		if lerr != nil {
 			return opDoneMsg{Op: label, Err: lerr}
 		}
-		return manualNodesMsg{Nodes: nodes}
+		groups, gerr := d.ListGroups(ctx)
+		if gerr != nil {
+			return opDoneMsg{Op: label, Err: gerr}
+		}
+		return nodesChangedMsg{Nodes: nodes, Groups: groups}
 	})
 }
 
@@ -309,16 +366,17 @@ func loadSubsCmd(d driver.Driver) tea.Cmd {
 }
 
 type subMutation struct {
-	kind      int // 0 add, 1 update, 2 remove, 3 cron
+	kind      int // 0 add, 1 update, 2 remove, 3 cron, 4 edit
 	id        string
 	ids       []string
 	link, tag string
 	cronExp   string
 	cronOn    bool
+	doLink    bool // edit: the link actually changed
 }
 
 func subMutateCmd(d driver.Driver, m subMutation, label string) tea.Cmd {
-	return withCtx(func(ctx context.Context) tea.Msg {
+	return withCtxT(30*time.Second, func(ctx context.Context) tea.Msg {
 		var err error
 		switch m.kind {
 		case 0:
@@ -329,6 +387,13 @@ func subMutateCmd(d driver.Driver, m subMutation, label string) tea.Cmd {
 			err = d.RemoveSubscriptions(ctx, m.ids)
 		case 3:
 			err = d.UpdateSubscriptionCron(ctx, m.id, m.cronExp, m.cronOn)
+		case 4:
+			// Edit in place: the subscription ID survives, so the groups it
+			// is attached to keep their membership (remove + re-import would
+			// silently detach it).
+			if err = d.TagSubscription(ctx, m.id, m.tag); err == nil && m.doLink {
+				err = d.UpdateSubscriptionLink(ctx, m.id, m.link)
+			}
 		}
 		if err != nil {
 			return opDoneMsg{Op: label, Err: err}
@@ -345,6 +410,13 @@ func loadSelectionsCmd(d driver.Driver) tea.Cmd {
 	return withCtx(func(ctx context.Context) tea.Msg {
 		sel, err := d.ListSelections(ctx)
 		return selectionsMsg{Sel: sel, Err: err}
+	})
+}
+
+func loadInterfacesCmd(d driver.Driver) tea.Cmd {
+	return withCtx(func(ctx context.Context) tea.Msg {
+		ifs, err := d.Interfaces(ctx)
+		return ifacesMsg{Ifaces: ifs, Err: err}
 	})
 }
 

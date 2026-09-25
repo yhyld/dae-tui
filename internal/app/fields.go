@@ -2,9 +2,25 @@ package app
 
 import (
 	"sort"
+	"strings"
 
 	"dae-tui/internal/driver"
 )
+
+// configuredIfaces splits an interface field value ("eth0, wlan0") into NIC
+// names. dae accepts the literal "auto" as "detect it yourself" (daed's
+// default wan_interface) — it is not a NIC name, so it is dropped here and
+// never reported as missing.
+func configuredIfaces(value string) []string {
+	var out []string
+	for _, n := range strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ' ' }) {
+		if n == "" || strings.EqualFold(n, "auto") {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
+}
 
 // configFieldLabels maps globalInput keys to Chinese labels. The editable
 // field set is discovered from the backend's field metadata, so keys this
