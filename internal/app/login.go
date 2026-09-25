@@ -1,0 +1,164 @@
+package app
+
+import (
+	"strings"
+
+	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+
+	"dae-tui/internal/ui"
+)
+
+// loginForm is used both for login (existing account) and first-run setup
+// (create the account; daed only allows one user, created when none exist).
+type loginForm struct {
+	setup    bool
+	username textinput.Model
+	password textinput.Model
+	confirm  textinput.Model // setup only
+	focus    int             // 0 username, 1 password, 2 confirm
+	busy     bool
+	err      string
+}
+
+func newLoginForm(setup bool) loginForm {
+	u := textinput.New()
+	u.Placeholder = "用户名"
+	u.CharLimit = 64
+	u.Width = 36
+	u.Focus()
+
+	p := textinput.New()
+	p.Placeholder = "密码 (至少6位, 含字母和数字)"
+	p.EchoMode = textinput.EchoPassword
+	p.EchoCharacter = '•'
+	p.CharLimit = 128
+	p.Width = 36
+
+	f := loginForm{setup: setup, username: u, password: p}
+	if setup {
+		c := textinput.New()
+		c.Placeholder = "确认密码"
+		c.EchoMode = textinput.EchoPassword
+		c.EchoCharacter = '•'
+		c.CharLimit = 128
+		c.Width = 36
+		f.confirm = c
+	}
+	return f
+}
+
+func (f loginForm) init() tea.Cmd {
+	return textinput.Blink
+}
+
+// Update forwards key messages to the focused input.
+func (f loginForm) Update(msg tea.Msg) (loginForm, tea.Cmd) {
+	var cmds []tea.Cmd
+	if k, ok := msg.(tea.KeyMsg); ok {
+		switch k.String() {
+		case "tab", "shift+tab", "up", "down":
+			delta := 1
+			if k.String() == "shift+tab" || k.String() == "up" {
+				delta = -1
+			}
+			n := 2
+			if f.setup {
+				n = 3
+			}
+			f.focus = (f.focus + delta + n) % n
+			f.setFocus()
+			return f, nil
+		}
+	}
+	var cmd tea.Cmd
+	switch f.focus {
+	case 0:
+		f.username, cmd = f.username.Update(msg)
+	case 1:
+		f.password, cmd = f.password.Update(msg)
+	case 2:
+		f.confirm, cmd = f.confirm.Update(msg)
+	}
+	cmds = append(cmds, cmd)
+	return f, tea.Batch(cmds...)
+}
+
+func (f *loginForm) setFocus() {
+	f.username.Blur()
+	f.password.Blur()
+	if f.setup {
+		f.confirm.Blur()
+	}
+	switch f.focus {
+	case 0:
+		f.username.Focus()
+	case 1:
+		f.password.Focus()
+	case 2:
+		f.confirm.Focus()
+	}
+}
+
+// values validates the form and returns the credentials.
+func (f *loginForm) values() (string, string, bool) {
+	u := strings.TrimSpace(f.username.Value())
+	p := f.password.Value()
+	if u == "" || p == "" {
+		f.err = "用户名和密码不能为空"
+		return "", "", false
+	}
+	if f.setup && p != f.confirm.Value() {
+		f.err = "两次输入的密码不一致"
+		return "", "", false
+	}
+	if f.setup && len(p) < 6 {
+		f.err = "密码至少 6 位，且需包含字母和数字"
+		return "", "", false
+	}
+	return u, p, true
+}
+
+func (f loginForm) View(endpoint string, setup bool) string {
+	var b strings.Builder
+	title := "登录 daed"
+	if setup {
+		title = "初始化 daed 账号（尚无用户）"
+	}
+	b.WriteString(ui.TitleStyle.Render("dae-tui · " + title))
+	b.WriteString("\n")
+	b.WriteString(ui.HelpStyle.Render(" " + endpoint))
+	b.WriteString("\n\n")
+
+	b.WriteString(field("用户名", f.focus == 0, f.username.View()) + "\n")
+	b.WriteString(field("密码", f.focus == 1, f.password.View()) + "\n")
+	if setup {
+		b.WriteString(field("确认", f.focus == 2, f.confirm.View()) + "\n")
+	}
+
+	if f.busy {
+		b.WriteString("\n" + ui.HelpStyle.Render("正在验证…"))
+	}
+	if f.err != "" {
+		b.WriteString("\n" + ui.ErrorStyle.Render("✗ "+f.err))
+	}
+	b.WriteString("\n\n")
+	b.WriteString(ui.HelpStyle.Render(" Tab 切换焦点  Enter 提交  " + submitHint(setup)))
+	return lipgloss.NewStyle().Padding(1, 3).Render(b.String())
+}
+
+func submitHint(setup bool) string {
+	if setup {
+		return "esc 返回"
+	}
+	return "esc 退出"
+}
+
+func field(label string, focused bool, input string) string {
+	style := ui.HelpStyle
+	if focused {
+		style = ui.SelectedStyle
+	}
+	return style.Render(" "+ui.PadRight(label, 6)) + " " + input
+}
