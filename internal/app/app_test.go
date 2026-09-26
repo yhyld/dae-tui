@@ -398,9 +398,8 @@ func TestRenderAllPages(t *testing.T) {
 		"3": "订阅",
 		"4": "手动节点",
 		"5": "配置方案",
-		"?": "帮助",
 	}
-	for _, pageKey := range []string{"1", "2", "3", "4", "5", "?"} {
+	for _, pageKey := range []string{"1", "2", "3", "4", "5"} {
 		mm, _ := m.Update(key(pageKey))
 		m = mm
 		v := m.View()
@@ -2853,8 +2852,9 @@ func TestSmallTerminalFallback(t *testing.T) {
 
 // --- help page scroll ---
 
-func TestHelpPageScrolls(t *testing.T) {
+func TestHelpOverlay(t *testing.T) {
 	m := newTestModel(t)
+	m, _ = m.Update(key("2")) // start somewhere with content under the box
 	m, _ = m.Update(key("?"))
 	v := m.View()
 	if !strings.Contains(v, "全局") {
@@ -2863,6 +2863,10 @@ func TestHelpPageScrolls(t *testing.T) {
 	if strings.Contains(v, "关于") {
 		t.Fatalf("help tail should be below the fold:\n%s", v)
 	}
+	// The page underneath stays visible around the floating window.
+	if !strings.Contains(v, "路由组") {
+		t.Fatalf("the page should remain visible under the overlay:\n%s", v)
+	}
 	m, _ = m.Update(key("G"))
 	if v := m.View(); !strings.Contains(v, "关于") {
 		t.Fatalf("G should jump to the end of help:\n%s", v)
@@ -2870,6 +2874,16 @@ func TestHelpPageScrolls(t *testing.T) {
 	m, _ = m.Update(key("g"))
 	if v := m.View(); !strings.Contains(v, "全局") || strings.Contains(v, "关于") {
 		t.Fatalf("g should jump back to the top:\n%s", v)
+	}
+	// While open the overlay owns every key: page hotkeys must not fire.
+	m, _ = m.Update(key("1"))
+	mm := m.(Model)
+	if mm.page != pageTree || !mm.helpOpen {
+		t.Fatalf("overlay should swallow page hotkeys: page=%d helpOpen=%v", mm.page, mm.helpOpen)
+	}
+	m, _ = m.Update(key("esc"))
+	if v := m.View(); strings.Contains(v, "dae-tui 帮助") {
+		t.Fatalf("esc should close the overlay:\n%s", v)
 	}
 }
 
@@ -2915,11 +2929,13 @@ func TestMouseTabClick(t *testing.T) {
 	if mm.page != pageTree {
 		t.Fatalf("click on the second tab should open the groups page, got page %d", mm.page)
 	}
-	// clicking the "?" tab opens help
-	m3, _ := m2.Update(mouseClick(tabX(len(tabLabels)-1), 2))
+	// clicking the bottom help line opens the overlay (its trailing
+	// "? 帮助" hint names the key)
+	mm2 := m2.(Model)
+	m3, _ := m2.Update(mouseClick(10, mm2.height-2))
 	mm = m3.(Model)
-	if mm.page != pageHelp {
-		t.Fatalf("click on the last tab should open help, got page %d", mm.page)
+	if !mm.helpOpen {
+		t.Fatal("clicking the help line should open the overlay")
 	}
 }
 
@@ -3128,5 +3144,208 @@ func TestMouseReenabledAfterExec(t *testing.T) {
 	}
 	if !sawMouse {
 		t.Fatalf("editorDoneMsg cmd = %T should re-enable the mouse", cmd())
+	}
+}
+
+// --- floating windows ---
+
+// TestFormsFloatOverPage: an open form overlays the page; the right pane's
+// content is no longer displaced by it.
+func TestFormsFloatOverPage(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("3"))
+	m, _ = m.Update(key("n")) // add-subscription form
+	v := m.View()
+	for _, want := range []string{"新增订阅", "标签 机场A", "状态 updated"} { // form + pane detail
+		if !strings.Contains(v, want) {
+			t.Fatalf("floating form should coexist with pane content, missing %q:\n%s", want, v)
+		}
+	}
+	m2 := newTestModel(t)
+	m2, _ = m2.Update(key("2"))
+	m2, _ = m2.Update(key("c")) // create-group form
+	if v := m2.View(); !strings.Contains(v, "创建群组") || !strings.Contains(v, "自动 (最小移动平均延迟)") {
+		t.Fatalf("create form should float over the group detail:\n%s", v)
+	}
+}
+
+// TestApplyConfirmFloats: the global A confirmation overlays the page
+// instead of pushing its content down.
+func TestApplyConfirmFloats(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("1"))
+	m, _ = m.Update(key("A"))
+	v := m.View()
+	if !strings.Contains(v, "确认应用当前选中") {
+		t.Fatalf("apply confirmation missing:\n%s", v)
+	}
+	// The first body row still shows the page (the proxy badge), not the box.
+	lines := strings.Split(v, "\n")
+	if len(lines) < 5 || !strings.Contains(lines[3], "代理运行中") {
+		t.Fatalf("the page should stay in place under the floating confirm:\n%s", v)
+	}
+}
+
+// TestAcctOverlay: P opens the account window over any page, esc closes.
+func TestAcctOverlay(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("2")) // not the home page
+	m, _ = m.Update(key("P"))
+	if v := m.View(); !strings.Contains(v, "修改密码") || !strings.Contains(v, "退出登录") {
+		t.Fatalf("account window missing:\n%s", v)
+	}
+	// While it is open, page hotkeys are swallowed.
+	m, _ = m.Update(key("1"))
+	if mm := m.(Model); mm.page != pageTree {
+		t.Fatalf("account overlay should swallow page hotkeys, page=%d", mm.page)
+	}
+	m, _ = m.Update(key("esc"))
+	if v := m.View(); strings.Contains(v, "退出登录") {
+		t.Fatalf("esc should close the account window:\n%s", v)
+	}
+}
+
+// --- builtin DSL editor ---
+
+func newBuiltinModel(t *testing.T, drv driver.Driver) tea.Model {
+	t.Helper()
+	cfg := &config.Config{Endpoint: "http://127.0.0.1:2023/graphql", Editor: "builtin"}
+	m := New(drv, cfg, "/tmp/dae-tui-test.toml")
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	m2, _ = m2.Update(bootMsg{Users: 1, Status: driver.Status{Version: "v2.1.1", Running: true}})
+	m2, _ = m2.Update(groupsMsg{Groups: mustGroups(t)})
+	m2, _ = m2.Update(subsMsg{Subs: mustSubs(t)})
+	m2, _ = m2.Update(selectionsMsg{Sel: mustSel(t)})
+	return m2
+}
+
+// sectionRow moves the configs cursor onto the first item of a section.
+func sectionRow(m tea.Model, section string) tea.Model {
+	mm := m.(Model)
+	for i, r := range mm.configs.rows {
+		if r.kind == rowItem && r.section == section {
+			mm.configs.cur = i
+			return mm
+		}
+	}
+	panic("no " + section + " row in stub")
+}
+
+func TestBuiltinEditorFlow(t *testing.T) {
+	m := newBuiltinModel(t, stubDriver{})
+	m, _ = m.Update(key("5"))
+	m = sectionRow(m, "routing")
+	m, cmd := m.Update(key("e"))
+	if cmd == nil {
+		t.Fatal("builtin editor should open with a blink cmd")
+	}
+	v := m.View()
+	for _, want := range []string{"编辑 路由规则", "ctrl+s 校验", "fallback: proxy"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("builtin editor missing %q:\n%s", want, v)
+		}
+	}
+	// The diff-confirm pane stays visible beneath.
+	if !strings.Contains(v, "默认路由") {
+		t.Fatalf("page should remain visible under the editor:\n%s", v)
+	}
+
+	// ctrl+s with unchanged content just closes.
+	m, _ = m.Update(key("ctrl+s"))
+	mm := m.(Model)
+	if mm.configs.mode != 0 {
+		t.Fatalf("unchanged content should close the editor, mode=%d", mm.configs.mode)
+	}
+
+	// An edit goes through validation into the diff confirmation.
+	m, _ = m.Update(key("e"))
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("\n# comment")})
+	m, cmd = m.Update(key("ctrl+s"))
+	if cmd == nil {
+		t.Fatal("changed content should fire validation")
+	}
+	valMsg, ok := firstMsgOf[editorValidatedMsg](execCmds(cmd))
+	if !ok {
+		t.Fatalf("cmd produced %v, want editorValidatedMsg", execCmds(cmd))
+	}
+	m, _ = m.Update(valMsg)
+	mm = m.(Model)
+	if mm.configs.mode != 6 {
+		t.Fatalf("a valid edit should reach the diff confirm, mode=%d", mm.configs.mode)
+	}
+	if v := m.View(); !strings.Contains(v, "确认应用更改") {
+		t.Fatalf("diff confirm missing:\n%s", v)
+	}
+
+	// Declining the diff returns to the editor with the edited text.
+	m, _ = m.Update(key("n"))
+	mm = m.(Model)
+	if mm.configs.mode != 7 {
+		t.Fatalf("declining a builtin diff should reopen the editor, mode=%d", mm.configs.mode)
+	}
+	if v := m.View(); !strings.Contains(v, "# comment") {
+		t.Fatalf("the edited text should survive the decline:\n%s", v)
+	}
+}
+
+func TestBuiltinEditorValidationKeepsEditorOpen(t *testing.T) {
+	// rejectingDriver rejects DNS validation only, so edit the DNS profile.
+	m := newBuiltinModel(t, rejectingDriver{})
+	m, _ = m.Update(key("5"))
+	m = sectionRow(m, "dns")
+	m, _ = m.Update(key("e"))
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	m, cmd := m.Update(key("ctrl+s"))
+	valMsg, ok := firstMsgOf[editorValidatedMsg](execCmds(cmd))
+	if !ok || valMsg.Err == nil {
+		t.Fatalf("cmd produced %+v, want a validation error", valMsg)
+	}
+	m, _ = m.Update(valMsg)
+	mm := m.(Model)
+	if mm.configs.mode != 7 {
+		t.Fatalf("a rejected edit should keep the editor open, mode=%d", mm.configs.mode)
+	}
+	if v := m.View(); !strings.Contains(v, "校验未通过") && !strings.Contains(v, "mismatched input") {
+		t.Fatalf("the rejection should show inside the editor:\n%s", v)
+	}
+}
+
+// TestCtrlCQuitsFromOverlays: ctrl+c must quit from inside any floating
+// window or confirmation, not just from a bare page.
+func TestCtrlCQuitsFromOverlays(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("?"))
+	_, cmd := m.Update(key("ctrl+c"))
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatalf("ctrl+c inside the help overlay should quit, got %T", cmd())
+	}
+	m3 := newTestModel(t)
+	m3, _ = m3.Update(key("A"))
+	_, cmd = m3.Update(key("ctrl+c"))
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatalf("ctrl+c inside the apply confirmation should quit, got %T", cmd())
+	}
+}
+
+// TestHelpHintOnKeyLine: every page's bottom key line carries the "? 帮助"
+// entry hint, and it survives narrow terminals (the keys truncate, the hint
+// does not).
+func TestHelpHintOnKeyLine(t *testing.T) {
+	for _, sz := range []struct{ w, h int }{{120, 36}, {80, 24}, {62, 20}} {
+		m := newTestModel(t)
+		m, _ = m.Update(tea.WindowSizeMsg{Width: sz.w, Height: sz.h})
+		m, _ = m.Update(key("2"))
+		lines := strings.Split(m.View(), "\n")
+		if len(lines) < sz.h {
+			t.Fatalf("%dx%d: view too short", sz.w, sz.h)
+		}
+		if help := lines[sz.h-2]; !strings.Contains(help, "? 帮助") {
+			t.Fatalf("%dx%d: key line lost the help hint: %q", sz.w, sz.h, help)
+		}
+	}
+	// Tabs no longer advertise help — it would read as a sixth tab.
+	m := newTestModel(t)
+	if tabs := strings.Split(m.View(), "\n")[2]; strings.Contains(tabs, "帮助") {
+		t.Fatalf("tabs bar should not carry a help label: %q", tabs)
 	}
 }

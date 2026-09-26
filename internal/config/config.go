@@ -17,6 +17,12 @@ type Config struct {
 	Username string `toml:"username"`
 	Password string `toml:"password"`
 	Token    string `toml:"token"`
+
+	// Editor picks how DNS/routing DSL is edited: "external" (default)
+	// hands the terminal to $VISUAL/$EDITOR; "builtin" opens an in-app
+	// floating textarea (no editor keybindings, but works without an
+	// editor installed and keeps the TUI on screen).
+	Editor string `toml:"editor"`
 }
 
 // DefaultEndpoint is the daed default GraphQL address.
@@ -46,6 +52,9 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Endpoint == "" {
 		cfg.Endpoint = DefaultEndpoint
+	}
+	if cfg.Editor == "" {
+		cfg.Editor = "external"
 	}
 	return cfg, nil
 }

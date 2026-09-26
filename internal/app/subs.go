@@ -536,8 +536,8 @@ func (p subsPage) View() string {
 	// Modals render inside the right pane: the panes always fill the app
 	// frame, so anything appended below them would be pushed off screen.
 	rvTitle := " 详情 "
-	if p.mode != 0 {
-		rvTitle = p.modalTitle()
+	if p.mode == 2 {
+		rvTitle = " 删除确认 "
 	} else if s := p.cur(); s != nil && p.expanded {
 		rvTitle = " 节点" + p.nodeView.countTitle(len(p.visibleNodes()), len(p.subNodes[s.ID])) +
 			p.nodeView.sortTitle() + " "
@@ -547,36 +547,20 @@ func (p subsPage) View() string {
 	return lipgloss.JoinHorizontal(lipgloss.Top, lv, " ", rv)
 }
 
-func (p subsPage) modalTitle() string {
+// overlay returns the page's floating window: the add / cron / edit forms.
+// The delete confirmation stays in the right pane — it belongs next to the
+// item it names.
+func (p subsPage) overlay() *overlaySpec {
 	switch p.mode {
 	case 1:
-		return " 新增订阅 "
-	case 2:
-		return " 删除确认 "
-	case 3:
-		return " 定时刷新 "
-	case 4:
-		return " 编辑订阅 "
-	}
-	return " 详情 "
-}
-
-// modalLines renders the active modal (add / delete / cron / edit) inside
-// the right pane.
-func (p subsPage) modalLines() []string {
-	switch p.mode {
-	case 1:
-		return ui.BoxLines(false,
+		return &overlaySpec{lines: []string{
 			ui.TitleStyle.Render(" 新增订阅"),
 			"",
-			" 链接  "+p.link.View(),
-			" 标签  "+p.tag.View(),
+			" 链接  " + p.link.View(),
+			" 标签  " + p.tag.View(),
 			"",
-			ui.HelpStyle.Render(" Tab 切换字段  Enter 提交  esc 取消"))
-	case 2:
-		if s := p.cur(); s != nil {
-			return ui.BoxLines(true, "确认删除订阅 \""+s.Tag+"\"? (y/n)")
-		}
+			ui.HelpStyle.Render(" Tab 切换字段  Enter 提交  esc 取消"),
+		}}
 	case 3:
 		if s := p.cur(); s != nil {
 			on := ui.ErrorStyle.Render("停用")
@@ -587,25 +571,36 @@ func (p subsPage) modalLines() []string {
 			if p.ifld == 1 {
 				cursor = ui.CursorStyle.Render("❯ ")
 			}
-			return ui.BoxLines(false,
-				ui.TitleStyle.Render(" 定时刷新 "+s.Tag),
+			return &overlaySpec{lines: []string{
+				ui.TitleStyle.Render(" 定时刷新 " + s.Tag),
 				"",
-				" 表达式  "+p.cronInput.View(),
-				" 启用    "+cursor+on+ui.HelpStyle.Render("  (space 切换)"),
+				" 表达式  " + p.cronInput.View(),
+				" 启用    " + cursor + on + ui.HelpStyle.Render("  (space 切换)"),
 				"",
-				ui.HelpStyle.Render(" Tab 切换  space 开关  Enter 提交  esc 取消"))
+				ui.HelpStyle.Render(" Tab 切换  space 开关  Enter 提交  esc 取消"),
+			}}
 		}
 	case 4:
 		if s := p.cur(); s != nil {
-			return ui.BoxLines(false,
-				ui.TitleStyle.Render(" 编辑订阅 · "+s.Tag),
+			return &overlaySpec{lines: []string{
+				ui.TitleStyle.Render(" 编辑订阅 · " + s.Tag),
 				"",
-				" 标签  "+p.tag.View(),
-				" 链接  "+p.link.View(),
+				" 标签  " + p.tag.View(),
+				" 链接  " + p.link.View(),
 				"",
 				ui.HelpStyle.Render(" 改链接不会重新拉取节点（u 才会）"),
-				ui.HelpStyle.Render(" Tab 切换字段  Enter 提交  esc 取消"))
+				ui.HelpStyle.Render(" Tab 切换字段  Enter 提交  esc 取消"),
+			}}
 		}
+	}
+	return nil
+}
+
+// modalLines renders the in-pane modal: only the delete confirmation
+// (the forms float, see overlay).
+func (p subsPage) modalLines() []string {
+	if s := p.cur(); s != nil {
+		return ui.BoxLines(true, "确认删除订阅 \""+s.Tag+"\"? (y/n)")
 	}
 	return []string{ui.HelpStyle.Render("（无订阅）")}
 }
@@ -686,8 +681,8 @@ func (p *subsPage) leftClick(row int) {
 }
 
 func (p subsPage) rightLines() []string {
-	if p.mode != 0 {
-		return p.modalLines()
+	if p.mode == 2 {
+		return p.modalLines() // delete confirmation
 	}
 	s := p.cur()
 	if s == nil {

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -47,11 +48,22 @@ type configsPage struct {
 	validateErr map[string]editRejection
 
 	// modal state
-	mode       int // 0 list, 1 fieldPicker, 2 fieldInput, 3 createInput, 4 renameInput, 5 deleteConfirm, 6 diffConfirm
+	mode       int // 0 list, 1 fieldPicker, 2 fieldInput, 3 createInput, 4 renameInput, 5 deleteConfirm, 6 diffConfirm, 7 builtinEditor
 	pickCursor int
 	input      textinput.Model
 	editField  driver.ConfigField
 	fieldErr   string // client-side type rejection of the field input
+
+	// builtin DSL editor (mode 7): the in-app alternative to $EDITOR for
+	// dns/routing text. edCtx identifies what is being edited; edErr is the
+	// backend parser's last rejection, shown inside the floating editor so
+	// the text stays put while it is fixed.
+	builtin   bool
+	ed        textarea.Model
+	edSection string
+	edID      string
+	edOld     string
+	edErr     string
 
 	caps driver.Caps
 
@@ -66,6 +78,7 @@ type diffState struct {
 	Old     string
 	Text    string
 	Path    string // temp file, kept until the edit is applied or cancelled
+	Builtin bool   // produced by the in-app editor: no file, cancel returns to it
 }
 
 type rowRef struct {
@@ -292,6 +305,26 @@ func (p *configsPage) modalKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		}
 		return nil
 
+	case 7: // builtin DSL editor
+		switch msg.String() {
+		case "esc":
+			p.mode = 0
+			p.ed.Blur()
+			return nil
+		case "ctrl+s":
+			text := strings.TrimSpace(p.ed.Value())
+			if text == "" || text == strings.TrimSpace(p.edOld) {
+				p.mode = 0
+				p.ed.Blur()
+				return nil
+			}
+			p.edErr = ""
+			return validateTextCmd(d, p.edSection, p.edID, text, p.edOld, "")
+		}
+		var cmd tea.Cmd
+		p.ed, cmd = p.ed.Update(msg)
+		return cmd
+
 	case 6: // DSL diff confirm
 		switch msg.String() {
 		case "y":
@@ -300,7 +333,9 @@ func (p *configsPage) modalKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			if st == nil {
 				return nil
 			}
-			os.Remove(st.Path)
+			if !st.Builtin {
+				os.Remove(st.Path)
+			}
 			delete(p.validateErr, st.ID)
 			return configTextCmd(d, st.Section, st.ID, st.Text, "更新"+sectionName(st.Section)+" 内容")
 		case "n", "esc":
@@ -308,6 +343,11 @@ func (p *configsPage) modalKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			p.diff, p.mode = nil, 0
 			if st == nil {
 				return nil
+			}
+			if st.Builtin {
+				// Back into the floating editor with the edited text: the
+				// in-app editor IS the copy that survives a decline.
+				return p.reopenBuiltinEditor(st)
 			}
 			// The edit is declined, but the temp file is the only copy of
 			// it — keep it and say where.
@@ -445,6 +485,25 @@ func editorCmd(path string) (*exec.Cmd, string, error) {
 	return exec.Command(argv[0], args...), strings.Join(argv, " "), nil
 }
 
+// openBuiltinEditor starts the in-app floating editor with the profile's
+// current DSL. Same contract as editInEditor minus the file: ctrl+s
+// validates, a rejection keeps the editor open with the error, and a
+// cancelled diff returns here instead of to a temp file.
+func (p *configsPage) openBuiltinEditor(r rowRef, it driver.ConfigItem) tea.Cmd {
+	delete(p.validateErr, it.ID)
+	ta := textarea.New()
+	ta.Placeholder = "dae DSL"
+	ta.SetWidth(min(76, max(40, p.rightW)))
+	ta.SetHeight(10)
+	ta.CharLimit = 0
+	ta.SetValue(it.Body)
+	ta.Focus()
+	p.ed = ta
+	p.edSection, p.edID, p.edOld, p.edErr = r.section, it.ID, it.Body, ""
+	p.mode = 7
+	return textarea.Blink
+}
+
 // editInEditor hands the raw DSL to $VISUAL/$EDITOR via tea.ExecProcess.
 func (p *configsPage) editInEditor(d driver.Driver, r rowRef, it driver.ConfigItem) tea.Cmd {
 	delete(p.validateErr, it.ID) // a new session supersedes the last rejection
@@ -499,11 +558,33 @@ func (p *configsPage) handleEditorDone(msg editorDoneMsg, d driver.Driver) tea.C
 	return validateTextCmd(d, msg.Section, msg.ID, text, msg.Old, msg.Path)
 }
 
+// reopenBuiltinEditor puts a declined diff back into the floating editor.
+func (p *configsPage) reopenBuiltinEditor(st *diffState) tea.Cmd {
+	ta := textarea.New()
+	ta.Placeholder = "dae DSL"
+	ta.SetWidth(min(76, max(40, p.rightW)))
+	ta.SetHeight(10)
+	ta.CharLimit = 0
+	ta.SetValue(st.Text)
+	ta.Focus()
+	p.ed = ta
+	p.edSection, p.edID, p.edOld = st.Section, st.ID, st.Old
+	p.mode = 7
+	return textarea.Blink
+}
+
 // handleValidated shows the diff of a backend-accepted edit and submits it
 // only after confirmation. A rejection keeps the temp file and the error
-// stays visible in the detail pane.
+// stays visible in the detail pane — unless the builtin editor is open, in
+// which case the editor itself is the surviving copy and stays open.
 func (p *configsPage) handleValidated(msg editorValidatedMsg, d driver.Driver) tea.Cmd {
 	if msg.Err != nil {
+		if p.mode == 7 {
+			p.edErr = flattenErr(msg.Err)
+			return func() tea.Msg {
+				return opDoneMsg{Op: sectionName(msg.Section) + " 校验", Err: errors.New("校验未通过（编辑器保持打开）")}
+			}
+		}
 		if p.validateErr == nil {
 			p.validateErr = map[string]editRejection{}
 		}
@@ -514,7 +595,7 @@ func (p *configsPage) handleValidated(msg editorValidatedMsg, d driver.Driver) t
 	}
 	p.diff = &diffState{
 		Section: msg.Section, ID: msg.ID, Name: p.profileName(msg.Section, msg.ID),
-		Old: msg.Old, Text: msg.Text, Path: msg.Path,
+		Old: msg.Old, Text: msg.Text, Path: msg.Path, Builtin: p.mode == 7,
 	}
 	p.mode = 6
 	p.scroll = 0
@@ -701,6 +782,9 @@ func (p *configsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 				p.pickCursor = 0
 				return nil
 			case "dns", "routing":
+				if p.builtin {
+					return p.openBuiltinEditor(*r, *it)
+				}
 				return p.editInEditor(d, *r, *it)
 			}
 		}
@@ -796,59 +880,6 @@ func (p configsPage) modalLines() []string {
 			lines = append(lines, ui.HelpStyle.Render(fmt.Sprintf(" … %d-%d / %d，j/k 滚动", start+1, end, len(fields))))
 		}
 		return append(lines, ui.HelpStyle.Render(" Enter 编辑  esc 取消"))
-	case 2: // field input
-		f := p.editField
-		lines := []string{
-			ui.TitleStyle.Render(" 修改 " + fieldLabel(f)),
-			"",
-			" 当前值  " + ui.HelpStyle.Render(f.Value),
-			" 新值    " + p.input.View(),
-		}
-		if f.Default != "" {
-			lines = append(lines, " 默认值  "+ui.HelpStyle.Render(f.Default))
-		}
-		if hint := p.ifaceHint(f); hint != "" {
-			lines = append(lines, ui.HelpStyle.Render(" "+hint))
-		}
-		if warn := p.ifaceWarning(f); warn != "" {
-			lines = append(lines, ui.ErrorStyle.Render(" "+warn))
-		}
-		if f.Desc != "" {
-			lines = append(lines, ui.HelpStyle.Render(" 说明    "+
-				ui.Truncate(firstLine(f.Desc), max0(p.rightW-14))))
-		}
-		if p.fieldErr != "" {
-			lines = append(lines, ui.ErrorStyle.Render(" ✗ "+p.fieldErr))
-		}
-		return ui.BoxLines(false, append(lines, "",
-			ui.HelpStyle.Render(" 类型 "+f.Type+"（数组用逗号分隔）  Enter 提交  esc 返回"))...)
-	case 3, 4: // create / rename
-		r := p.curRow()
-		title := "重命名"
-		if p.mode == 3 {
-			title = "新建"
-		}
-		if r != nil {
-			title += sectionName(r.section)
-		}
-		hint := " Enter 确认  esc 取消"
-		if p.mode == 3 && r != nil {
-			// Mirror what CreateProfile actually does: it clones the
-			// selected profile of the section, and only falls back to the
-			// built-in template when there is nothing to clone. Config
-			// profiles clone through their field list, not a DSL body.
-			what := "默认模板"
-			if src := p.srcProfile(r.section); src != nil && (src.Body != "" || len(src.Fields) > 0) {
-				what = "当前选中" + sectionName(r.section) + "的内容"
-			}
-			hint = " 将复制" + what + "，之后可 e 编辑  Enter 确认  esc 取消"
-		}
-		return ui.BoxLines(false,
-			ui.TitleStyle.Render(" "+title),
-			"",
-			" 名称  "+p.input.View(),
-			"",
-			ui.HelpStyle.Render(hint))
 	case 5: // delete confirm
 		if r := p.curRow(); r != nil {
 			it := p.item(*r)
@@ -901,6 +932,81 @@ func (p configsPage) modalLines() []string {
 	return nil
 }
 
+// overlay returns the page's floating windows: the field input, the
+// create/rename forms and the builtin DSL editor. The field picker, the
+// delete confirmation and the diff confirmation stay in the right pane.
+func (p configsPage) overlay() *overlaySpec {
+	switch p.mode {
+	case 2:
+		f := p.editField
+		lines := []string{
+			ui.TitleStyle.Render(" 修改 " + fieldLabel(f)),
+			"",
+			" 当前值  " + ui.HelpStyle.Render(ui.Truncate(f.Value, 56)),
+			" 新值    " + p.input.View(),
+		}
+		if f.Default != "" {
+			lines = append(lines, " 默认值  "+ui.HelpStyle.Render(f.Default))
+		}
+		if hint := p.ifaceHint(f); hint != "" {
+			lines = append(lines, ui.HelpStyle.Render(" "+hint))
+		}
+		if warn := p.ifaceWarning(f); warn != "" {
+			lines = append(lines, ui.ErrorStyle.Render(" "+warn))
+		}
+		if f.Desc != "" {
+			lines = append(lines, ui.HelpStyle.Render(" 说明    "+
+				ui.Truncate(firstLine(f.Desc), 56)))
+		}
+		if p.fieldErr != "" {
+			lines = append(lines, ui.ErrorStyle.Render(" ✗ "+p.fieldErr))
+		}
+		return &overlaySpec{lines: append(lines, "",
+			ui.HelpStyle.Render(" 类型 "+f.Type+"（数组用逗号分隔）  Enter 提交  esc 返回"))}
+	case 3, 4:
+		r := p.curRow()
+		title := "重命名"
+		if p.mode == 3 {
+			title = "新建"
+		}
+		if r != nil {
+			title += sectionName(r.section)
+		}
+		hint := " Enter 确认  esc 取消"
+		if p.mode == 3 && r != nil {
+			// Mirror what CreateProfile actually does: it clones the
+			// selected profile of the section, and only falls back to the
+			// built-in template when there is nothing to clone.
+			what := "默认模板"
+			if src := p.srcProfile(r.section); src != nil && (src.Body != "" || len(src.Fields) > 0) {
+				what = "当前选中" + sectionName(r.section) + "的内容"
+			}
+			hint = " 将复制" + what + "，之后可 e 编辑  Enter 确认  esc 取消"
+		}
+		return &overlaySpec{lines: []string{
+			ui.TitleStyle.Render(" " + title),
+			"",
+			" 名称  " + p.input.View(),
+			"",
+			ui.HelpStyle.Render(hint),
+		}}
+	case 7:
+		lines := []string{
+			ui.TitleStyle.Render(" 编辑 " + sectionName(p.edSection) + " DSL · " +
+				p.profileName(p.edSection, p.edID)),
+			"",
+		}
+		lines = append(lines, strings.Split(p.ed.View(), "\n")...)
+		if p.edErr != "" {
+			lines = append(lines, "", ui.ErrorStyle.Render(" ✗ "+ui.Truncate(p.edErr, 76)))
+		}
+		return &overlaySpec{lines: append(lines, "",
+			ui.HelpStyle.Render(" ctrl+s 校验并预览 diff  esc 取消"),
+			ui.HelpStyle.Render(" 想用 vim/nano 等编辑器：config.toml 里 editor = \"external\""))}
+	}
+	return nil
+}
+
 // leftClick parks the left-pane cursor on the row-th row (section headers
 // included — they are valid cursor positions, the same as moving with j/k).
 func (p *configsPage) leftClick(row int) {
@@ -941,7 +1047,7 @@ func (p configsPage) leftLines() []string {
 }
 
 func (p configsPage) rightLines() []string {
-	if p.mode != 0 {
+	if p.mode == 1 || p.mode == 5 || p.mode == 6 {
 		return p.modalLines()
 	}
 	var lines []string

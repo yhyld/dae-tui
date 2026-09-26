@@ -2,9 +2,6 @@ package app
 
 import (
 	"fmt"
-	"strings"
-
-	"github.com/charmbracelet/lipgloss"
 
 	"dae-tui/internal/ui"
 )
@@ -26,7 +23,10 @@ func helpLines() []string {
 		{"2/3/4/5", "群组 · 订阅 · 手动节点 · 配置（均为 左列表 + 右详情）"},
 		{"Tab/l/h", "在左右两栏之间切换焦点"},
 		{"A r q", "应用配置(run，全局) · 刷新(重拉全部列表数据) · 退出"},
-		{"-", "测速按需触发（t/T，只测当前列表/组/订阅）；延迟数据每 3 秒轮询当前页可见节点，流量每秒刷新"},
+		{"?", "帮助浮窗（任意页面按 ? 打开，j/k 滚动，esc 关闭）"},
+		{"P", "账户浮窗（任意页面）：修改密码 / 退出登录"},
+		{"-", "测速按需触发（t/T，只测当前列表/组/订阅）；流量每秒刷新"},
+		{"-", "延迟数据每 3 秒轮询当前页可见节点"},
 	})...)
 	lines = append(lines, section("首页", [][2]string{
 		{"o", "启动/停止代理 (run；停止=dry，需 y 确认)"},
@@ -34,7 +34,6 @@ func helpLines() []string {
 		{"Tab", "在「路由快速切换」与「各组当前节点」之间切换焦点"},
 		{"Enter(组行)", "跳到群组页并展开该组——切换某组节点的最短路径（固定节点策略见群组页说明）"},
 		{"g", "切换预设使用的代理组（默认取当前路由已在用的组）"},
-		{"P", "账户：修改密码 / 退出登录（清除本机保存的密码与 token）"},
 		{"L", "查看 daed 日志（journalctl -u daed -f，只读；仅 daed 跑在本机时可用）"},
 		{"r", "刷新状态/流量/组"},
 		{"-", "自动策略组显示 ≈ 已测最优节点；没有测量数据时标注「未测速」（估算值，不含毫秒——逐节点延迟去群组页看）"},
@@ -75,7 +74,7 @@ func helpLines() []string {
 		{"Tab/l", "进入右栏滚动查看内容（字段列表 / DSL 原文等）"},
 		{"Enter", "切换选中的 config/dns/routing"},
 		{"c / R / D", "新建 / 重命名 / 删除（确认）当前分区的条目"},
-		{"e", "config 逐字段修改（全部字段，含默认值与说明，按类型预校验）；DNS/路由调 $EDITOR 改 DSL，先后端语法校验、再展示 diff，y 确认后才提交"},
+		{"e", "config 逐字段修改（全部字段，含默认值与说明，按类型预校验）；DNS/路由默认调 $EDITOR 改 DSL（config.toml 里 editor = \"builtin\" 换内置浮窗编辑器），先后端语法校验、再展示 diff，y 确认后才提交"},
 		{"v", "DNS/路由右栏切换：DSL 原文 ↔ 解析后的结构概览（规则清单）"},
 		{"y", "复制当前方案 DSL 到剪贴板（OSC 52）"},
 		{"A (全局)", "应用 (run，需确认)；停止代理在首页 o"},
@@ -101,10 +100,21 @@ func helpLines() []string {
 	return lines
 }
 
-// clampHelpScroll bounds the help page's scroll offset to its content.
-func clampHelpScroll(scroll, h int) int {
-	if scroll > len(helpLines())-h {
-		scroll = len(helpLines()) - h
+// helpWinBody is the number of help body lines the overlay shows for an
+// avail-line body area: box borders, title, footer and breathing room take
+// the rest.
+func helpWinBody(avail int) int {
+	n := avail - 8
+	if n < 4 {
+		n = 4
+	}
+	return n
+}
+
+// clampHelpScroll bounds the help overlay's scroll offset to its content.
+func clampHelpScroll(scroll, win int) int {
+	if max := len(helpLines()) - win; scroll > max {
+		scroll = max
 	}
 	if scroll < 0 {
 		scroll = 0
@@ -112,22 +122,31 @@ func clampHelpScroll(scroll, h int) int {
 	return scroll
 }
 
-// helpView windows the help block to h lines starting at scroll, with a
-// position footer when there is more content than fits. Lines are truncated
-// to w here — lipgloss pads a block to its widest line, so an over-wide row
-// would otherwise stamp an ellipsis onto every line after the root clamp.
-func helpView(w, h, scroll int) string {
+// helpOverlayBox renders the help as a floating window over any page,
+// windowed to what fits and with a position footer. The content width is
+// capped well below the terminal so the page stays visible on both sides.
+func helpOverlayBox(w, avail, scroll int) string {
 	lines := helpLines()
-	scroll = clampHelpScroll(scroll, h)
-	end := scroll + h - 1 // one row for the position footer
-	if end >= len(lines) {
+	win := helpWinBody(avail)
+	scroll = clampHelpScroll(scroll, win)
+	end := scroll + win
+	if end > len(lines) {
 		end = len(lines)
 	}
-	out := make([]string, 0, end-scroll+1)
-	for _, l := range lines[scroll:end] {
-		out = append(out, ui.Truncate(l, max0(w-2)))
+	// Pre-truncate to the box's content width so a long row widens nothing
+	// and loses only its own tail (overlayBox would stamp an ellipsis onto
+	// every padded line otherwise).
+	// helpLines already opens with its own title row; the box stays well
+	// under the terminal width so the page peeks out on both sides.
+	helpW := w - 16
+	if helpW > 96 {
+		helpW = 96
 	}
-	out = append(out, ui.HelpStyle.Render(
-		fmt.Sprintf("  %d-%d / %d  j/k 滚动", scroll+1, end, len(lines))))
-	return lipgloss.NewStyle().Padding(0, 1).Render(strings.Join(out, "\n"))
+	body := make([]string, 0, end-scroll+2)
+	for _, l := range lines[scroll:end] {
+		body = append(body, ui.Truncate(l, helpW-6))
+	}
+	body = append(body, "",
+		ui.HelpStyle.Render(fmt.Sprintf(" %d-%d / %d   j/k 滚动   esc 关闭", scroll+1, end, len(lines))))
+	return overlayBox(&overlaySpec{lines: body}, helpW)
 }

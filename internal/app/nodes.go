@@ -485,27 +485,18 @@ func (p nodesPage) View() string {
 	// frame, so anything appended below them would be pushed off screen.
 	lv := ui.Pane(false, " 手动节点"+p.nodeView.countTitle(len(p.visibleNodes()), len(p.nodes))+
 		p.nodeView.sortTitle()+" ", p.focus == 0, p.leftW, p.height, p.leftLines())
-	rv := ui.Pane(true, p.modalTitle(), p.focus == 1, p.rightW, p.height, p.rightLines())
+	rvTitle := " 详情 "
+	if p.mode == 2 || p.mode == 3 {
+		rvTitle = p.modalTitle()
+	}
+	rv := ui.Pane(true, rvTitle, p.focus == 1, p.rightW, p.height, p.rightLines())
 	return lipgloss.JoinHorizontal(lipgloss.Top, lv, " ", rv)
 }
 
-func (p nodesPage) modalTitle() string {
-	switch p.mode {
-	case 1:
-		return " 批量导入 "
-	case 2:
-		return " 删除确认 "
-	case 3:
-		return " 加入群组 "
-	case 4:
-		return " 编辑节点 "
-	}
-	return " 详情 "
-}
-
-// modalLines renders the active modal (import / delete / group picker /
-// edit) inside the right pane.
-func (p nodesPage) modalLines() []string {
+// overlay returns the page's floating window: the batch-import and edit
+// forms. The delete confirmation and the group picker stay in the right
+// pane (the picker is a list to browse, not a dialog).
+func (p nodesPage) overlay() *overlaySpec {
 	switch p.mode {
 	case 1:
 		lines := []string{
@@ -519,7 +510,38 @@ func (p nodesPage) modalLines() []string {
 			"",
 			ui.HelpStyle.Render(" Tab 切换字段  标签框内 Enter 或 ctrl+s 提交  esc 取消"),
 			ui.HelpStyle.Render(" 批量粘贴：每行一条，坏链接会逐条报错，不影响其他链接"))
-		return ui.BoxLines(false, lines...)
+		return &overlaySpec{lines: lines}
+	case 4:
+		title := " 编辑手动节点"
+		if n := p.cur(); n != nil {
+			title += " · " + ui.SpaceAfterFlag(n.Name)
+		}
+		return &overlaySpec{lines: []string{
+			ui.TitleStyle.Render(title),
+			"",
+			" 标签  " + p.tag.View(),
+			" 链接  " + p.link.View(),
+			"",
+			ui.HelpStyle.Render(" Tab 切换字段  Enter 提交  esc 取消"),
+		}}
+	}
+	return nil
+}
+
+func (p nodesPage) modalTitle() string {
+	switch p.mode {
+	case 2:
+		return " 删除确认 "
+	case 3:
+		return " 加入群组 "
+	}
+	return " 详情 "
+}
+
+// modalLines renders the in-pane modals: the delete confirmation and the
+// group picker (the import/edit forms float, see overlay).
+func (p nodesPage) modalLines() []string {
+	switch p.mode {
 	case 2:
 		if n := p.cur(); n != nil {
 			return ui.BoxLines(true, "确认删除节点 \""+ui.SpaceAfterFlag(n.Name)+"\"? (y/n)")
@@ -535,18 +557,6 @@ func (p nodesPage) modalLines() []string {
 				ui.HelpStyle.Render(strconv.Itoa(len(g.Nodes))+"节点"))
 		}
 		return append(lines, ui.HelpStyle.Render(" Enter 确认  esc 取消"))
-	case 4:
-		title := " 编辑手动节点"
-		if n := p.cur(); n != nil {
-			title += " · " + ui.SpaceAfterFlag(n.Name)
-		}
-		return ui.BoxLines(false,
-			ui.TitleStyle.Render(title),
-			"",
-			" 标签  "+p.tag.View(),
-			" 链接  "+p.link.View(),
-			"",
-			ui.HelpStyle.Render(" Tab 切换字段  Enter 提交  esc 取消"))
 	}
 	return nil
 }
@@ -623,7 +633,7 @@ func (p *nodesPage) leftClick(row int) {
 }
 
 func (p nodesPage) rightLines() []string {
-	if p.mode != 0 {
+	if p.mode == 2 || p.mode == 3 {
 		return p.modalLines()
 	}
 	n := p.cur()

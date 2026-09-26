@@ -469,6 +469,36 @@ func (p *groupsPage) selectGroupAt(next int) {
 	p.rebuild()
 }
 
+// overlay returns the page's floating window: the create/rename input
+// forms. Pickers and confirmations stay in the right pane next to what they
+// act on.
+func (p groupsPage) overlay() *overlaySpec {
+	switch p.mode {
+	case inputCreate:
+		return &overlaySpec{lines: []string{
+			ui.TitleStyle.Render(" 创建群组 (默认策略: 自动·最小移动平均)"),
+			"",
+			" 名称  " + p.input.View(),
+			"",
+			ui.HelpStyle.Render(" Enter 确认  esc 取消"),
+		}}
+	case inputRename:
+		if g := p.curGroup(); g != nil {
+			lines := []string{
+				ui.TitleStyle.Render(" 重命名群组"),
+				"",
+				" 名称  " + p.input.View(),
+			}
+			if note := p.refNote(g.Name); note != "" {
+				lines = append(lines, "", ui.ErrorStyle.Render(" ⚠ "+note))
+			}
+			return &overlaySpec{lines: append(lines, "",
+				ui.HelpStyle.Render(" Enter 确认  esc 取消"))}
+		}
+	}
+	return nil
+}
+
 // leftClick selects the row-th displayed group, mirroring leftLines' window
 // math so the click lands on the row the user saw.
 func (p *groupsPage) leftClick(row int) {
@@ -987,28 +1017,6 @@ func (p groupsPage) rightLines() []string {
 			lines = append(lines, ui.HelpStyle.Render("  "+ui.SpaceAfterFlag(n.Name)))
 		}
 		return ui.BoxLines(true, lines...)
-	}
-	if p.mode == inputCreate {
-		return ui.BoxLines(false,
-			ui.TitleStyle.Render(" 创建群组 (默认策略: 自动·最小移动平均)"),
-			"",
-			" 名称  "+p.input.View(),
-			"",
-			ui.HelpStyle.Render(" Enter 确认  esc 取消"))
-	}
-	if p.mode == inputRename {
-		lines := []string{
-			ui.TitleStyle.Render(" 重命名群组"),
-			"",
-			" 名称  " + p.input.View(),
-		}
-		if g := p.curGroup(); g != nil {
-			if note := p.refNote(g.Name); note != "" {
-				lines = append(lines, "", ui.ErrorStyle.Render(" ⚠ "+note))
-			}
-		}
-		return ui.BoxLines(false, append(lines, "",
-			ui.HelpStyle.Render(" Enter 确认  esc 取消"))...)
 	}
 	if p.mode == pickPolicy {
 		lines := []string{ui.TitleStyle.Render(" 选择群组策略")}

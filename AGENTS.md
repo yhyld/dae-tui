@@ -133,16 +133,31 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
 - **一次性动作反馈走 `opDoneMsg` toast**（根模型 4 秒自动消失），不要写进 `pickErr` 这类
   常驻面板字段——它会留到重启才消失，看起来像坏了的状态。`pickErr` 只留给"选择器打开
   期间拉取失败"这种与当前模态绑定的错误，并在 groups/subs 刷新时清空。
-- **模态一律渲染在右栏内部**（`rightLines` 里按 mode 分发），不能 `body += "\n" + box`
-  追加在双栏下方——面板现在补齐到满高，下方追加的内容第一个被硬钳制裁掉。确认框与
-  输入表单统一用 `ui.BoxLines(destructive, lines...)`（红框=破坏性），列表型选择器
-  保持裸行。
-- 首页与帮助页有滚动：首页 `bodyLines()` 返回行列表+活动行，`View` 让窗口跟随活动行
-  （`follow` 在任何按键后重新启用；滚轮 `scrollBy` 暂时关闭跟随）；帮助页是
-  `helpScroll`（j/k/G）。
-- **鼠标已启用**（`tea.WithMouseCellMotion`）：滚轮 = 3×j/k（帮助页/首页直接滚偏移），
+- **浮窗与面板的分工——决策和填表用浮窗，浏览和对比用面板**。各页实现 `overlay() *overlaySpec`
+  （表单/对话框），根模型 `pageOverlay()` 收集（账户窗口优先，`P` 已是全局键，任何页面可开），
+  `ui.Overlay` 负责 ANSI 感知地居中叠到页面画面上（`Truncate` 取左 + 补 reset、`TruncateLeft`
+  取右——注意 TruncateLeft 会丢弃被跳过区域的转义序列，盒子右侧窄条可能掉色，文字不受影响）。
+  浮窗清单：帮助（`helpOpen`，`?` 任何页面）、账户、全局 `A` 确认、首页预设确认+DSL 预览、
+  各页输入表单（含内置 DSL 编辑器 mode 7）。留在右栏的：小 y/n 确认（删组/删节点/删订阅/
+  删配置、组内移除）、大列表选择器（加节点、字段选择）、DSL diff 确认。
+- **内置 DSL 编辑器**（configs mode 7，`config.toml` 的 `editor = "builtin"` 开启）：
+  textarea 浮窗，`ctrl+s` → `validateTextCmd(path="")` → `editorValidatedMsg`；校验失败时
+  `handleValidated` 检测 `mode==7` 把错误写进 `edErr` 并**保持编辑器打开**；成功进 mode 6，
+  `diffState.Builtin` 标记来源，diff 里按 `n`/esc 回到编辑器（内容不丢），按 `y` 直接提交。
+  $EDITOR 路径（默认）不变：临时文件在"应用后/内容未变"才删。
+- **浮窗期间按键归属**：`helpOpen` 与 `home.acct != 0` 计入 `anyModal()`，且两者的按键在
+  根模型 `handleKey` 顶部优先分发（账号窗口在任何页面都能开，esc 不能被所在页吃掉）；
+  鼠标滚轮在 helpOpen 时滚帮助、其余模态期间忽略。
+- 模态渲染在右栏内部的（上面的"留在右栏"清单）用 `ui.BoxLines(destructive, lines...)`
+  （红框=破坏性），列表型选择器保持裸行；不能 `body += "\n" + box` 追加在双栏下方——
+  面板补齐到满高，下方追加的内容第一个被硬钳制裁掉。
+- 首页有跟随滚动：`bodyLines()` 返回行列表+活动行，`View` 让窗口跟随活动行（`follow`
+  在任何按键后重新启用；滚轮 `scrollBy` 暂时关闭跟随）。帮助是浮窗，内容用 `helpScroll`
+  （j/k/G）在盒内滚动，`clampHelpScroll` 的窗口数来自 `helpWinBody`。
+- **鼠标已启用**（`tea.WithMouseCellMotion`）：滚轮 = 3×j/k（帮助浮窗/首页直接滚偏移），
   点页签切页（`tabClick` 按渲染宽度算 span），点左栏行选中（各页 `leftClick` 复算
-  `leftLines` 的窗口偏移）。`anyModal()` 时鼠标全部忽略——弹窗期间误点比不点更糟。
+  `leftLines` 的窗口偏移），点底部键位行任意位置打开帮助浮窗（呼出键 `? 帮助` 固定在
+  该行右端且**不参与截断**——`helpLine` 先截键位再拼提示，页签栏不要放帮助标识）。`anyModal()` 时鼠标全部忽略——弹窗期间误点比不点更糟。
   鼠标 handler 是**值接收者**（与 `handleKey` 一致），别改成指针接收者，否则
   `tea.Model` 的动态类型在键盘/鼠标两条路径上不一致。
 - 每个内容页都是**左列表 + 右详情**双栏：左栏 `j/k` 移动（默认折叠），`Tab/l/Enter`

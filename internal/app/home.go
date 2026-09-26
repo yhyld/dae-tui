@@ -349,9 +349,6 @@ func (p *homePage) handleKey(msg tea.KeyMsg, d driver.Driver, running bool) tea.
 	switch msg.String() {
 	case "o":
 		p.confirmSwitch = true
-	case "P":
-		p.acct = 1
-		p.acctCur = 0
 	case "L":
 		return logsCmd()
 	case "tab":
@@ -516,47 +513,6 @@ func logsCmd() tea.Cmd {
 	return tea.ExecProcess(c, func(err error) tea.Msg { return logsDoneMsg{} })
 }
 
-// acctLines renders the account UI inside the home page.
-func (p homePage) acctLines() []string {
-	switch p.acct {
-	case 1:
-		lines := []string{ui.TitleStyle.Render(" 账户"), "",
-			ui.HelpStyle.Render(" 当前用户  " + p.user), ""}
-		items := []string{"修改密码", "退出登录"}
-		for i, it := range items {
-			mark, style := "  ", ui.HelpStyle
-			if i == p.acctCur {
-				mark, style = "❯ ", ui.CursorStyle
-			}
-			lines = append(lines, style.Render(mark+it))
-		}
-		return append(lines, ui.HelpStyle.Render(" j/k 选择  Enter 确认  esc 返回"))
-	case 2:
-		var b strings.Builder
-		b.WriteString(ui.TitleStyle.Render(" 修改密码") + "\n\n")
-		for i, f := range []struct {
-			label string
-			input textinput.Model
-		}{
-			{"当前密码", p.pwCur}, {"新密码", p.pwNew}, {"确认新密码", p.pwRepeat},
-		} {
-			style := ui.HelpStyle
-			if i == p.pwFocus {
-				style = ui.SelectedStyle
-			}
-			b.WriteString(style.Render(" "+ui.PadRight(f.label, 10)) + " " + f.input.View() + "\n")
-		}
-		if p.pwErr != "" {
-			b.WriteString("\n" + ui.ErrorStyle.Render(" ✗ "+p.pwErr) + "\n")
-		}
-		b.WriteString("\n" + ui.HelpStyle.Render(" Tab 切换  Enter 提交  esc 返回"))
-		return strings.Split(b.String(), "\n")
-	case 3:
-		return ui.BoxLines(true, "确认退出登录? 将清除本机保存的密码与 token  (y/n)")
-	}
-	return nil
-}
-
 // homeTwoColMin is the content width at which the home page lays the
 // traffic block and the routing picker side by side instead of stacked.
 const homeTwoColMin = 96
@@ -630,6 +586,80 @@ func (p *homePage) currentNode(g driver.Group) (label string, style lipgloss.Sty
 	return auto + " · 未测速", ui.HelpStyle
 }
 
+// overlay returns the home page's floating windows: the account menu /
+// password form / logout confirmation and the routing-preset confirmation
+// with its DSL preview. The small proxy on/off confirmation stays inline.
+func (p homePage) overlay() *overlaySpec {
+	switch {
+	case p.acct == 1:
+		lines := []string{ui.TitleStyle.Render(" 账户"), "",
+			ui.HelpStyle.Render(" 当前用户  " + p.user), ""}
+		items := []string{"修改密码", "退出登录"}
+		for i, it := range items {
+			mark, style := "  ", ui.HelpStyle
+			if i == p.acctCur {
+				mark, style = "❯ ", ui.CursorStyle
+			}
+			lines = append(lines, style.Render(mark+it))
+		}
+		return &overlaySpec{lines: append(lines,
+			ui.HelpStyle.Render(" j/k 选择  Enter 确认  esc 返回"))}
+	case p.acct == 2:
+		lines := []string{ui.TitleStyle.Render(" 修改密码"), ""}
+		for i, f := range []struct {
+			label string
+			input textinput.Model
+		}{
+			{"当前密码", p.pwCur}, {"新密码", p.pwNew}, {"确认新密码", p.pwRepeat},
+		} {
+			style := ui.HelpStyle
+			if i == p.pwFocus {
+				style = ui.SelectedStyle
+			}
+			lines = append(lines, style.Render(" "+ui.PadRight(f.label, 10))+" "+f.input.View())
+		}
+		if p.pwErr != "" {
+			lines = append(lines, "", ui.ErrorStyle.Render(" ✗ "+p.pwErr))
+		}
+		return &overlaySpec{lines: append(lines, "",
+			ui.HelpStyle.Render(" Tab 切换  Enter 提交  esc 返回"))}
+	case p.acct == 3:
+		return &overlaySpec{destructive: true, lines: []string{
+			"确认退出登录?",
+			"将清除本机保存的密码与 token",
+			"",
+			ui.OKStyle.Render(" y 确认") + "    " + ui.ErrorStyle.Render("n / esc 取消"),
+		}}
+	case p.confirmPreset >= 0 && p.presetErr != nil:
+		return &overlaySpec{destructive: true, lines: []string{
+			ui.ErrorStyle.Render(" ✗ 无法生成: " + shortErr(p.presetErr)),
+			"",
+			ui.HelpStyle.Render(" n / esc 关闭"),
+		}}
+	case p.confirmPreset >= 0:
+		lines := []string{
+			ui.TitleStyle.Render(" 切换路由方案"),
+			"",
+			"将把 " + p.routingName + " 替换为「" +
+				presetLabel(p.presets[p.confirmPreset].ID) + "」",
+			ui.HelpStyle.Render(" 代理组: " + p.proxyGroup() + "  (g 换组)"),
+			"",
+			ui.SelectedStyle.Render(" 将写入的 DSL:"),
+		}
+		for i, l := range strings.Split(p.presetText, "\n") {
+			if i >= 14 {
+				lines = append(lines, ui.HelpStyle.Render("    …"))
+				break
+			}
+			lines = append(lines, ui.HelpStyle.Render("    "+l))
+		}
+		return &overlaySpec{destructive: true, lines: append(lines, "",
+			ui.OKStyle.Render(" y 确认")+"    "+ui.ErrorStyle.Render("n / esc 取消")+"    "+
+				ui.HelpStyle.Render("g 换组"))}
+	}
+	return nil
+}
+
 // scrollBy moves the window by d lines and detaches it from the cursor
 // (follow re-arms on the next keystroke). The wheel calls this.
 func (p *homePage) scrollBy(d int) {
@@ -675,12 +705,6 @@ func (p homePage) bodyLines(status driver.Status) ([]string, int) {
 		lines = append(lines, box...)
 		active = len(lines) - 1
 	}
-	if p.acct != 0 {
-		lines = append(lines, p.acctLines()...)
-		if active < 0 {
-			active = len(lines) - 1
-		}
-	}
 	add("")
 
 	// --- traffic + routing quick-switch: side by side on wide terminals,
@@ -692,7 +716,7 @@ func (p homePage) bodyLines(status driver.Status) ([]string, int) {
 	if twoCol {
 		routingW = homeRoutingW
 	}
-	routingBody, presetOff, routingConfirm := p.routingLines(routingW)
+	routingBody, presetOff := p.routingLines(routingW)
 	presetStart := -1
 	if twoCol {
 		leftW := p.width - homeRoutingW - 3
@@ -727,13 +751,6 @@ func (p homePage) bodyLines(status driver.Status) ([]string, int) {
 		}
 		lines = append(lines, routingBody...)
 	}
-	if len(routingConfirm) > 0 {
-		lines = append(lines, routingConfirm...)
-		if active < 0 {
-			active = len(lines) - len(routingConfirm)
-		}
-	}
-
 	// --- network state ---
 	if net := p.netLines(); len(net) > 0 {
 		lines = append(lines, net...)
@@ -763,7 +780,7 @@ func (p homePage) bodyLines(status driver.Status) ([]string, int) {
 
 	// Active-line priority: an open confirmation or the account menu won
 	// above; otherwise it is the cursor row of the focused section.
-	if active < 0 && presetStart >= 0 && !p.groupFocus && p.confirmPreset < 0 {
+	if active < 0 && presetStart >= 0 && !p.groupFocus {
 		active = presetStart + p.presetCursor
 	}
 	if active < 0 && p.groupFocus && groupStart+p.groupCursor < len(lines) {
@@ -796,12 +813,12 @@ func (p homePage) trafficLines(chartW int) []string {
 }
 
 // routingLines renders the preset picker: header, the presets and the
-// current-mode footer. It returns the body truncated to w, the index of the
-// first preset row within it, and — while a switch is being confirmed — the
-// full-width confirmation box and DSL preview that follow the section.
-func (p homePage) routingLines(w int) (body []string, presetStart int, confirm []string) {
+// current-mode footer. It returns the body truncated to w and the index of
+// the first preset row within it (the switch confirmation floats, see
+// overlay).
+func (p homePage) routingLines(w int) (body []string, presetStart int) {
 	if len(p.presets) == 0 {
-		return nil, -1, nil
+		return nil, -1
 	}
 	head := ui.TitleStyle.Render(" 路由快速切换") + ui.HelpStyle.Render("  "+p.routingName)
 	if g := p.proxyGroup(); g != "" {
@@ -840,20 +857,12 @@ func (p homePage) routingLines(w int) (body []string, presetStart int, confirm [
 			ui.HelpStyle.Render(presetDescs[preset.ID]))
 	}
 	switch {
-	case p.confirmPreset >= 0 && p.presetErr != nil:
-		confirm = []string{ui.ErrorStyle.Render(" ✗ 无法生成: " + shortErr(p.presetErr))}
-	case p.confirmPreset >= 0:
-		confirm = ui.BoxLines(true, "将路由方案 "+p.routingName+" 替换为「"+
-			presetLabel(p.presets[p.confirmPreset].ID)+"」?  y 确认 / n 取消, g 换组")
-		for _, l := range strings.Split(p.presetText, "\n") {
-			confirm = append(confirm, ui.HelpStyle.Render("    "+l))
-		}
 	case p.routingMode != "":
 		body = append(body, ui.HelpStyle.Render(" 当前: "+presetLabel(p.routingMode)+"   Enter 切换"))
 	default:
 		body = append(body, ui.HelpStyle.Render(" 当前: 自定义规则   Enter 切换为预设"))
 	}
-	return body, presetStart, confirm
+	return body, presetStart
 }
 
 func (p homePage) View(status driver.Status) string {

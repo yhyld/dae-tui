@@ -23,7 +23,6 @@ const (
 	pageSubs
 	pageNodes
 	pageConfigs
-	pageHelp
 )
 
 const (
@@ -52,13 +51,17 @@ type Model struct {
 	fatal  error
 	status driver.Status
 
-	page       int
-	home       homePage
-	groups     groupsPage
-	subs       subsPage
-	nodes      nodesPage
-	configs    configsPage
-	helpScroll int // `?` page scroll offset (the page itself is static)
+	page    int
+	home    homePage
+	groups  groupsPage
+	subs    subsPage
+	nodes   nodesPage
+	configs configsPage
+
+	// helpOpen turns the help into a floating window over the current page
+	// (it no longer occupies a tab); helpScroll is its content offset.
+	helpOpen   bool
+	helpScroll int
 
 	login loginForm
 
@@ -97,6 +100,9 @@ func New(drv driver.Driver, cfg *config.Config, cfgPath string) Model {
 	m.nodes = newNodesPage(m.caps)
 	m.nodes.hist = m.latHist
 	m.configs = newConfigsPage(m.caps)
+	// "builtin" swaps the DNS/routing $EDITOR round-trip for the in-app
+	// floating editor (config key: editor).
+	m.configs.builtin = cfg.Editor == "builtin"
 	return m
 }
 
@@ -489,7 +495,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
-	// phaseMain
+	// phaseMain: ctrl+c quits unconditionally — it must survive every
+	// modal, floating window and confirmation.
+	if msg.String() == "ctrl+c" {
+		return m, tea.Quit
+	}
 	if m.confirmApply {
 		switch msg.String() {
 		case "y":
@@ -499,6 +509,28 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.confirmApply = false
 		}
 		return m, nil
+	}
+	// The help overlay owns every key while open, like a page modal.
+	if m.helpOpen {
+		switch msg.String() {
+		case "esc", "?", "enter":
+			m.helpOpen = false
+		case "j", "down":
+			m.helpScroll += 3
+		case "k", "up":
+			m.helpScroll -= 3
+		case "g":
+			m.helpScroll = 0
+		case "G":
+			m.helpScroll = len(helpLines()) // clamped below
+		}
+		m.helpScroll = clampHelpScroll(m.helpScroll, helpWinBody(m.height-6))
+		return m, nil
+	}
+	// The account window opens from any page (P is global), so its keys
+	// are routed here before the page sees them.
+	if m.home.acct != 0 {
+		return m, m.home.acctKey(msg, m.drv)
 	}
 	// While a page-level modal/input is open, every keystroke (including
 	// the digit page-switch hotkeys — names, cron expressions and links
@@ -511,6 +543,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "A":
 			m.confirmApply = true
+			return m, nil
+		case "P":
+			// The account window floats, so it opens from any page.
+			m.home.acct = 1
+			m.home.acctCur = 0
 			return m, nil
 		case "1":
 			m.page = pageHome
@@ -528,7 +565,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.page = pageConfigs
 			return m, nil
 		case "?":
-			m.page = pageHelp
+			m.helpOpen = true
 			m.helpScroll = 0
 			return m, nil
 		case "r":
@@ -550,19 +587,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		cmd = m.nodes.handleKey(msg, m.drv)
 	case pageConfigs:
 		cmd = m.configs.handleKey(msg, m.drv)
-	case pageHelp:
-		// The help page is one static block; its only interaction is scroll.
-		switch msg.String() {
-		case "j", "down":
-			m.helpScroll += 3
-		case "k", "up":
-			m.helpScroll -= 3
-		case "g":
-			m.helpScroll = 0
-		case "G":
-			m.helpScroll = 1 << 30 // clamped right below
-		}
-		m.helpScroll = clampHelpScroll(m.helpScroll, m.height-6)
 	}
 	return m, cmd
 }
@@ -570,6 +594,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // anyModal reports whether the current page has a modal or text input
 // open that should receive raw keystrokes.
 func (m Model) anyModal() bool {
+	if m.helpOpen || m.home.acct != 0 {
+		return true
+	}
 	switch m.page {
 	case pageTree:
 		return m.groups.mode != pickNone || m.groups.nodeView.open
@@ -602,7 +629,19 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 	switch msg.Button {
 	case tea.MouseButtonWheelUp, tea.MouseButtonWheelDown:
-		if m.anyModal() || m.confirmApply {
+		if m.confirmApply {
+			return m, nil
+		}
+		if m.helpOpen {
+			if msg.Button == tea.MouseButtonWheelDown {
+				m.helpScroll += 3
+			} else {
+				m.helpScroll -= 3
+			}
+			m.helpScroll = clampHelpScroll(m.helpScroll, helpWinBody(m.height-6))
+			return m, nil
+		}
+		if m.anyModal() {
 			return m, nil
 		}
 		name := "j"
@@ -610,13 +649,6 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			name = "k"
 		}
 		switch m.page {
-		case pageHelp:
-			if name == "j" {
-				m.helpScroll += 3
-			} else {
-				m.helpScroll -= 3
-			}
-			return m, nil
 		case pageHome:
 			if name == "j" {
 				m.home.scrollBy(3)
@@ -660,6 +692,13 @@ func (m Model) click(x, y int) (tea.Model, tea.Cmd) {
 	if y == 2 && cx >= 0 {
 		return m.tabClick(cx)
 	}
+	if y == m.height-2 {
+		// The bottom key-hint line doubles as the help overlay's entry
+		// point — its trailing "? 帮助" names the key, the click opens it.
+		m.helpOpen = true
+		m.helpScroll = 0
+		return m, nil
+	}
 	if y < 5 || cx < 0 {
 		return m, nil
 	}
@@ -695,9 +734,6 @@ func (m Model) tabClick(cx int) (tea.Model, tea.Cmd) {
 		w := lipgloss.Width(t)
 		if cx < w+2 { // TabStyle pads (0,1) on both sides
 			m.page = i
-			if i == pageHelp {
-				m.helpScroll = 0
-			}
 			return m, nil
 		}
 		cx -= w + 2
@@ -757,8 +793,6 @@ func (m Model) View() string {
 		body = m.nodes.View()
 	case pageConfigs:
 		body = m.configs.View(m.status.Modified)
-	case pageHelp:
-		body = helpView(m.width-2, m.height-6, m.helpScroll)
 	}
 	// Hard clamp: a page must never push the chrome (status/tabs/help)
 	// off screen — this was the original scrolling bug. The body is also
@@ -768,20 +802,30 @@ func (m Model) View() string {
 	if avail < 1 {
 		avail = 1
 	}
-	lines := strings.Split(body, "\n")
-	if m.confirmApply {
-		// The global apply confirmation renders as a boxed block above the
-		// page body; pushing a few page lines out is fine for a modal.
-		box := ui.BoxLines(true, " 确认应用当前选中 config+dns+routing (run)?   y 确认 / n 取消")
-		lines = append(append(box, ""), lines...)
+	cw := m.width - 2
+	// Floating windows stack over the page instead of displacing it: the
+	// page's own form/dialog, then the global apply confirmation, then the
+	// help — at most one page overlay is open at a time (anyModal gates
+	// the keys), but A may be pressed over one.
+	if ov := m.pageOverlay(); ov != nil {
+		body = ui.Overlay(body, overlayBox(ov, cw), cw, avail)
 	}
+	if m.confirmApply {
+		body = ui.Overlay(body, overlayBox(&overlaySpec{destructive: true, lines: []string{
+			ui.TitleStyle.Render(" 确认应用当前选中 config+dns+routing (run)？"),
+			ui.OKStyle.Render(" y 确认") + "    " + ui.ErrorStyle.Render("n / esc 取消"),
+		}}, cw), cw, avail)
+	}
+	if m.helpOpen {
+		body = ui.Overlay(body, helpOverlayBox(cw, avail, m.helpScroll), cw, avail)
+	}
+	lines := strings.Split(body, "\n")
 	if len(lines) > avail {
 		lines = lines[:avail]
 	}
 	for len(lines) < avail {
 		lines = append(lines, "")
 	}
-	cw := m.width - 2
 	for i := range lines {
 		if lines[i] != "" {
 			lines[i] = ui.Truncate(lines[i], cw)
@@ -846,7 +890,7 @@ func (m Model) statusBar() string {
 	return ui.Truncate(left+strings.Repeat(" ", gap)+right, m.width-2)
 }
 
-var tabLabels = []string{"1 首页", "2 群组", "3 订阅", "4 手动节点", "5 配置", "? 帮助"}
+var tabLabels = []string{"1 首页", "2 群组", "3 订阅", "4 手动节点", "5 配置"}
 
 // spinnerFrames is the braille spinner shown in the tabs bar while a
 // latency test runs.
@@ -905,7 +949,7 @@ func (m Model) toastLine() string {
 }
 
 func (m Model) helpLine() string {
-	var keys string
+	keys := "A 应用  1-5 切换页面  q 退出"
 	switch m.page {
 	case pageHome:
 		keys = "o 开关代理  Tab 切焦点  j/k+Enter 切换路由/跳群组页  L 日志  g 换组  P 账户  A 应用  r 刷新"
@@ -917,14 +961,70 @@ func (m Model) helpLine() string {
 		keys = "j/k 移动  a 批量导入  y 复制链接  e 编辑标签/链接  x 删除  t/T 测速  Tab 后 G 加入群组  / 过滤  o 排序"
 	case pageConfigs:
 		keys = "j/k 移动  Enter 选择  y 复制 DSL  e 编辑(DSL 先校验后 diff)  v 概览/原文  c/R/D 新建/改名/删除  Tab/l 滚动  A 应用(全局)"
-	case pageHelp:
-		keys = "j/k 滚动  1-5 切换页面  q 退出"
-	default:
-		keys = "A 应用  1-5 切换页面  q 退出"
+	}
+	// The overlay names its own keys while it is up; the trailing hint then
+	// reads as "how to get out".
+	hint := "? 帮助"
+	if m.helpOpen {
+		keys = "j/k 滚动  g/G 首尾"
+		hint = "esc 关闭帮助"
 	}
 	// Truncate instead of wrap: a second help row would push the chrome off
 	// screen on narrow terminals (the body clamp reserves exactly one row).
-	return ui.HelpStyle.Render(ui.Truncate(" "+keys, m.width-2))
+	// The keys yield first so the call-to-action survives; clicking this
+	// line anywhere also opens the overlay.
+	avail := m.width - 2
+	hint = "  " + hint
+	keys = ui.Truncate(" "+keys, max0(avail-lipgloss.Width(hint)))
+	return ui.HelpStyle.Render(keys + hint)
+}
+
+// overlaySpec is a floating window's content. Decision dialogs and forms
+// render over the page instead of displacing pane content — the rule of
+// thumb: decisions and forms float, browsing and comparison stay in panes.
+type overlaySpec struct {
+	destructive bool
+	lines       []string
+}
+
+// overlayBox renders a spec as a bordered box at most maxW cells wide.
+func overlayBox(spec *overlaySpec, maxW int) string {
+	if spec == nil || len(spec.lines) == 0 {
+		return ""
+	}
+	boxW := 40
+	for _, l := range spec.lines {
+		if w := lipgloss.Width(l); w+6 > boxW {
+			boxW = w + 6
+		}
+	}
+	if boxW > maxW {
+		boxW = maxW
+	}
+	lines := make([]string, len(spec.lines))
+	for i, l := range spec.lines {
+		lines[i] = ui.Truncate(l, max0(boxW-6))
+	}
+	return strings.Join(ui.BoxLines(spec.destructive, lines...), "\n")
+}
+
+// pageOverlay returns the active floating window, or nil. The account
+// window is checked first: P opens it from any page.
+func (m Model) pageOverlay() *overlaySpec {
+	if ov := m.home.overlay(); ov != nil {
+		return ov
+	}
+	switch m.page {
+	case pageTree:
+		return m.groups.overlay()
+	case pageSubs:
+		return m.subs.overlay()
+	case pageNodes:
+		return m.nodes.overlay()
+	case pageConfigs:
+		return m.configs.overlay()
+	}
+	return nil
 }
 
 func bootView(endpoint string) string {
