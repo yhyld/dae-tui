@@ -18,9 +18,9 @@ const (
 	latCellSlim = 9  // value only, for panes too narrow to spare the bar
 )
 
-// latCellW picks the latency column width for a pane w cells wide: narrow
-// master panes (the capped 36-cell left column) need the name more than the
-// bar.
+// latCellW picks the latency column width for a pane whose content is w
+// cells wide: narrow master boxes (the capped 38-cell left column) need
+// the name more than the bar.
 func latCellW(w int) int {
 	if w >= 56 {
 		return latCellWide

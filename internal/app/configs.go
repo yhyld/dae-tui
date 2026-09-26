@@ -10,7 +10,6 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 
 	"dae-tui/internal/driver"
 	"dae-tui/internal/ui"
@@ -637,7 +636,7 @@ func (p *configsPage) bodyLines() []string {
 			for _, f := range fields {
 				// Values can be long (URL lists); never bleed past the pane.
 				lines = append(lines, ui.Truncate(" "+ui.PadRight(fieldLabel(f), 18)+f.Value,
-					max0(p.rightW-4)))
+					max0(p.rightW-6)))
 				if warn := p.ifaceWarning(f); warn != "" {
 					lines = append(lines, ui.ErrorStyle.Render("   "+warn))
 				}
@@ -668,12 +667,12 @@ func (p *configsPage) bodyLines() []string {
 			}
 		}
 		lines = append(lines, ui.Truncate(ui.SelectedStyle.Render("引用组 ")+
-			strings.Join(parts, ", "), max0(p.rightW-4)))
+			strings.Join(parts, ", "), max0(p.rightW-6)))
 	}
 	if p.summaryView && len(it.Summary) > 0 {
 		lines = append(lines, ui.SelectedStyle.Render(title+" (结构概览) · "+it.Name))
 		for _, s := range it.Summary {
-			lines = append(lines, "  "+ui.Truncate(s, max0(p.rightW-6)))
+			lines = append(lines, "  "+ui.Truncate(s, max0(p.rightW-8)))
 		}
 		return lines
 	}
@@ -823,17 +822,19 @@ var sectionTitles = map[string]string{
 }
 
 func (p configsPage) View(modified bool) string {
-	// The "modified" banner takes one row of the pane budget — appended
-	// below the panes it would be the first line the frame's clamp cuts.
+	// The "modified" banner takes one row of the page budget — appended
+	// below the boxes it would be the first line the frame's clamp cuts.
+	// The boxes shrink by that row instead.
 	h := p.height
 	var banner string
 	if modified {
 		h--
 		banner = ui.ErrorStyle.Render(" ⚠ 运行配置与选中项不一致（A 应用 / 首页 o 重启）")
 	}
-	lv := ui.Pane(false, " 配置方案 ", p.focus == 0, p.leftW, h, p.leftLines())
-	rv := ui.Pane(true, " 内容 ", p.focus == 1, p.rightW, h, p.rightLines())
-	body := lipgloss.JoinHorizontal(lipgloss.Top, lv, " ", rv)
+	body := strings.Join(ui.PaneRow(
+		ui.PaneSpec{Title: "配置方案", Lines: p.leftLines(), Focused: p.focus == 0, W: p.leftW, H: h},
+		ui.PaneSpec{Title: "内容", Lines: p.rightLines(), Focused: p.focus == 1, W: p.rightW, H: h},
+	), "\n")
 	if banner != "" {
 		body = banner + "\n" + body
 	}
@@ -879,7 +880,7 @@ func (p configsPage) modalLines() []string {
 				}
 			}
 			// Long values (URL lists) must not bleed past the pane.
-			lines = append(lines, ui.Truncate(line, max0(p.rightW-4)))
+			lines = append(lines, ui.Truncate(line, max0(p.rightW-6)))
 		}
 		if start > 0 || end < len(fields) {
 			lines = append(lines, ui.HelpStyle.Render(fmt.Sprintf(" … %d-%d / %d，j/k 滚动", start+1, end, len(fields))))
@@ -902,7 +903,7 @@ func (p configsPage) modalLines() []string {
 			ui.OKStyle.Render(" y 应用")+"    "+
 				ui.ErrorStyle.Render("n / esc 取消")+"    "+
 				ui.HelpStyle.Render("j/k 滚动 diff"),
-			ui.HelpStyle.Render(" 取消后编辑内容保留在 "+ui.TruncateHead(st.Path, max0(p.rightW-6))),
+			ui.HelpStyle.Render(" 取消后编辑内容保留在 "+ui.TruncateHead(st.Path, max0(p.rightW-8))),
 			"")
 		lines := append([]string{}, head...)
 		if st.lines == nil {
@@ -1049,7 +1050,7 @@ func (p configsPage) leftLines() []string {
 		if it.Selected {
 			mark = ui.OKStyle.Render("● ")
 		}
-		lines = append(lines, cursor+" "+mark+ui.PadRight(it.Name, max0(p.leftW-10)))
+		lines = append(lines, cursor+" "+mark+ui.PadRight(it.Name, max0(p.leftW-12)))
 	}
 	return lines
 }
@@ -1065,8 +1066,8 @@ func (p configsPage) rightLines() []string {
 			lines = append(lines,
 				ui.ErrorStyle.Render(" ✗ "+sectionName(r.section)+" 校验未通过，未保存"),
 				ui.HelpStyle.Render("  编辑内容保留在 "+
-					ui.TruncateHead(rej.Path, max0(p.rightW-18))),
-				ui.ErrorStyle.Render("  "+ui.Truncate(rej.Err, max0(p.rightW-4))),
+					ui.TruncateHead(rej.Path, max0(p.rightW-20))),
+				ui.ErrorStyle.Render("  "+ui.Truncate(rej.Err, max0(p.rightW-6))),
 				"",
 			)
 		}

@@ -2812,10 +2812,10 @@ func TestForceRefreshReloadsEverything(t *testing.T) {
 // --- frame / fill / fallback layout ---
 
 // TestFrameFillsTerminal: the app renders as a rounded frame that spans the
-// terminal exactly, with the help line anchored to the last inner row.
+// terminal exactly, with the help keys riding the frame's bottom edge.
 func TestFrameFillsTerminal(t *testing.T) {
 	m := newTestModel(t)
-	m, _ = m.Update(key("2")) // groups page: its help line is stable
+	m, _ = m.Update(key("2")) // groups page: its help keys are stable
 	for _, sz := range []struct{ w, h int }{{120, 36}, {80, 22}, {100, 24}} {
 		mm, _ := m.Update(tea.WindowSizeMsg{Width: sz.w, Height: sz.h})
 		v := mm.View()
@@ -2826,9 +2826,13 @@ func TestFrameFillsTerminal(t *testing.T) {
 		if !strings.HasPrefix(lines[0], "╭") || !strings.HasPrefix(lines[len(lines)-1], "╰") {
 			t.Fatalf("%dx%d: frame borders missing:\n%s", sz.w, sz.h, v)
 		}
-		// help line is the last inner row, never pushed off by page content
-		if !strings.Contains(lines[sz.h-2], "j/k 移动") {
-			t.Fatalf("%dx%d: help line not anchored at bottom:\n%s", sz.w, sz.h, v)
+		// The help keys ride the bottom edge itself, never pushed off by
+		// page content; the tabs ride the header box's top edge (row 1).
+		if !strings.Contains(lines[sz.h-1], "j/k 移动") {
+			t.Fatalf("%dx%d: help keys not riding the bottom edge:\n%s", sz.w, sz.h, v)
+		}
+		if !strings.Contains(lines[1], "群组") {
+			t.Fatalf("%dx%d: tabs missing from the header box edge:\n%s", sz.w, sz.h, v)
 		}
 	}
 }
@@ -2912,10 +2916,12 @@ func mouseClick(x, y int) tea.MouseMsg {
 
 func TestMouseTabClick(t *testing.T) {
 	m := newTestModel(t)
-	// Tabs sit on frame row 2, content cols start after the frame border.
-	// Each tab spans lipgloss.Width(label)+2 (TabStyle pads 0,1).
+	// Tabs ride the header box's top edge (frame row 1), which shares the
+	// page-wide 1-cell margin, then the edge's "╭─ " lead-in: the tabs
+	// start at column 5. Each tab spans lipgloss.Width(label)+2 (TabStyle
+	// pads 0,1).
 	tabX := func(i int) int {
-		x := 2 // frame border + page-wide left margin
+		x := 5
 		for j, t := range tabLabels {
 			if j == i {
 				break
@@ -2924,18 +2930,18 @@ func TestMouseTabClick(t *testing.T) {
 		}
 		return x
 	}
-	m2, _ := m.Update(mouseClick(tabX(1), 2))
+	m2, _ := m.Update(mouseClick(tabX(1), 1))
 	mm := m2.(Model)
 	if mm.page != pageTree {
 		t.Fatalf("click on the second tab should open the groups page, got page %d", mm.page)
 	}
-	// clicking the bottom help line opens the overlay (its trailing
-	// "? 帮助" hint names the key)
+	// clicking the frame's bottom edge (the help keys riding it) opens the
+	// overlay — its trailing "? 帮助" hint names the key
 	mm2 := m2.(Model)
-	m3, _ := m2.Update(mouseClick(10, mm2.height-2))
+	m3, _ := m2.Update(mouseClick(10, mm2.height-1))
 	mm = m3.(Model)
 	if !mm.helpOpen {
-		t.Fatal("clicking the help line should open the overlay")
+		t.Fatal("clicking the help edge should open the overlay")
 	}
 }
 
@@ -2959,9 +2965,9 @@ func TestMouseWheelScrollsLists(t *testing.T) {
 func TestMouseSelectsRows(t *testing.T) {
 	m := newTestModel(t)
 	m, _ = m.Update(key("2"))
-	// Left pane rows start at frame row 4 (the pane's title rides in its
-	// rule line); the second group is row 1.
-	m2, _ := m.Update(mouseClick(3, 5))
+	// List rows start at frame row 5 (frame top, header box 3 rows, the
+	// boxes' top border); the second group is row 1 of the left box.
+	m2, _ := m.Update(mouseClick(5, 6))
 	mm := m2.(Model)
 	if mm.groups.gi != 1 {
 		t.Fatalf("click on the second group row should select it, got gi=%d", mm.groups.gi)
@@ -3334,9 +3340,9 @@ func TestCtrlCQuitsFromOverlays(t *testing.T) {
 	}
 }
 
-// TestHelpHintOnKeyLine: every page's bottom key line carries the "? 帮助"
-// entry hint, and it survives narrow terminals (the keys truncate, the hint
-// does not).
+// TestHelpHintOnKeyLine: every page's help keys — riding the frame's bottom
+// edge — carry the "? 帮助" entry hint, and it survives narrow terminals
+// (the keys truncate, the hint does not).
 func TestHelpHintOnKeyLine(t *testing.T) {
 	for _, sz := range []struct{ w, h int }{{120, 36}, {80, 24}, {62, 20}} {
 		m := newTestModel(t)
@@ -3346,14 +3352,14 @@ func TestHelpHintOnKeyLine(t *testing.T) {
 		if len(lines) < sz.h {
 			t.Fatalf("%dx%d: view too short", sz.w, sz.h)
 		}
-		if help := lines[sz.h-2]; !strings.Contains(help, "? 帮助") {
-			t.Fatalf("%dx%d: key line lost the help hint: %q", sz.w, sz.h, help)
+		if help := lines[sz.h-1]; !strings.Contains(help, "? 帮助") {
+			t.Fatalf("%dx%d: bottom edge lost the help hint: %q", sz.w, sz.h, help)
 		}
 	}
 	// Tabs no longer advertise help — it would read as a sixth tab.
 	m := newTestModel(t)
-	if tabs := strings.Split(m.View(), "\n")[2]; strings.Contains(tabs, "帮助") {
-		t.Fatalf("tabs bar should not carry a help label: %q", tabs)
+	if tabs := strings.Split(m.View(), "\n")[1]; strings.Contains(tabs, "帮助") {
+		t.Fatalf("tabs edge should not carry a help label: %q", tabs)
 	}
 }
 

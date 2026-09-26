@@ -481,16 +481,19 @@ func splitLines(s string) []string {
 }
 
 func (p nodesPage) View() string {
-	// Modals render inside the right pane: the panes always fill the app
-	// frame, so anything appended below them would be pushed off screen.
-	lv := ui.Pane(false, " 手动节点"+p.nodeView.countTitle(len(p.visibleNodes()), len(p.nodes))+
-		p.nodeView.sortTitle()+" ", p.focus == 0, p.leftW, p.height, p.leftLines())
-	rvTitle := " 详情 "
+	// The page is a dual-box row; in-pane modals (the delete confirmation
+	// and the group picker) render inside the right box — the boxes always
+	// fill the page height, so anything appended below them would be pushed
+	// off screen.
+	rvTitle := "详情"
 	if p.mode == 2 || p.mode == 3 {
 		rvTitle = p.modalTitle()
 	}
-	rv := ui.Pane(true, rvTitle, p.focus == 1, p.rightW, p.height, p.rightLines())
-	return lipgloss.JoinHorizontal(lipgloss.Top, lv, " ", rv)
+	return strings.Join(ui.PaneRow(
+		ui.PaneSpec{Title: "手动节点" + p.nodeView.countTitle(len(p.visibleNodes()), len(p.nodes)) +
+			p.nodeView.sortTitle(), Lines: p.leftLines(), Focused: p.focus == 0, W: p.leftW, H: p.height},
+		ui.PaneSpec{Title: rvTitle, Lines: p.rightLines(), Focused: p.focus == 1, W: p.rightW, H: p.height},
+	), "\n")
 }
 
 // overlay returns the page's floating window: the batch-import and edit
@@ -531,11 +534,11 @@ func (p nodesPage) overlay() *overlaySpec {
 func (p nodesPage) modalTitle() string {
 	switch p.mode {
 	case 2:
-		return " 删除确认 "
+		return "删除确认"
 	case 3:
-		return " 加入群组 "
+		return "加入群组"
 	}
-	return " 详情 "
+	return "详情"
 }
 
 // modalLines renders the in-pane modals: the delete confirmation and the
@@ -587,9 +590,9 @@ func (p nodesPage) leftLines() []string {
 		if i == p.sel {
 			cursor = ui.CursorStyle.Render("❯")
 		}
-		lines = append(lines, cursor+" "+ui.PadRight(ui.SpaceAfterFlag(n.Name), max0(p.leftW-15-latCellW(p.leftW)))+
+		lines = append(lines, cursor+" "+ui.PadRight(ui.SpaceAfterFlag(n.Name), max0(p.leftW-17-latCellW(p.leftW-4)))+
 			ui.HelpStyle.Render(ui.PadRight(n.Protocol, 8))+
-			latencyCell(p.lat, n.ID, latCellW(p.leftW)))
+			latencyCell(p.lat, n.ID, latCellW(p.leftW-4)))
 	}
 	if p.busy {
 		lines = append(lines, ui.HelpStyle.Render("⏳ 操作进行中…"))
@@ -646,20 +649,20 @@ func (p nodesPage) rightLines() []string {
 			ui.HelpStyle.Render(fmt.Sprintf("%d 成功 / %d 失败", p.importOK, len(p.importFail))))
 		for _, r := range p.importFail {
 			report = append(report, ui.ErrorStyle.Render(" ✗ "+
-				ui.Truncate(r.Link, max0(p.rightW-24))+" — "+ui.Truncate(r.Error, 12)))
+				ui.Truncate(r.Link, max0(p.rightW-26))+" — "+ui.Truncate(r.Error, 12)))
 		}
 		report = append(report, "")
 	}
 	lines := []string{
 		ui.SelectedStyle.Render("名称  ") + ui.SpaceAfterFlag(n.Name),
 		ui.SelectedStyle.Render("协议  ") + n.Protocol,
-		ui.SelectedStyle.Render("地址  ") + ui.Truncate(n.Address, max0(p.rightW-8)),
+		ui.SelectedStyle.Render("地址  ") + ui.Truncate(n.Address, max0(p.rightW-10)),
 	}
 	if n.Tag != "" {
 		lines = append(lines, ui.SelectedStyle.Render("标签  ")+n.Tag)
 	}
 	if n.Link != "" {
-		lines = append(lines, ui.SelectedStyle.Render("链接  ")+ui.Truncate(n.Link, max0(p.rightW-8)))
+		lines = append(lines, ui.SelectedStyle.Render("链接  ")+ui.Truncate(n.Link, max0(p.rightW-10)))
 	}
 	if l, ok := p.lat[n.ID]; ok && !l.TestedAt.IsZero() {
 		v := "超时"
@@ -674,7 +677,7 @@ func (p nodesPage) rightLines() []string {
 	// probe", which a single number cannot.
 	if p.hist != nil {
 		if series := p.hist.series(n.ID); len(series) >= 2 {
-			w := max0(p.rightW - 12)
+			w := max0(p.rightW - 14)
 			if w > 48 {
 				w = 48
 			}

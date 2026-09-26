@@ -468,8 +468,9 @@ func (m Model) visibleLatencyIDs() []string {
 }
 
 func (m *Model) layout() {
-	// The app frame (a rounded border around everything) costs 2 columns
-	// and 2 rows; statusbar+tabs+toast+help cost 4 more.
+	// The app frame (rounded border, help keys riding its bottom edge)
+	// costs 2 columns and 2 rows; the header box (tabs riding its top
+	// edge) 3 more rows, the toast line 1. Body budget stays height-6.
 	cw := max0(m.width - 2)
 	ch := max0(m.height - 6)
 	if cw < 1 {
@@ -479,14 +480,17 @@ func (m *Model) layout() {
 		ch = 1
 	}
 	m.home.setSize(cw, ch)
+	// leftW/rightW are the boxes' outer widths (borders included); 38
+	// keeps the left content width at 34 cells now that each box spends
+	// four columns on borders and padding instead of the panes' two.
 	leftW := cw / 3
-	if leftW > 36 {
-		leftW = 36
+	if leftW > 38 {
+		leftW = 38
 	}
-	if leftW < 20 {
-		leftW = 20
+	if leftW < 22 {
+		leftW = 22
 	}
-	rightW := cw - leftW - 3
+	rightW := cw - leftW - 3 // one-space gutter between the two boxes
 	if rightW < 30 {
 		rightW = 30
 	}
@@ -737,28 +741,31 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 }
 
 // click maps a cell-coordinate press onto the UI. Frame rows: 0 is the top
-// border, 1 the status line, 2 the tabs, 3+ the body; in a pane page the
-// body starts with the pane's title-in-rule line (3) and rows start at 4.
-// Column 0 is the frame's left border, column 1 the page-wide margin.
+// border, 1 the header box's tab edge, 2 the status line, 3 the header
+// box's bottom border, 4+ the body; in a dual-box page the body starts
+// with the boxes' top borders (row 4) and list rows start at 5. Column 0
+// is the frame's left border, column 1 the page-wide margin; the boxes
+// start at column 2, the tabs at column 5.
 func (m Model) click(x, y int) (tea.Model, tea.Cmd) {
 	if m.anyModal() || m.confirmApply {
 		return m, nil
 	}
 	cx := x - 2 // frame border + page-wide left margin
-	if y == 2 && cx >= 0 {
-		return m.tabClick(cx)
+	if y == 1 && x >= 5 {
+		return m.tabClick(x - 5)
 	}
-	if y == m.height-2 {
-		// The bottom key-hint line doubles as the help overlay's entry
-		// point — its trailing "? 帮助" names the key, the click opens it.
+	if y == m.height-1 {
+		// The frame's bottom edge — the help keys riding it — doubles as
+		// the overlay's entry point: its trailing "? 帮助" names the key,
+		// the click opens it.
 		m.helpOpen = true
 		m.helpScroll = 0
 		return m, nil
 	}
-	if y < 4 || cx < 0 {
+	if y < 5 || cx < 0 {
 		return m, nil
 	}
-	row := y - 4
+	row := y - 5
 	switch m.page {
 	case pageTree:
 		if cx <= m.groups.leftW {
@@ -782,9 +789,10 @@ func (m Model) click(x, y int) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// tabClick switches to the tab whose rendered span contains column cx. Tab
-// spans come from the same joined labels tabsBar renders (styles only
-// recolor, so the width math is shared).
+// tabClick switches to the tab whose rendered span contains column cx
+// (0-based into the tabs segment of the header box's top edge). Tab spans
+// come from the same joined labels tabsBar renders (styles only recolor,
+// so the width math is shared).
 func (m Model) tabClick(cx int) (tea.Model, tea.Cmd) {
 	for i, t := range tabLabels {
 		w := lipgloss.Width(t)
@@ -824,13 +832,13 @@ func (m *Model) forceRefresh() tea.Cmd {
 func (m Model) View() string {
 	switch m.phase {
 	case phaseBoot:
-		return bootView(m.cfg.Endpoint)
+		return bootView(m.cfg.Endpoint, m.width, m.height)
 
 	case phaseFatal:
-		return fatalView(m.cfg.Endpoint, m.fatal)
+		return fatalView(m.cfg.Endpoint, m.fatal, m.width, m.height)
 
 	case phaseLogin, phaseSetup:
-		return m.login.View(m.cfg.Endpoint, m.phase == phaseSetup)
+		return m.login.View(m.cfg.Endpoint, m.phase == phaseSetup, m.width, m.height)
 	}
 
 	if m.width < minTermW || m.height < minTermH {
@@ -850,12 +858,12 @@ func (m Model) View() string {
 	case pageConfigs:
 		body = m.configs.View(m.status.Modified)
 	}
-	// Hard clamp: a page must never push the chrome (status/tabs/help)
-	// off screen — this was the original scrolling bug. The body is also
-	// padded up to the available height so the frame always spans exactly
-	// the terminal and the help line stays anchored to the last row. Every
-	// line gets the page-wide left margin (one cell inside the frame), the
-	// same baseline the home page's boxes and the chrome use.
+	// Hard clamp: a page must never push the chrome (header box, toast,
+	// frame edges) off screen — this was the original scrolling bug. The
+	// body is also padded up to the available height so the frame always
+	// spans exactly the terminal and the help edge stays anchored to the
+	// last row. Every page line gets the page-wide left margin (one cell
+	// inside the frame), the same baseline the header box uses.
 	avail := m.height - 6
 	if avail < 1 {
 		avail = 1
@@ -878,33 +886,36 @@ func (m Model) View() string {
 	if m.helpOpen {
 		body = ui.Overlay(body, helpOverlayBox(cw-1, avail, m.helpScroll), cw-1, avail)
 	}
-	lines := strings.Split(body, "\n")
-	if len(lines) > avail {
-		lines = lines[:avail]
+	pageLines := strings.Split(body, "\n")
+	if len(pageLines) > avail {
+		pageLines = pageLines[:avail]
 	}
-	for len(lines) < avail {
-		lines = append(lines, "")
+	for len(pageLines) < avail {
+		pageLines = append(pageLines, "")
 	}
-	for i := range lines {
-		if lines[i] != "" {
-			lines[i] = " " + ui.Truncate(lines[i], cw-1)
+	for i := range pageLines {
+		if pageLines[i] != "" {
+			pageLines[i] = " " + ui.Truncate(pageLines[i], cw-1)
 		}
 	}
-
-	var b strings.Builder
-	b.WriteString(m.statusBar() + "\n")
-	b.WriteString(m.tabsBar() + "\n")
-	b.WriteString(strings.Join(lines, "\n") + "\n")
-	b.WriteString(m.toastLine() + "\n")
-	b.WriteString(m.helpLine())
+	// The header box carries the tabs in its top edge (the active one as a
+	// filled chip) and the status line inside — the same title-in-border
+	// language as every other box. It gets the same page-wide left-margin
+	// stamp as the page lines so its edges align with the boxes below; the
+	// tab styles carry their own left padding, trimmed so the edge reads
+	// "╭─ 1 首页".
+	header := ui.TitledBoxRight(strings.TrimLeft(m.tabsBar(), " "), m.spinSuffix(), false, cw-2,
+		[]string{m.statusBar()})
+	for i := range header {
+		header[i] = " " + ui.Truncate(header[i], cw-1)
+	}
+	frame := append(header, pageLines...)
+	frame = append(frame, m.toastLine())
 	// The frame: everything inside a rounded border sized to the terminal,
-	// so the TUI reads as one closed window instead of open-ended text.
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("238")).
-		Width(cw).
-		Height(m.height - 2).
-		Render(b.String())
+	// so the TUI reads as one closed window instead of open-ended text;
+	// the help keys ride its bottom edge.
+	keys, hint := m.helpKeys()
+	return ui.AppFrame(m.width, m.height, keys, hint, frame)
 }
 
 // smallView is the below-floor fallback: say what is wrong instead of
@@ -926,6 +937,9 @@ func shortEndpoint(ep string) string {
 	return s
 }
 
+// statusBar is the header box's content line: identity, runtime state and
+// the live rates. The box pads and truncates it to its inner width; the
+// rates stay pinned to the right edge while they fit.
 func (m Model) statusBar() string {
 	run := ui.OKStyle.Render("● 运行中")
 	if !m.status.Running {
@@ -942,19 +956,25 @@ func (m Model) statusBar() string {
 		s := m.home.snap
 		right = ui.HelpStyle.Render("↑" + ui.Rate(s.UpRate) + " ↓" + ui.Rate(s.DownRate))
 	}
-	gap := m.width - 3 - lipgloss.Width(left) - lipgloss.Width(right)
-	if gap < 1 {
-		gap = 1
+	inner := m.width - 8 // frame 2 + header box borders 2 + its padding 2 per side
+	if right != "" {
+		if gap := inner - lipgloss.Width(left) - lipgloss.Width(right); gap >= 2 {
+			return left + strings.Repeat(" ", gap) + right
+		}
 	}
-	return " " + ui.Truncate(left+strings.Repeat(" ", gap)+right, m.width-3)
+	return ui.Truncate(left, max0(inner))
 }
 
 var tabLabels = []string{"1 首页", "2 群组", "3 订阅", "4 手动节点", "5 配置"}
 
-// spinnerFrames is the braille spinner shown in the tabs bar while a
-// latency test runs.
+// spinnerFrames is the braille spinner shown in the header box's top edge
+// while a latency test runs.
 var spinnerFrames = []rune("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 
+// tabsBar is the tab row riding the header box's top edge: the active page
+// as a filled chip, the rest dim. It is embedded as the box's "title", so
+// it must not be prefixed or truncated here — titledBox sizes it to the
+// edge.
 func (m Model) tabsBar() string {
 	parts := make([]string, len(tabLabels))
 	for i, t := range tabLabels {
@@ -964,14 +984,18 @@ func (m Model) tabsBar() string {
 			parts[i] = ui.TabStyle.Render(t)
 		}
 	}
-	bar := strings.Join(parts, "")
+	return strings.Join(parts, "")
+}
+
+// spinSuffix is the latency-test indicator, right-aligned in the header
+// box's top edge: the progress is a cross-page fact, so it lives in the
+// chrome rather than in any one page.
+func (m Model) spinSuffix() string {
 	if done, total := m.testProgress(); total > 0 {
-		bar += "  " + ui.TitleStyle.Render(string(spinnerFrames[m.spin%len(spinnerFrames)])) +
+		return ui.TitleStyle.Render(string(spinnerFrames[m.spin%len(spinnerFrames)])) +
 			ui.HelpStyle.Render(fmt.Sprintf(" 测速中 %d/%d", done, total))
 	}
-	// The progress suffix must never wrap the bar onto a second row — the
-	// height math reserves exactly one line for the tabs.
-	return " " + ui.Truncate(bar, m.width-3)
+	return ""
 }
 
 // reenableMouse restores mouse reporting after a tea.ExecProcess round-trip
@@ -1007,8 +1031,12 @@ func (m Model) toastLine() string {
 	return " " + ui.Truncate(m.toast, m.width-3)
 }
 
-func (m Model) helpLine() string {
-	keys := "A 应用  1-5 切换页面  q 退出"
+// helpKeys returns the two segments riding the frame's bottom edge: the
+// current page's keys on the left and the help call-to-action pinned to
+// the right (clicking that edge anywhere opens the overlay). AppFrame
+// truncates the keys first so the call-to-action always survives.
+func (m Model) helpKeys() (keys, hint string) {
+	keys = "A 应用  1-5 切换页面  q 退出"
 	switch m.page {
 	case pageHome:
 		keys = "o 开关代理  Tab 切焦点  j/k+Enter 切换路由/跳群组页  L 日志  g 换组  P 账户  A 应用  r 刷新"
@@ -1023,19 +1051,12 @@ func (m Model) helpLine() string {
 	}
 	// The overlay names its own keys while it is up; the trailing hint then
 	// reads as "how to get out".
-	hint := "? 帮助"
+	hint = "? 帮助"
 	if m.helpOpen {
 		keys = "j/k 滚动  g/G 首尾"
 		hint = "esc 关闭帮助"
 	}
-	// Truncate instead of wrap: a second help row would push the chrome off
-	// screen on narrow terminals (the body clamp reserves exactly one row).
-	// The keys yield first so the call-to-action survives; clicking this
-	// line anywhere also opens the overlay.
-	avail := m.width - 3
-	hint = "  " + hint
-	keys = ui.Truncate(keys, max0(avail-lipgloss.Width(hint)))
-	return ui.HelpStyle.Render(" " + keys + hint)
+	return ui.HelpStyle.Render(keys), ui.HelpStyle.Render(hint)
 }
 
 // overlaySpec is a floating window's content. Decision dialogs and forms
@@ -1086,16 +1107,34 @@ func (m Model) pageOverlay() *overlaySpec {
 	return nil
 }
 
-func bootView(endpoint string) string {
-	return lipgloss.NewStyle().Width(60).Padding(1, 2).Render(
-		ui.TitleStyle.Render("dae-tui")+"\n正在连接 "+endpoint+" …") +
-		"\n\n" + ui.HelpStyle.Render("ctrl+c 退出")
+// bootView and fatalView render in their own phase, outside the app frame,
+// so they carry their own centered box — the same title-in-border language
+// the main phases use.
+func bootView(endpoint string, w, h int) string {
+	box := ui.TitledBox("dae-tui", false, 44, []string{
+		ui.TitleStyle.Render("正在连接 ") + ui.HelpStyle.Render(endpoint) + " …",
+		"",
+		ui.HelpStyle.Render("ctrl+c 退出"),
+	})
+	return lipgloss.Place(max0(w), max0(h), lipgloss.Center, lipgloss.Center, strings.Join(box, "\n"))
 }
 
-func fatalView(endpoint string, err error) string {
-	return lipgloss.NewStyle().Width(70).Padding(1, 2).Render(
-		ui.ErrorStyle.Render("无法连接 daed")+ui.HelpStyle.Render(" ("+endpoint+")")+"\n\n"+
-			ui.ErrorStyle.Render(err.Error())+
-			"\n\n检查: daed 是否在运行 (systemctl status daed)、endpoint 是否正确。\n远程实例推荐 ssh -L 2023:127.0.0.1:2023 <host> 后用默认地址。") +
-		"\n\n" + ui.HelpStyle.Render("r 重试  q 退出")
+func fatalView(endpoint string, err error, w, h int) string {
+	lines := []string{
+		ui.ErrorStyle.Render("无法连接 daed") + ui.HelpStyle.Render(" ("+endpoint+")"),
+		"",
+		ui.ErrorStyle.Render(ui.Truncate(err.Error(), 58)),
+		"",
+		"检查: daed 是否在运行 (systemctl status daed)、",
+		"endpoint 是否正确。远程实例推荐",
+		"ssh -L 2023:127.0.0.1:2023 <host> 后用默认地址。",
+		"",
+		ui.HelpStyle.Render("r 重试  q 退出"),
+	}
+	bw := 64
+	if w > 0 && bw > w-2 {
+		bw = w - 2
+	}
+	box := ui.TitledBox("连接失败", true, bw, lines)
+	return lipgloss.Place(max0(w), max0(h), lipgloss.Center, lipgloss.Center, strings.Join(box, "\n"))
 }

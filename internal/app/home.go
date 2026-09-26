@@ -789,19 +789,16 @@ func (p homePage) bodyLines(status driver.Status) ([]string, int) {
 	addZone := func(zone []string) {
 		lines = append(lines, zone...)
 	}
-	// pairedRow builds one grid row: both boxes' content padded to the
-	// same height so their borders align, then joined at the page seam.
+	// pairedRow builds one grid row through the shared PaneRow helper: both
+	// boxes' content padded to the same height so their borders align, then
+	// joined at the page seam.
 	pairedRow := func(leftTitle string, left []string, rightTitle string, right []string,
 		rightFocused bool) []string {
 		lw := homeRoutingW
 		rw := p.width - margin*2 - lw - 1
-		n := len(left)
-		if len(right) > n {
-			n = len(right)
-		}
-		return ui.JoinBoxes(
-			ui.TitledBox(leftTitle, false, lw, padZone(left, n)),
-			ui.TitledBox(rightTitle, rightFocused, rw, padZone(right, n)))
+		return ui.PaneRow(
+			ui.PaneSpec{Title: leftTitle, Lines: left, W: lw},
+			ui.PaneSpec{Title: rightTitle, Lines: right, Focused: rightFocused, W: rw})
 	}
 
 	// --- zone row 1: proxy state (left) | traffic (right) ---
@@ -890,16 +887,6 @@ func (p homePage) bodyLines(status driver.Status) ([]string, int) {
 		active = groupStart + p.groupCursor
 	}
 	return lines, active
-}
-
-// padZone extends rows with blank lines to n rows: same-row boxes share
-// their top and bottom borders, so the shorter zone keeps its dead space
-// inside the box instead of dropping a half-finished border.
-func padZone(rows []string, n int) []string {
-	for len(rows) < n {
-		rows = append(rows, "")
-	}
-	return rows
 }
 
 // proxyRows is the 代理 zone's content: the on/off badge with its key, the

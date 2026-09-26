@@ -925,28 +925,33 @@ func (p *groupsPage) candidateRows() []candidateRow {
 }
 
 func (p groupsPage) View() string {
-	if p.err != nil {
-		return ui.ErrorStyle.Render(" ✗ 加载路由组失败: " + shortErr(p.err))
-	}
-	if len(p.groups) == 0 {
-		if p.loading {
-			return ui.HelpStyle.Render(" 加载中…")
-		}
-		return ui.HelpStyle.Render(" 无路由组（在 daed 中创建组后刷新）")
-	}
-
+	// The page is a dual-box row (left list + right detail) built by
+	// PaneRow — the same grid language as the home page's zones. Load
+	// failures and the empty state stay inside the left box so the layout
+	// never collapses to a bare line.
 	left := p.leftLines()
 	right := p.rightLines()
-	lv := ui.Pane(false, fmt.Sprintf(" 路由组 (%d) ", len(p.groups)), p.focus == 0, p.leftW, p.height, left)
+	leftTitle := fmt.Sprintf("路由组 (%d)", len(p.groups))
+	if p.err != nil {
+		left = []string{ui.ErrorStyle.Render("✗ 加载路由组失败: " + shortErr(p.err))}
+	} else if len(p.groups) == 0 {
+		if p.loading {
+			left = []string{ui.HelpStyle.Render("加载中…")}
+		} else {
+			left = []string{ui.HelpStyle.Render("无路由组（在 daed 中创建组后刷新）")}
+		}
+	}
 	var title string
 	if g := p.curGroup(); g != nil {
 		title = fmt.Sprintf(" %s · %s ", g.Name, policyLabel(g)) + p.nodeView.sortTitle()
 		if n := len(p.markedIDs()); n > 0 {
-			title += fmt.Sprintf("已选 %d ", n)
+			title += fmt.Sprintf(" 已选 %d ", n)
 		}
 	}
-	rv := ui.Pane(true, title, p.focus == 1, p.rightW, p.height, right)
-	return lipgloss.JoinHorizontal(lipgloss.Top, lv, " ", rv)
+	return strings.Join(ui.PaneRow(
+		ui.PaneSpec{Title: leftTitle, Lines: left, Focused: p.focus == 0, W: p.leftW, H: p.height},
+		ui.PaneSpec{Title: title, Lines: right, Focused: p.focus == 1, W: p.rightW, H: p.height},
+	), "\n")
 }
 
 func (p groupsPage) leftLines() []string {
@@ -968,9 +973,9 @@ func (p groupsPage) leftLines() []string {
 		} else if g.Policy != "fixed" {
 			cur = " · 自动"
 		}
-		line := cursor + " " + ui.PadRight(g.Name, max0(p.leftW-18)) +
+		line := cursor + " " + ui.PadRight(g.Name, max0(p.leftW-20)) +
 			ui.HelpStyle.Render(fmt.Sprintf("%3d节点", len(g.Members())))
-		lines = append(lines, line+ui.Truncate(cur, max0(p.leftW-12)))
+		lines = append(lines, line+ui.Truncate(cur, max0(p.leftW-14)))
 	}
 	if p.pickErr != "" {
 		lines = append(lines, "", ui.ErrorStyle.Render("✗ "+p.pickErr))
@@ -1092,7 +1097,7 @@ func (p groupsPage) renderRow(g *driver.Group, i int) string {
 			label += " (过滤: " + s.NameFilterRegex + ")"
 		}
 		detail := ui.HelpStyle.Render(fmt.Sprintf("%d/%d节点  x 移除", s.MatchedCount, subTotal(p.subs, s.SubscriptionID)))
-		return cur + " " + ui.PadRight(headerStyle.Render(label), max0(p.rightW-22)) + detail
+		return cur + " " + ui.PadRight(headerStyle.Render(label), max0(p.rightW-24)) + detail
 	}
 	if r.kind == rowDirect {
 		arrow := "▸"
@@ -1117,8 +1122,8 @@ func (p groupsPage) renderRow(g *driver.Group, i int) string {
 		name += ui.HelpStyle.Render(" (手动)")
 	}
 	protoW := 8
-	latW := latCellW(p.rightW)
-	nameW := max0(p.rightW - protoW - latW - 12)
+	latW := latCellW(p.rightW - 4)
+	nameW := max0(p.rightW - protoW - latW - 14)
 	return "│  " + mark + cur + " " +
 		ui.PadRight(name, nameW) +
 		ui.HelpStyle.Render(ui.PadRight(n.Protocol, protoW)) +
@@ -1202,7 +1207,7 @@ func (p groupsPage) candidateLines() []string {
 		} else {
 			src = "·手动"
 		}
-		lines = append(lines, style.Render(mark+ui.PadRight(ui.SpaceAfterFlag(r.node.Name), max0(p.rightW-32)))+tick+
+		lines = append(lines, style.Render(mark+ui.PadRight(ui.SpaceAfterFlag(r.node.Name), max0(p.rightW-34)))+tick+
 			ui.HelpStyle.Render(ui.PadRight(src, 16)+r.node.Protocol))
 	}
 	return append(lines, ui.HelpStyle.Render(" Enter 添加  space 标记  esc 取消"))

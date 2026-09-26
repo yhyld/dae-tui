@@ -140,32 +140,42 @@ func (f *loginForm) values() (string, string, bool) {
 	return u, p, true
 }
 
-func (f loginForm) View(endpoint string, setup bool) string {
-	var b strings.Builder
+// View renders the login/setup form in its own centered rounded box — the
+// same title-in-border language as the main phases (this phase sits
+// outside the app frame).
+func (f loginForm) View(endpoint string, setup bool, w, h int) string {
 	title := "登录 daed"
 	if setup {
 		title = "初始化 daed 账号（尚无用户）"
 	}
-	b.WriteString(ui.TitleStyle.Render("dae-tui · " + title))
-	b.WriteString("\n")
-	b.WriteString(ui.HelpStyle.Render(" " + endpoint))
-	b.WriteString("\n\n")
-
-	b.WriteString(field("用户名", f.focus == 0, f.username.View()) + "\n")
-	b.WriteString(field("密码", f.focus == 1, f.password.View()) + "\n")
-	if setup {
-		b.WriteString(field("确认", f.focus == 2, f.confirm.View()) + "\n")
+	lines := []string{
+		ui.HelpStyle.Render(endpoint),
+		"",
+		field("用户名", f.focus == 0, f.username.View()),
+		field("密码", f.focus == 1, f.password.View()),
 	}
-
+	if setup {
+		lines = append(lines, field("确认", f.focus == 2, f.confirm.View()))
+	}
 	if f.busy {
-		b.WriteString("\n" + ui.HelpStyle.Render("正在验证…"))
+		lines = append(lines, "", ui.HelpStyle.Render("正在验证…"))
 	}
 	if f.err != "" {
-		b.WriteString("\n" + ui.ErrorStyle.Render("✗ "+f.err))
+		lines = append(lines, ui.ErrorStyle.Render("✗ "+f.err))
 	}
-	b.WriteString("\n\n")
-	b.WriteString(ui.HelpStyle.Render(" Tab 切换焦点  Enter 提交  " + submitHint(setup)))
-	return lipgloss.NewStyle().Padding(1, 3).Render(b.String())
+	lines = append(lines, "", ui.HelpStyle.Render(" Tab 切换焦点  Enter 提交  "+submitHint(setup)))
+
+	bw := 46
+	for _, l := range lines {
+		if lw := lipgloss.Width(l) + 4; lw > bw { // borders + inner padding
+			bw = lw
+		}
+	}
+	if w > 0 && bw > w-2 {
+		bw = w - 2
+	}
+	box := ui.TitledBox(title, false, bw, lines)
+	return lipgloss.Place(max0(w), max0(h), lipgloss.Center, lipgloss.Center, strings.Join(box, "\n"))
 }
 
 func submitHint(setup bool) string {

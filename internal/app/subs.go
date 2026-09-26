@@ -7,7 +7,6 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 
 	"dae-tui/internal/driver"
 	"dae-tui/internal/ui"
@@ -533,18 +532,21 @@ func (p *subsPage) editFormKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 }
 
 func (p subsPage) View() string {
-	// Modals render inside the right pane: the panes always fill the app
-	// frame, so anything appended below them would be pushed off screen.
-	rvTitle := " 详情 "
+	// The page is a dual-box row; in-pane modals (the delete confirmation)
+	// render inside the right box — the boxes always fill the page height,
+	// so anything appended below them would be pushed off screen.
+	rvTitle := "详情"
 	if p.mode == 2 {
-		rvTitle = " 删除确认 "
+		rvTitle = "删除确认"
 	} else if s := p.cur(); s != nil && p.expanded {
-		rvTitle = " 节点" + p.nodeView.countTitle(len(p.visibleNodes()), len(p.subNodes[s.ID])) +
-			p.nodeView.sortTitle() + " "
+		rvTitle = "节点" + p.nodeView.countTitle(len(p.visibleNodes()), len(p.subNodes[s.ID])) +
+			p.nodeView.sortTitle()
 	}
-	lv := ui.Pane(false, " 订阅 ("+strconv.Itoa(len(p.subs))+") ", p.focus == 0, p.leftW, p.height, p.leftLines())
-	rv := ui.Pane(true, rvTitle, p.focus == 1, p.rightW, p.height, p.rightLines())
-	return lipgloss.JoinHorizontal(lipgloss.Top, lv, " ", rv)
+	return strings.Join(ui.PaneRow(
+		ui.PaneSpec{Title: "订阅 (" + strconv.Itoa(len(p.subs)) + ")", Lines: p.leftLines(),
+			Focused: p.focus == 0, W: p.leftW, H: p.height},
+		ui.PaneSpec{Title: rvTitle, Lines: p.rightLines(), Focused: p.focus == 1, W: p.rightW, H: p.height},
+	), "\n")
 }
 
 // overlay returns the page's floating window: the add / cron / edit forms.
@@ -634,12 +636,12 @@ func (p subsPage) leftLines() []string {
 		if failed {
 			stStyle = ui.ErrorStyle
 		}
-		lines = append(lines, cursor+" "+ui.PadRight(s.Tag, max0(p.leftW-24))+
+		lines = append(lines, cursor+" "+ui.PadRight(s.Tag, max0(p.leftW-26))+
 			stStyle.Render(ui.Truncate(s.Status, 10))+
 			ui.HelpStyle.Render(" "+strconv.Itoa(s.NodeCount)+"节点"))
 		if failed && s.Info != "" {
 			lines = append(lines, "    "+ui.ErrorStyle.Render(
-				ui.Truncate(firstLine(s.Info), max0(p.leftW-6))))
+				ui.Truncate(firstLine(s.Info), max0(p.leftW-8))))
 		}
 	}
 	if p.busy {
@@ -695,9 +697,9 @@ func (p subsPage) rightLines() []string {
 	}
 	head = append(head, ui.SelectedStyle.Render("标签 ")+s.Tag+cron)
 	head = append(head, ui.SelectedStyle.Render("状态 ")+s.Status)
-	head = append(head, ui.SelectedStyle.Render("链接 ")+ui.Truncate(s.Link, max0(p.rightW-8)))
+	head = append(head, ui.SelectedStyle.Render("链接 ")+ui.Truncate(s.Link, max0(p.rightW-10)))
 	if s.Info != "" {
-		head = append(head, ui.SelectedStyle.Render("信息 ")+ui.Truncate(firstLine(s.Info), max0(p.rightW-8)))
+		head = append(head, ui.SelectedStyle.Render("信息 ")+ui.Truncate(firstLine(s.Info), max0(p.rightW-10)))
 	}
 	head = append(head, ui.SelectedStyle.Render("更新 ")+ui.TimeAgo(s.UpdatedAt))
 	if p.focus == 0 {
@@ -737,10 +739,10 @@ func (p subsPage) rightLines() []string {
 		if i == p.nc && p.focus == 1 {
 			cursor = ui.CursorStyle.Render("❯")
 		}
-		nameW := max0(p.rightW - 15 - latCellW(p.rightW))
+		nameW := max0(p.rightW - 17 - latCellW(p.rightW-4))
 		head = append(head, cursor+" "+ui.PadRight(ui.SpaceAfterFlag(n.Name), nameW)+
 			ui.HelpStyle.Render(ui.PadRight(n.Protocol, 8))+
-			latencyCell(p.lat, n.ID, latCellW(p.rightW)))
+			latencyCell(p.lat, n.ID, latCellW(p.rightW-4)))
 	}
 	return head
 }
