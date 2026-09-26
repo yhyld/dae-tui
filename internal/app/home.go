@@ -66,13 +66,20 @@ type homePage struct {
 	groupCursor int
 	groupFocus  bool
 
+	// The home page is taller than many terminals; scroll keeps the
+	// "active" line (the cursor row, or an open confirmation) on screen.
+	// follow re-centers on the active line after every keystroke; wheel
+	// scrolling temporarily turns it off so the user can look around.
+	scroll int
+	follow bool
+
 	width, height int
 
 	caps driver.Caps
 }
 
 func newHomePage(caps driver.Caps) homePage {
-	p := homePage{lat: map[string]driver.Latency{}, confirmPreset: -1, caps: caps}
+	p := homePage{lat: map[string]driver.Latency{}, confirmPreset: -1, caps: caps, follow: true}
 	p.pwCur = newPasswordInput("当前密码")
 	p.pwNew = newPasswordInput("新密码 (至少6位, 含字母和数字)")
 	p.pwRepeat = newPasswordInput("确认新密码")
@@ -161,9 +168,9 @@ func (p homePage) hasIface(name string) bool {
 // routes) and warns when the selected config binds to an interface that is
 // gone — DHCP renames and replugged USB NICs make that common, and the
 // symptom (proxy silently passing nothing) is invisible without this.
-func (p homePage) netSection() string {
+func (p homePage) netLines() []string {
 	if len(p.ifaces) == 0 {
-		return ""
+		return nil
 	}
 	parts := make([]string, 0, len(p.ifaces))
 	for _, i := range p.ifaces {
@@ -181,9 +188,8 @@ func (p homePage) netSection() string {
 		}
 		parts = append(parts, s)
 	}
-	var b strings.Builder
-	b.WriteString(ui.TitleStyle.Render(" 网络") + "  " +
-		ui.Truncate(strings.Join(parts, "   "), max0(p.width-8)) + "\n")
+	lines := []string{ui.TitleStyle.Render(" 网络") + "  " +
+		ui.Truncate(strings.Join(parts, "   "), max0(p.width-8))}
 	for _, w := range []struct {
 		label string
 		names []string
@@ -192,11 +198,11 @@ func (p homePage) netSection() string {
 			if p.hasIface(n) {
 				continue
 			}
-			b.WriteString(ui.ErrorStyle.Render(" ⚠ 配置的 "+w.label+" 接口 "+n+
-				" 不存在（daed 按网卡名绑定，DHCP 改名或换网口后需更新配置）") + "\n")
+			lines = append(lines, ui.ErrorStyle.Render(" ⚠ 配置的 "+w.label+" 接口 "+n+
+				" 不存在（daed 按网卡名绑定，DHCP 改名或换网口后需更新配置）"))
 		}
 	}
-	return b.String()
+	return lines
 }
 
 // rederiveGroupIdx points the proxy group at one the current routing already
@@ -276,6 +282,9 @@ func (p *homePage) handleLatencies(lats []driver.Latency) {
 }
 
 func (p *homePage) handleKey(msg tea.KeyMsg, d driver.Driver, running bool) tea.Cmd {
+	// Any keystroke re-arms cursor-follow scrolling: the keyboard user's
+	// context is the active line, so the window snaps back to it.
+	p.follow = true
 	if p.acct != 0 {
 		return p.acctKey(msg, d)
 	}
@@ -507,8 +516,8 @@ func logsCmd() tea.Cmd {
 	return tea.ExecProcess(c, func(err error) tea.Msg { return logsDoneMsg{} })
 }
 
-// acctSection renders the account UI inside the home page.
-func (p homePage) acctSection() string {
+// acctLines renders the account UI inside the home page.
+func (p homePage) acctLines() []string {
 	switch p.acct {
 	case 1:
 		lines := []string{ui.TitleStyle.Render(" 账户"), "",
@@ -521,8 +530,7 @@ func (p homePage) acctSection() string {
 			}
 			lines = append(lines, style.Render(mark+it))
 		}
-		return strings.Join(lines, "\n") + "\n" +
-			ui.HelpStyle.Render(" j/k 选择  Enter 确认  esc 返回") + "\n"
+		return append(lines, ui.HelpStyle.Render(" j/k 选择  Enter 确认  esc 返回"))
 	case 2:
 		var b strings.Builder
 		b.WriteString(ui.TitleStyle.Render(" 修改密码") + "\n\n")
@@ -541,13 +549,21 @@ func (p homePage) acctSection() string {
 		if p.pwErr != "" {
 			b.WriteString("\n" + ui.ErrorStyle.Render(" ✗ "+p.pwErr) + "\n")
 		}
-		b.WriteString("\n" + ui.HelpStyle.Render(" Tab 切换  Enter 提交  esc 返回") + "\n")
-		return b.String()
+		b.WriteString("\n" + ui.HelpStyle.Render(" Tab 切换  Enter 提交  esc 返回"))
+		return strings.Split(b.String(), "\n")
 	case 3:
-		return ui.ErrorStyle.Render(" ▸ 确认退出登录? 将清除本机保存的密码与 token (y/n)") + "\n"
+		return ui.BoxLines(true, "确认退出登录? 将清除本机保存的密码与 token  (y/n)")
 	}
-	return ""
+	return nil
 }
+
+// homeTwoColMin is the content width at which the home page lays the
+// traffic block and the routing picker side by side instead of stacked.
+const homeTwoColMin = 96
+
+// homeRoutingW is the routing column's width in the two-column layout:
+// cursor + mark + a 14-cell label + a CJK description fits in 44.
+const homeRoutingW = 44
 
 var presetLabels = map[string]string{
 	"gfw":    "GFW 模式",
@@ -614,108 +630,199 @@ func (p *homePage) currentNode(g driver.Group) (label string, style lipgloss.Sty
 	return auto + " · 未测速", ui.HelpStyle
 }
 
-func (p homePage) View(status driver.Status) string {
-	var b strings.Builder
+// scrollBy moves the window by d lines and detaches it from the cursor
+// (follow re-arms on the next keystroke). The wheel calls this.
+func (p *homePage) scrollBy(d int) {
+	p.scroll += d
+	p.follow = false
+}
 
-	// --- status & switch line ---
-	run := ui.OKStyle.Render("● 代理运行中")
+// bodyLines renders the home page as a flat line list plus the index of the
+// active line — an open confirmation, the account menu, or the cursor row of
+// whichever section holds focus. View windows the list so the active line
+// stays on screen; that is the home page's scrolling.
+func (p homePage) bodyLines(status driver.Status) ([]string, int) {
+	var lines []string
+	active := -1
+	add := func(s string) { lines = append(lines, s) }
+
+	// --- status & switch line: a solid badge, not colored text — the
+	// proxy's on/off state is the page's primary fact and a background
+	// block reads at a glance from across the room ---
+	badge := lipgloss.NewStyle().Bold(true).
+		Foreground(lipgloss.Color("15")).Background(ui.Green).
+		Padding(0, 1).Render("● 代理运行中")
 	hint := ui.HelpStyle.Render("  o 停止")
 	if !status.Running {
-		run = ui.ErrorStyle.Render("○ 代理已停止")
+		badge = lipgloss.NewStyle().Bold(true).
+			Foreground(lipgloss.Color("15")).Background(ui.Red).
+			Padding(0, 1).Render("○ 代理已停止")
 		hint = ui.HelpStyle.Render("  o 启动")
 	}
 	mod := ""
 	if status.Modified {
 		mod = ui.ErrorStyle.Render("  ⚠ 配置改动未应用（4 配置页 A 应用）")
 	}
-	b.WriteString(" " + run + hint + ui.HelpStyle.Render("   dae "+status.Version) + mod + "\n")
+	add(" " + badge + hint + ui.HelpStyle.Render("   dae "+status.Version) + mod)
 
 	if p.confirmSwitch {
 		verb := "启动"
 		if status.Running {
 			verb = "停止"
 		}
-		b.WriteString(ui.ErrorStyle.Render(" ▸ 确认"+verb+"代理? (y/n)") + "\n")
+		add("")
+		box := ui.BoxLines(true, "确认"+verb+"代理?  (y/n)")
+		lines = append(lines, box...)
+		active = len(lines) - 1
 	}
-	if acct := p.acctSection(); acct != "" {
-		b.WriteString(acct)
-	}
-	b.WriteString("\n")
-
-	// --- traffic charts (smaller than the old full page) ---
-	if !p.caps.TrafficStats {
-		b.WriteString(ui.HelpStyle.Render(" 流量统计：当前后端不支持") + "\n\n")
-	} else {
-		chartW := max0(p.width/2 - 16)
-		if chartW < 20 {
-			chartW = 20
+	if p.acct != 0 {
+		lines = append(lines, p.acctLines()...)
+		if active < 0 {
+			active = len(lines) - 1
 		}
-		chartH := 4
-		green := lipgloss.NewStyle().Foreground(ui.Green)
-		yellow := lipgloss.NewStyle().Foreground(ui.Yellow)
-		s := p.snap
-		up := ui.Sparkline(s.UpSeries, chartW, chartH, green, "↑")
-		down := ui.Sparkline(s.DownSeries, chartW, chartH, yellow, "↓")
-		left := "↑ 上行  " + green.Render(ui.Rate(s.UpRate)) + "\n" + up +
-			"\n\n↓ 下行  " + yellow.Render(ui.Rate(s.DownRate)) + "\n" + down
-		right := "连接 " + strconv.Itoa(s.Conns) + "   UDP " + strconv.Itoa(s.UDPSessions) +
-			"\n累计 ↑ " + ui.Bytes(s.UpTotal) + "\n累计 ↓ " + ui.Bytes(s.DownTotal) +
-			"\n\n" + ui.HelpStyle.Render("每秒自动刷新 (runtimeOverview)")
-		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, left, "    ", right))
-		b.WriteString("\n\n")
+	}
+	add("")
+
+	// --- traffic + routing quick-switch: side by side on wide terminals,
+	// stacked below homeTwoColMin (the charts and the preset list each need
+	// roughly half a screen; stacking them costs ~7 rows the group list
+	// could use) ---
+	routingW := p.width
+	twoCol := p.width >= homeTwoColMin
+	if twoCol {
+		routingW = homeRoutingW
+	}
+	routingBody, presetOff, routingConfirm := p.routingLines(routingW)
+	presetStart := -1
+	if twoCol {
+		leftW := p.width - homeRoutingW - 3
+		chartW := leftW - 24
+		if chartW > 56 {
+			chartW = 56
+		}
+		traffic := p.trafficLines(chartW)
+		n := len(traffic)
+		if len(routingBody) > n {
+			n = len(routingBody)
+		}
+		base := len(lines)
+		for i := 0; i < n; i++ {
+			l, r := "", ""
+			if i < len(traffic) {
+				l = ui.PadRight(ui.Truncate(traffic[i], leftW), leftW)
+			}
+			if i < len(routingBody) {
+				r = ui.Truncate(routingBody[i], homeRoutingW)
+			}
+			add(l + "   " + r)
+		}
+		if presetOff >= 0 {
+			presetStart = base + presetOff
+		}
+	} else {
+		lines = append(lines, p.trafficLines(max0(p.width/2-16))...)
+		add("")
+		if presetOff >= 0 {
+			presetStart = len(lines) + presetOff
+		}
+		lines = append(lines, routingBody...)
+	}
+	if len(routingConfirm) > 0 {
+		lines = append(lines, routingConfirm...)
+		if active < 0 {
+			active = len(lines) - len(routingConfirm)
+		}
 	}
 
 	// --- network state ---
-	if net := p.netSection(); net != "" {
-		b.WriteString(net)
-		b.WriteString("\n")
+	if net := p.netLines(); len(net) > 0 {
+		lines = append(lines, net...)
+		add("")
 	}
-
-	// --- routing quick-switch ---
-	b.WriteString(p.routingSection())
 
 	// --- current node per group ---
-	b.WriteString("\n" + ui.TitleStyle.Render(" 各组当前节点") + "\n")
+	add("")
+	add(ui.TitleStyle.Render(" 各组当前节点"))
 	if len(p.groups) == 0 {
-		b.WriteString(ui.HelpStyle.Render(" （加载中…）") + "\n")
+		add(ui.HelpStyle.Render(" （加载中…）"))
 	}
+	groupStart := len(lines)
 	for i, g := range p.groups {
 		label, style := p.currentNode(g)
 		cursor := " "
 		if i == p.groupCursor && p.groupFocus {
 			cursor = ui.CursorStyle.Render("❯")
 		}
-		b.WriteString(" " + cursor + " " + ui.PadRight(g.Name, 16) + style.Render(label) + "\n")
+		add(" " + cursor + " " + ui.PadRight(g.Name, 16) + style.Render(label))
 	}
 	if p.groupFocus {
-		b.WriteString(ui.HelpStyle.Render("  Enter 跳到群组页并展开该组   Tab 返回路由切换   esc 返回") + "\n")
+		add(ui.HelpStyle.Render("  Enter 跳到群组页并展开该组   Tab 返回路由切换   esc 返回"))
 	} else if len(p.groups) > 0 {
-		b.WriteString(ui.HelpStyle.Render("  Tab 切换到组列表（Enter 跳到群组页并展开）") + "\n")
+		add(ui.HelpStyle.Render("  Tab 切换到组列表（Enter 跳到群组页并展开）"))
 	}
 
-	return b.String()
+	// Active-line priority: an open confirmation or the account menu won
+	// above; otherwise it is the cursor row of the focused section.
+	if active < 0 && presetStart >= 0 && !p.groupFocus && p.confirmPreset < 0 {
+		active = presetStart + p.presetCursor
+	}
+	if active < 0 && p.groupFocus && groupStart+p.groupCursor < len(lines) {
+		active = groupStart + p.groupCursor
+	}
+	return lines, active
 }
 
-// routingSection is the home page's preset picker: the routing profile the
-// presets replace, the proxy group they target, and — while confirming — the
-// exact DSL that y would write.
-func (p homePage) routingSection() string {
-	if len(p.presets) == 0 {
-		return ""
+// trafficLines renders the two rate charts with the counters beside them,
+// charts sized to chartW cells.
+func (p homePage) trafficLines(chartW int) []string {
+	if !p.caps.TrafficStats {
+		return []string{ui.HelpStyle.Render(" 流量统计：当前后端不支持"), ""}
 	}
-	var b strings.Builder
+	if chartW < 20 {
+		chartW = 20
+	}
+	chartH := 4
+	green := lipgloss.NewStyle().Foreground(ui.Green)
+	yellow := lipgloss.NewStyle().Foreground(ui.Yellow)
+	s := p.snap
+	up := ui.Sparkline(s.UpSeries, chartW, chartH, green, "↑")
+	down := ui.Sparkline(s.DownSeries, chartW, chartH, yellow, "↓")
+	left := "↑ 上行  " + green.Render(ui.Rate(s.UpRate)) + "\n" + up +
+		"\n\n↓ 下行  " + yellow.Render(ui.Rate(s.DownRate)) + "\n" + down
+	right := "连接 " + strconv.Itoa(s.Conns) + "   UDP " + strconv.Itoa(s.UDPSessions) +
+		"\n累计 ↑ " + ui.Bytes(s.UpTotal) + "\n累计 ↓ " + ui.Bytes(s.DownTotal) +
+		"\n\n" + ui.HelpStyle.Render("每秒自动刷新")
+	return strings.Split(lipgloss.JoinHorizontal(lipgloss.Top, left, "    ", right), "\n")
+}
+
+// routingLines renders the preset picker: header, the presets and the
+// current-mode footer. It returns the body truncated to w, the index of the
+// first preset row within it, and — while a switch is being confirmed — the
+// full-width confirmation box and DSL preview that follow the section.
+func (p homePage) routingLines(w int) (body []string, presetStart int, confirm []string) {
+	if len(p.presets) == 0 {
+		return nil, -1, nil
+	}
 	head := ui.TitleStyle.Render(" 路由快速切换") + ui.HelpStyle.Render("  "+p.routingName)
 	if g := p.proxyGroup(); g != "" {
-		head += ui.HelpStyle.Render("   代理组: " + g + " (g 换)")
+		group := ui.HelpStyle.Render("  代理组: " + g + " (g 换)")
+		if w >= 50 {
+			// One row on wide columns…
+			body = append(body, ui.Truncate(head+group, w))
+		} else {
+			// …and its own dim line in the 44-cell column, instead of an
+			// ellipsized tail.
+			body = append(body, ui.Truncate(head, w), group)
+		}
+	} else {
+		body = append(body, ui.Truncate(head, w))
 	}
-	b.WriteString(head + "\n")
 	if p.routingID == "" {
-		b.WriteString(ui.HelpStyle.Render(" （无路由方案：在 5 配置页创建后可用）") + "\n")
-		return b.String()
+		body = append(body, ui.HelpStyle.Render(" （无路由方案：在 5 配置页创建后可用）"))
+	} else if p.proxyGroup() == "" {
+		body = append(body, ui.HelpStyle.Render(" （无群组：预设需要一个代理组，请在 2 群组页创建）"))
 	}
-	if p.proxyGroup() == "" {
-		b.WriteString(ui.HelpStyle.Render(" （无群组：预设需要一个代理组，请在 2 群组页创建）") + "\n")
-	}
+	presetStart = len(body)
 	for i, preset := range p.presets {
 		cursor := " "
 		if i == p.presetCursor {
@@ -729,22 +836,49 @@ func (p homePage) routingSection() string {
 		if i == p.presetCursor {
 			style = ui.CursorStyle
 		}
-		b.WriteString(cursor + " " + mark + style.Render(ui.PadRight(presetLabel(preset.ID), 14)) +
-			ui.HelpStyle.Render(presetDescs[preset.ID]) + "\n")
+		body = append(body, cursor+" "+mark+style.Render(ui.PadRight(presetLabel(preset.ID), 14))+
+			ui.HelpStyle.Render(presetDescs[preset.ID]))
 	}
 	switch {
 	case p.confirmPreset >= 0 && p.presetErr != nil:
-		b.WriteString(ui.ErrorStyle.Render(" ✗ 无法生成: "+shortErr(p.presetErr)) + "\n")
+		confirm = []string{ui.ErrorStyle.Render(" ✗ 无法生成: " + shortErr(p.presetErr))}
 	case p.confirmPreset >= 0:
-		b.WriteString(ui.ErrorStyle.Render(" ▸ 将路由方案 "+p.routingName+" 替换为「"+
-			presetLabel(p.presets[p.confirmPreset].ID)+"」? (y 确认 / n 取消, g 换组)") + "\n")
+		confirm = ui.BoxLines(true, "将路由方案 "+p.routingName+" 替换为「"+
+			presetLabel(p.presets[p.confirmPreset].ID)+"」?  y 确认 / n 取消, g 换组")
 		for _, l := range strings.Split(p.presetText, "\n") {
-			b.WriteString(ui.HelpStyle.Render("    "+l) + "\n")
+			confirm = append(confirm, ui.HelpStyle.Render("    "+l))
 		}
 	case p.routingMode != "":
-		b.WriteString(ui.HelpStyle.Render(" 当前: "+presetLabel(p.routingMode)+"   Enter 切换") + "\n")
+		body = append(body, ui.HelpStyle.Render(" 当前: "+presetLabel(p.routingMode)+"   Enter 切换"))
 	default:
-		b.WriteString(ui.HelpStyle.Render(" 当前: 自定义规则   Enter 切换为预设") + "\n")
+		body = append(body, ui.HelpStyle.Render(" 当前: 自定义规则   Enter 切换为预设"))
 	}
-	return b.String()
+	return body, presetStart, confirm
+}
+
+func (p homePage) View(status driver.Status) string {
+	lines, active := p.bodyLines(status)
+	h := p.height
+	if h < 1 {
+		h = 1
+	}
+	if p.follow && active >= 0 {
+		if active < p.scroll {
+			p.scroll = active
+		}
+		if active >= p.scroll+h {
+			p.scroll = active - h + 1
+		}
+	}
+	if p.scroll > len(lines)-h {
+		p.scroll = len(lines) - h
+	}
+	if p.scroll < 0 {
+		p.scroll = 0
+	}
+	end := p.scroll + h
+	if end > len(lines) {
+		end = len(lines)
+	}
+	return strings.Join(lines[p.scroll:end], "\n")
 }

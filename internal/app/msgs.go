@@ -13,6 +13,11 @@ import (
 
 type tickMsg struct{ n int }
 
+// spinnerMsg drives the latency-test spinner: a 120ms self-rescheduling
+// chain that only runs while a test is in flight (the 1s tick restarts it
+// when the next test starts), so an idle UI renders nothing extra.
+type spinnerMsg struct{}
+
 // bootMsg is the result of the initial connectivity/authentication probe.
 type bootMsg struct {
 	Users   int
@@ -622,6 +627,11 @@ func runToggleCmd(d driver.Driver, running bool) tea.Cmd {
 		st, serr := d.Connect(ctx)
 		return statusMsg{Status: st, Err: serr}
 	})
+}
+
+// spinnerTickCmd schedules the next spinner frame.
+func spinnerTickCmd() tea.Cmd {
+	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg { return spinnerMsg{} })
 }
 
 func tickCmd(n int) tea.Cmd {

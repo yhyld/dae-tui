@@ -120,6 +120,31 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
 
 ## TUI 约定
 
+- **整个应用包在一个圆角外框里，恰好填满终端**：`Model.View()` 把 status/tabs/body/
+  toast/help 拼好后套 `RoundedBorder`（宽 `width-2` 高 `height-2`），帮助条永远钉在
+  最后一行。`layout()` 的 chrome 数学 = 外框 2 行 + status/tabs/toast/help 4 行，
+  页面内容高度是 `height-6`、宽度 `width-2`——改 chrome 行数要同步改这两处与
+  `View` 里的钳制。终端小于 60×12（`minTermW/minTermH`）时渲染 `smallView` 降级页，
+  别让两栏数学溢出换行。
+- **chrome 行（status/tabs/toast/help）与 body 每行都必须过 `ui.Truncate` 到内容宽**：
+  高度数学假设它们各占一行，lipgloss 的 `Width()` 会把超宽行折行，折一行就挤掉一个
+  chrome 行。`ui.Pane` 也按宽度截断每行、按高度补齐空行（左栏 `bar=false`——外框就是
+  它的边缘；右栏 `bar=true`——那根竖线兼作两栏分隔线，聚焦时变 `▌`）。
+- **一次性动作反馈走 `opDoneMsg` toast**（根模型 4 秒自动消失），不要写进 `pickErr` 这类
+  常驻面板字段——它会留到重启才消失，看起来像坏了的状态。`pickErr` 只留给"选择器打开
+  期间拉取失败"这种与当前模态绑定的错误，并在 groups/subs 刷新时清空。
+- **模态一律渲染在右栏内部**（`rightLines` 里按 mode 分发），不能 `body += "\n" + box`
+  追加在双栏下方——面板现在补齐到满高，下方追加的内容第一个被硬钳制裁掉。确认框与
+  输入表单统一用 `ui.BoxLines(destructive, lines...)`（红框=破坏性），列表型选择器
+  保持裸行。
+- 首页与帮助页有滚动：首页 `bodyLines()` 返回行列表+活动行，`View` 让窗口跟随活动行
+  （`follow` 在任何按键后重新启用；滚轮 `scrollBy` 暂时关闭跟随）；帮助页是
+  `helpScroll`（j/k/G）。
+- **鼠标已启用**（`tea.WithMouseCellMotion`）：滚轮 = 3×j/k（帮助页/首页直接滚偏移），
+  点页签切页（`tabClick` 按渲染宽度算 span），点左栏行选中（各页 `leftClick` 复算
+  `leftLines` 的窗口偏移）。`anyModal()` 时鼠标全部忽略——弹窗期间误点比不点更糟。
+  鼠标 handler 是**值接收者**（与 `handleKey` 一致），别改成指针接收者，否则
+  `tea.Model` 的动态类型在键盘/鼠标两条路径上不一致。
 - 每个内容页都是**左列表 + 右详情**双栏：左栏 `j/k` 移动（默认折叠），`Tab/l/Enter`
   展开到右栏（右栏有自己的高度与滚动），`h/esc` 收起。右栏内容用 `ui.Pane` 渲染。
 - **节点列表的过滤/排序统一走 `internal/app/nodelist.go` 的 `nodeView`**（`/` 开过滤框，
@@ -145,8 +170,9 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
 - 全局 `r` 是**全量刷新**：所有列表 + status + traffic + 当前页延迟轮询一次性重拉，
   不是只刷当前页——各页共享组/订阅/方案数据（首页显示组、群组页显示订阅标签、首页
   路由区来自 selections），只刷当前页会让切过去后的视图是旧的。
-- **`Model.View()` 末尾的硬钳制不能删**：body 行数超过 `height-4` 就截断，否则页签/帮助
-  条会被挤出屏幕（这是最早修的滚动 bug）。
+- **`Model.View()` 末尾的硬钳制不能删**：body 行数超过 `height-6`（外框 2 行 + chrome
+  4 行）就截断、不足就补齐空行，否则页签/帮助条会被挤出屏幕（这是最早修的滚动 bug；
+  钳制现在同时负责"撑满终端+页脚贴底"）。
 - 弹窗/输入框打开时（`anyModal()`）所有按键——包括 `1`-`5` 翻页热键——必须进弹窗，
   因为名称、cron 表达式、分享链接里全是数字。
 - 宽度计算一律走 `ui.PadRight`/`ui.PadLeft`/`ui.Truncate`（内部走
@@ -157,7 +183,10 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
 - 节点名（`Node.Name`）在**任何**展示点都要过 `ui.SpaceAfterFlag`：订阅节点名常是
   `🇩🇪Germany 01` 这种旗贴字格式，国旗占两列且字形顶到国家名上，看起来像重叠。
   列表、详情、标题、toast、确认框一处都不能漏。
-- 延迟色阶：未测/死亡 = 灰，<200ms 绿，<500ms 黄，其余红；自动策略下的"当前节点"是
+- 延迟色阶：未测/死亡 = 灰，<200ms 绿，<500ms 黄，其余红；节点行的延迟列统一走
+  `latencyCell`（`nodelist.go`）：≥56 列的面板在毫秒值前多一条 5 格微型条
+  （`ui.LatencyBar`，500ms 打满，与数值同色）——窄面板（如 36 列的左栏）自动去掉条只留
+  数值，别在窄栏里硬塞。自动策略下的"当前节点"是
   估算值，显示时加 `≈` 前缀（没有测量数据时首页标注「未测速」；首页不显示毫秒数，
   逐节点延迟去群组页看）。
 - 破坏性操作（删组/删节点/删配置/停止代理/应用配置）都要 `y` 确认。
@@ -169,7 +198,10 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   该操作"），订阅/配置页还有横幅；`!TrafficStats` 时首页不渲染流量图、轮询也跳过。
   新 driver 必须如实返回 Caps——`stubDriver` 返回全 true，写"残废后端"测试要内嵌它再覆盖。
 - **测速进度**：`testWindow(n) = 15s + 200ms×n`（上限 2 分钟，与 `testLatencyCmd` 的
-  ctx 超时一致），三个页面各自 `testProgress()`，根模型 `tabsBar` 显示"⏳ 测速中 x/y"。
+  ctx 超时一致），三个页面各自 `testProgress()`，根模型 `tabsBar` 显示盲文 spinner +
+  "测速中 x/y"——进度是**跨页汇总**的（测速中切页指示不消失）。spinner 由 120ms 的
+  `spinnerMsg` 自续链驱动（`spinning` 防止叠链；1s tick 在测速开始时拉起链，无测速时链
+  自灭，空闲 UI 不空转）。
   完成判定仍是"所有 testIDs 的 `TestedAt` 都新于 baseline"。测速期间的 `testIDs` 轮询
   （每秒）与下面的按页轮询并存，互不影响。
 - **延迟按页轮询，无启动全量测速**：每 3 秒只轮询当前页可见节点的 `nodeLatencies`
@@ -190,6 +222,9 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   `x` 批量移除已标记的**直接挂载**节点（订阅贡献的只能随订阅移除，会给 toast 说明）、
   选择器内 `Enter` 批量添加。`markedIDs()/markedDirectNodes()` 必须去重——同一节点可以
   同时出现在订阅区和直接区两行。换组/收起（`collapseSections`）清空标记。
+- **首页两栏**：内容宽 ≥96 列（`homeTwoColMin`）时流量块与路由预设并排
+  （`homeRoutingW=44`），窄于此保持上下堆叠；`bodyLines` 里手工逐行拼（左栏 PadRight 到
+  leftW 再接右栏），预设行的 active 索引要算上列偏移，改动时注意 `presetStart` 的换算。
 - **首页组行跳转**：`Tab` 在路由选择器与组列表间切焦点（`home.groupFocus`），组行
   `Enter` 发 `gotoGroupMsg{ID}`，根模型开群组页并展开该组（`expanded/focus=1`）。
   焦点在组列表时只吞导航键，`o/P/L/g` 等仍走原路径。
@@ -208,6 +243,10 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
 - **字段输入预校验**（`fields.go: validateFieldValue`）：按 `ConfigField.Type`
   （int/bool/duration/array）在客户端挡掉明显非法的值，错误显示在输入框模态内，
   不提交。语义仍然归后端。
+- **`tea.ExecProcess` 出来必须补 `reenableMouse()`**（`app.go`）：bubbletea v1.3 的
+  ReleaseTerminal 会关掉鼠标上报，RestoreTerminal 只恢复 altscreen/括号粘贴/焦点上报、
+  **不恢复鼠标**——不加这条，$EDITOR 或日志视图退出后点击/滚轮全部静默失效。目前挂在
+  `editorDoneMsg` 和 `logsDoneMsg` 两个分支，新增 ExecProcess 调用点要同样处理。
 - **日志视图**：首页 `L` 用 `tea.ExecProcess` 跑 `journalctl -u daed -n 200 --no-pager -f`。
   本地 exec，远程隧道场景天然不可用（LookPath 失败时 toast 说明）。测试里**不要**执行
   这个 cmd——它会一直 follow 不退出。
@@ -227,6 +266,8 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   要检查一批 cmd 里到底发了哪些请求：`cmd().(tea.BatchMsg)` 后逐个执行、按消息类型
   断言（见 `TestNoStartupLatencyTest` / `TestForceRefreshReloadsEverything`）。
   执行 `tea.ExecProcess` 的 cmd（首页 `L`）**不能**在测试里跑——journalctl -f 不会退出。
+  一个 cmd 可能是 `tea.Batch`（如 editorDoneMsg 顺带 reenableMouse）：用 `execCmds` 展开、
+  `firstMsgOf[T]` 取目标消息，别对 `cmd()` 直接做单类型断言。
 
 ## 安全与兼容
 

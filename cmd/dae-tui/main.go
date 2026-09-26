@@ -89,7 +89,7 @@ func main() {
 		fatal("未知 -cmd %q（可用: status, test）", *cmdFlag)
 	}
 
-	p := tea.NewProgram(app.New(drv, cfg, cfgPath), tea.WithAltScreen())
+	p := tea.NewProgram(app.New(drv, cfg, cfgPath), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fatal("启动 TUI 失败: %v", err)
 	}

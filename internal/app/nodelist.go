@@ -3,13 +3,53 @@ package app
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"dae-tui/internal/driver"
+	"dae-tui/internal/ui"
 )
+
+const (
+	latCellWide = 15 // 5-cell micro-bar + gap + right-aligned value
+	latCellSlim = 9  // value only, for panes too narrow to spare the bar
+)
+
+// latCellW picks the latency column width for a pane w cells wide: narrow
+// master panes (the capped 36-cell left column) need the name more than the
+// bar.
+func latCellW(w int) int {
+	if w >= 56 {
+		return latCellWide
+	}
+	return latCellSlim
+}
+
+// latencyCell renders a node row's latency column: the right-aligned value,
+// preceded by a 5-cell micro-bar when cellW is the wide variant, all in the
+// latency color so a page of nodes can be scanned by shape alone. Shared by
+// the group detail, subscription node list and manual node list.
+func latencyCell(lat map[string]driver.Latency, id string, cellW int) string {
+	latStr, bar, st := "-", ui.LatencyBar(0), ui.LatencyStyle(0, false, false)
+	if l, ok := lat[id]; ok && !l.TestedAt.IsZero() {
+		if l.Alive && l.Ms > 0 {
+			latStr = strconv.Itoa(l.Ms) + "ms"
+			bar = ui.LatencyBar(l.Ms)
+		} else if !l.Alive {
+			latStr = "超时"
+		} else {
+			latStr = "…"
+		}
+		st = ui.LatencyStyle(l.Ms, l.Alive, true)
+	}
+	if cellW >= latCellWide {
+		return st.Render(bar) + " " + st.Render(ui.PadLeft(latStr, 9))
+	}
+	return st.Render(ui.PadLeft(latStr, 9))
+}
 
 // Node lists are the one place where the volume of data hurts: a single
 // airport subscription routinely carries hundreds of nodes, and scrolling

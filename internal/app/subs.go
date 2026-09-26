@@ -533,43 +533,51 @@ func (p *subsPage) editFormKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 }
 
 func (p subsPage) View() string {
+	// Modals render inside the right pane: the panes always fill the app
+	// frame, so anything appended below them would be pushed off screen.
 	rvTitle := " 详情 "
-	if s := p.cur(); s != nil && p.expanded {
+	if p.mode != 0 {
+		rvTitle = p.modalTitle()
+	} else if s := p.cur(); s != nil && p.expanded {
 		rvTitle = " 节点" + p.nodeView.countTitle(len(p.visibleNodes()), len(p.subNodes[s.ID])) +
 			p.nodeView.sortTitle() + " "
 	}
-	lv := ui.Pane(" 订阅 ("+strconv.Itoa(len(p.subs))+") ", p.focus == 0, p.leftW, p.height, p.leftLines())
-	rv := ui.Pane(rvTitle, p.focus == 1, p.rightW, p.height, p.rightLines())
-	body := lipgloss.JoinHorizontal(lipgloss.Top, lv, " ", rv)
+	lv := ui.Pane(false, " 订阅 ("+strconv.Itoa(len(p.subs))+") ", p.focus == 0, p.leftW, p.height, p.leftLines())
+	rv := ui.Pane(true, rvTitle, p.focus == 1, p.rightW, p.height, p.rightLines())
+	return lipgloss.JoinHorizontal(lipgloss.Top, lv, " ", rv)
+}
 
-	if p.mode == 1 {
-		var f strings.Builder
-		f.WriteString(ui.TitleStyle.Render(" 新增订阅") + "\n\n")
-		f.WriteString(" 链接  " + p.link.View() + "\n")
-		f.WriteString(" 标签  " + p.tag.View() + "\n\n")
-		f.WriteString(ui.HelpStyle.Render(" Tab 切换字段  Enter 提交  esc 取消"))
-		form := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).
-			BorderForeground(ui.Accent).Padding(1, 2).Render(f.String())
-		body += "\n" + form
+func (p subsPage) modalTitle() string {
+	switch p.mode {
+	case 1:
+		return " 新增订阅 "
+	case 2:
+		return " 删除确认 "
+	case 3:
+		return " 定时刷新 "
+	case 4:
+		return " 编辑订阅 "
 	}
-	if p.mode == 4 {
+	return " 详情 "
+}
+
+// modalLines renders the active modal (add / delete / cron / edit) inside
+// the right pane.
+func (p subsPage) modalLines() []string {
+	switch p.mode {
+	case 1:
+		return ui.BoxLines(false,
+			ui.TitleStyle.Render(" 新增订阅"),
+			"",
+			" 链接  "+p.link.View(),
+			" 标签  "+p.tag.View(),
+			"",
+			ui.HelpStyle.Render(" Tab 切换字段  Enter 提交  esc 取消"))
+	case 2:
 		if s := p.cur(); s != nil {
-			var f strings.Builder
-			f.WriteString(ui.TitleStyle.Render(" 编辑订阅 · "+s.Tag) + "\n\n")
-			f.WriteString(" 标签  " + p.tag.View() + "\n")
-			f.WriteString(" 链接  " + p.link.View() + "\n\n")
-			f.WriteString(ui.HelpStyle.Render(" 改链接不会重新拉取节点（u 才会）") + "\n")
-			f.WriteString(ui.HelpStyle.Render(" Tab 切换字段  Enter 提交  esc 取消"))
-			body += "\n" + lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).
-				BorderForeground(ui.Accent).Padding(1, 2).Render(f.String())
+			return ui.BoxLines(true, "确认删除订阅 \""+s.Tag+"\"? (y/n)")
 		}
-	}
-	if p.mode == 2 {
-		if s := p.cur(); s != nil {
-			body += "\n" + ui.ErrorStyle.Render(" 确认删除订阅 \""+s.Tag+"\"? (y/n)")
-		}
-	}
-	if p.mode == 3 {
+	case 3:
 		if s := p.cur(); s != nil {
 			on := ui.ErrorStyle.Render("停用")
 			if p.cronOn {
@@ -579,16 +587,27 @@ func (p subsPage) View() string {
 			if p.ifld == 1 {
 				cursor = ui.CursorStyle.Render("❯ ")
 			}
-			var f strings.Builder
-			f.WriteString(ui.TitleStyle.Render(" 定时刷新 "+s.Tag) + "\n\n")
-			f.WriteString(" 表达式  " + p.cronInput.View() + "\n")
-			f.WriteString(" 启用    " + cursor + on + ui.HelpStyle.Render("  (space 切换)") + "\n\n")
-			f.WriteString(ui.HelpStyle.Render(" Tab 切换  space 开关  Enter 提交  esc 取消"))
-			body += "\n" + lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).
-				BorderForeground(ui.Accent).Padding(1, 2).Render(f.String())
+			return ui.BoxLines(false,
+				ui.TitleStyle.Render(" 定时刷新 "+s.Tag),
+				"",
+				" 表达式  "+p.cronInput.View(),
+				" 启用    "+cursor+on+ui.HelpStyle.Render("  (space 切换)"),
+				"",
+				ui.HelpStyle.Render(" Tab 切换  space 开关  Enter 提交  esc 取消"))
+		}
+	case 4:
+		if s := p.cur(); s != nil {
+			return ui.BoxLines(false,
+				ui.TitleStyle.Render(" 编辑订阅 · "+s.Tag),
+				"",
+				" 标签  "+p.tag.View(),
+				" 链接  "+p.link.View(),
+				"",
+				ui.HelpStyle.Render(" 改链接不会重新拉取节点（u 才会）"),
+				ui.HelpStyle.Render(" Tab 切换字段  Enter 提交  esc 取消"))
 		}
 	}
-	return body
+	return []string{ui.HelpStyle.Render("（无订阅）")}
 }
 
 func (p subsPage) leftLines() []string {
@@ -634,7 +653,42 @@ func (p subsPage) leftLines() []string {
 	return lines
 }
 
+// leftClick selects the row-th displayed subscription, mirroring
+// leftLines' prefix and window math so the click lands on the row the user
+// saw.
+func (p *subsPage) leftClick(row int) {
+	prefix := 0
+	if !p.caps.Subscriptions {
+		prefix++
+	}
+	if p.err != nil {
+		prefix++
+	}
+	if len(p.subs) == 0 {
+		prefix++
+	}
+	row -= prefix
+	if row < 0 {
+		return
+	}
+	rowsH := max0(p.height - 2)
+	start := 0
+	if p.sel >= rowsH {
+		start = p.sel - rowsH + 1
+	}
+	i := start + row
+	if i < 0 || i >= len(p.subs) || i == p.sel {
+		return
+	}
+	p.sel = i
+	p.nc = 0
+	p.expanded = false
+}
+
 func (p subsPage) rightLines() []string {
+	if p.mode != 0 {
+		return p.modalLines()
+	}
 	s := p.cur()
 	if s == nil {
 		return []string{ui.HelpStyle.Render("（无订阅）")}
@@ -688,19 +742,10 @@ func (p subsPage) rightLines() []string {
 		if i == p.nc && p.focus == 1 {
 			cursor = ui.CursorStyle.Render("❯")
 		}
-		latStr, latStyle := "-", ui.LatencyStyle(0, false, false)
-		if l, ok := p.lat[n.ID]; ok && !l.TestedAt.IsZero() {
-			if l.Alive && l.Ms > 0 {
-				latStr = strconv.Itoa(l.Ms) + "ms"
-			} else if !l.Alive {
-				latStr = "dead"
-			}
-			latStyle = ui.LatencyStyle(l.Ms, l.Alive, true)
-		}
-		nameW := max0(p.rightW - 24)
+		nameW := max0(p.rightW - 15 - latCellW(p.rightW))
 		head = append(head, cursor+" "+ui.PadRight(ui.SpaceAfterFlag(n.Name), nameW)+
 			ui.HelpStyle.Render(ui.PadRight(n.Protocol, 8))+
-			latStyle.Render(ui.PadLeft(latStr, 9)))
+			latencyCell(p.lat, n.ID, latCellW(p.rightW)))
 	}
 	return head
 }

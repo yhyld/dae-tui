@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -54,6 +55,40 @@ func TimeAgo(t time.Time) string {
 // Truncate shortens s to display width w with an ellipsis (CJK-aware).
 func Truncate(s string, w int) string {
 	return truncate(s, w)
+}
+
+// LatencyBar renders a fixed 5-cell micro-bar for a latency in ms — 500ms
+// and above fills it, with eighth-block partials in between. The caller
+// styles the result (usually the same color as the numeric value); callers
+// pass ms > 0 only for alive, tested nodes, everything else renders blank
+// so the column stays aligned.
+func LatencyBar(ms int) string {
+	const w = 5
+	if ms <= 0 {
+		return spaces(w)
+	}
+	v := float64(ms) / 500 * w
+	if v > w {
+		v = w
+	}
+	n := int(v)
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		b.WriteString("█")
+	}
+	if n < w {
+		// eighths of a cell, blank to near-full
+		parts := []rune(" ▏▎▍▌▋▊▉")
+		idx := int((v - float64(n)) * 8)
+		if idx > 7 {
+			idx = 7
+		}
+		b.WriteRune(parts[idx])
+		for i := 0; i < w-n-1; i++ {
+			b.WriteString(" ")
+		}
+	}
+	return b.String()
 }
 
 // TruncateHead shortens s from the front with an ellipsis, keeping the tail

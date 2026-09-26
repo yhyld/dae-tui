@@ -734,11 +734,19 @@ var sectionTitles = map[string]string{
 }
 
 func (p configsPage) View(modified bool) string {
-	lv := ui.Pane(" 配置方案 ", p.focus == 0, p.leftW, p.height, p.leftLines())
-	rv := ui.Pane(" 内容 ", p.focus == 1, p.rightW, p.height, p.rightLines())
-	body := lipgloss.JoinHorizontal(lipgloss.Top, lv, " ", rv)
+	// The "modified" banner takes one row of the pane budget — appended
+	// below the panes it would be the first line the frame's clamp cuts.
+	h := p.height
+	var banner string
 	if modified {
-		body += "\n" + ui.ErrorStyle.Render(" ⚠ 运行配置与选中项不一致（A 应用 / 首页 o 重启）")
+		h--
+		banner = ui.ErrorStyle.Render(" ⚠ 运行配置与选中项不一致（A 应用 / 首页 o 重启）")
+	}
+	lv := ui.Pane(false, " 配置方案 ", p.focus == 0, p.leftW, h, p.leftLines())
+	rv := ui.Pane(true, " 内容 ", p.focus == 1, p.rightW, h, p.rightLines())
+	body := lipgloss.JoinHorizontal(lipgloss.Top, lv, " ", rv)
+	if banner != "" {
+		body = banner + "\n" + body
 	}
 	return body
 }
@@ -812,8 +820,8 @@ func (p configsPage) modalLines() []string {
 		if p.fieldErr != "" {
 			lines = append(lines, ui.ErrorStyle.Render(" ✗ "+p.fieldErr))
 		}
-		return append(lines, "",
-			ui.HelpStyle.Render(" 类型 "+f.Type+"（数组用逗号分隔）  Enter 提交  esc 返回"))
+		return ui.BoxLines(false, append(lines, "",
+			ui.HelpStyle.Render(" 类型 "+f.Type+"（数组用逗号分隔）  Enter 提交  esc 返回"))...)
 	case 3, 4: // create / rename
 		r := p.curRow()
 		title := "重命名"
@@ -835,28 +843,32 @@ func (p configsPage) modalLines() []string {
 			}
 			hint = " 将复制" + what + "，之后可 e 编辑  Enter 确认  esc 取消"
 		}
-		return []string{
-			ui.TitleStyle.Render(" " + title),
+		return ui.BoxLines(false,
+			ui.TitleStyle.Render(" "+title),
 			"",
-			" 名称  " + p.input.View(),
+			" 名称  "+p.input.View(),
 			"",
-			ui.HelpStyle.Render(hint),
-		}
+			ui.HelpStyle.Render(hint))
 	case 5: // delete confirm
 		if r := p.curRow(); r != nil {
 			it := p.item(*r)
-			return []string{ui.ErrorStyle.Render(" 确认删除" + sectionName(r.section) + " \"" + it.Name + "\"?  (y/n)")}
+			return ui.BoxLines(true, "确认删除"+sectionName(r.section)+" \""+it.Name+"\"?  (y/n)")
 		}
 	case 6: // DSL diff confirm
 		if p.diff == nil {
 			return []string{ui.HelpStyle.Render("（无待确认的更改）")}
 		}
 		st := p.diff
-		lines := []string{
-			ui.TitleStyle.Render(" 确认应用更改 · " + sectionName(st.Section) + " " + st.Name),
-			ui.HelpStyle.Render("  y 应用   n/esc 取消（编辑内容保留在 " + ui.TruncateHead(st.Path, max0(p.rightW-24)) + "）   j/k 滚动"),
-			"",
-		}
+		// The decision line lives in a red box of its own: when everything
+		// around it is +/- diff noise, a dim hint row is too easy to miss.
+		head := ui.BoxLines(true,
+			ui.TitleStyle.Render(" 确认应用更改 · "+sectionName(st.Section)+" "+st.Name),
+			ui.OKStyle.Render(" y 应用")+"    "+
+				ui.ErrorStyle.Render("n / esc 取消")+"    "+
+				ui.HelpStyle.Render("j/k 滚动 diff"),
+			ui.HelpStyle.Render(" 取消后编辑内容保留在 "+ui.TruncateHead(st.Path, max0(p.rightW-6))),
+			"")
+		lines := append([]string{}, head...)
 		for _, dl := range diffLines(st.Old, st.Text) {
 			var line string
 			switch dl.kind {
@@ -887,6 +899,16 @@ func (p configsPage) modalLines() []string {
 		return lines[p.scroll:end]
 	}
 	return nil
+}
+
+// leftClick parks the left-pane cursor on the row-th row (section headers
+// included — they are valid cursor positions, the same as moving with j/k).
+func (p *configsPage) leftClick(row int) {
+	if row < 0 || row >= len(p.rows) || row == p.cur {
+		return
+	}
+	p.cur = row
+	p.scroll = 0
 }
 
 func (p configsPage) leftLines() []string {

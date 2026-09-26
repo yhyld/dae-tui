@@ -481,40 +481,74 @@ func splitLines(s string) []string {
 }
 
 func (p nodesPage) View() string {
-	lv := ui.Pane(" 手动节点"+p.nodeView.countTitle(len(p.visibleNodes()), len(p.nodes))+
+	// Modals render inside the right pane: the panes always fill the app
+	// frame, so anything appended below them would be pushed off screen.
+	lv := ui.Pane(false, " 手动节点"+p.nodeView.countTitle(len(p.visibleNodes()), len(p.nodes))+
 		p.nodeView.sortTitle()+" ", p.focus == 0, p.leftW, p.height, p.leftLines())
-	rv := ui.Pane(" 详情 ", p.focus == 1, p.rightW, p.height, p.rightLines())
-	body := lipgloss.JoinHorizontal(lipgloss.Top, lv, " ", rv)
+	rv := ui.Pane(true, p.modalTitle(), p.focus == 1, p.rightW, p.height, p.rightLines())
+	return lipgloss.JoinHorizontal(lipgloss.Top, lv, " ", rv)
+}
 
-	if p.mode == 1 {
-		var f strings.Builder
-		f.WriteString(ui.TitleStyle.Render(" 导入手动节点 (分享链接)") + "\n\n")
-		f.WriteString(p.links.View() + "\n\n")
-		f.WriteString(" 标签  " + p.tag.View() + "\n\n")
-		f.WriteString(ui.HelpStyle.Render(" Tab 切换字段  标签框内 Enter 或 ctrl+s 提交  esc 取消") + "\n")
-		f.WriteString(ui.HelpStyle.Render(" 批量粘贴：每行一条，坏链接会逐条报错，不影响其他链接"))
-		body += "\n" + lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).
-			BorderForeground(ui.Accent).Padding(1, 2).Render(f.String())
+func (p nodesPage) modalTitle() string {
+	switch p.mode {
+	case 1:
+		return " 批量导入 "
+	case 2:
+		return " 删除确认 "
+	case 3:
+		return " 加入群组 "
+	case 4:
+		return " 编辑节点 "
 	}
-	if p.mode == 4 {
-		var f strings.Builder
+	return " 详情 "
+}
+
+// modalLines renders the active modal (import / delete / group picker /
+// edit) inside the right pane.
+func (p nodesPage) modalLines() []string {
+	switch p.mode {
+	case 1:
+		lines := []string{
+			ui.TitleStyle.Render(" 导入手动节点 (分享链接)"),
+			"",
+		}
+		lines = append(lines, strings.Split(p.links.View(), "\n")...)
+		lines = append(lines,
+			"",
+			" 标签  "+p.tag.View(),
+			"",
+			ui.HelpStyle.Render(" Tab 切换字段  标签框内 Enter 或 ctrl+s 提交  esc 取消"),
+			ui.HelpStyle.Render(" 批量粘贴：每行一条，坏链接会逐条报错，不影响其他链接"))
+		return ui.BoxLines(false, lines...)
+	case 2:
+		if n := p.cur(); n != nil {
+			return ui.BoxLines(true, "确认删除节点 \""+ui.SpaceAfterFlag(n.Name)+"\"? (y/n)")
+		}
+	case 3:
+		lines := []string{ui.TitleStyle.Render(" 选择要加入的群组")}
+		for i, g := range p.groups {
+			mark, style := "  ", ui.HelpStyle
+			if i == p.pickCursor {
+				mark, style = "❯ ", ui.CursorStyle
+			}
+			lines = append(lines, style.Render(mark+ui.PadRight(g.Name, 24))+
+				ui.HelpStyle.Render(strconv.Itoa(len(g.Nodes))+"节点"))
+		}
+		return append(lines, ui.HelpStyle.Render(" Enter 确认  esc 取消"))
+	case 4:
 		title := " 编辑手动节点"
 		if n := p.cur(); n != nil {
 			title += " · " + ui.SpaceAfterFlag(n.Name)
 		}
-		f.WriteString(ui.TitleStyle.Render(title) + "\n\n")
-		f.WriteString(" 标签  " + p.tag.View() + "\n")
-		f.WriteString(" 链接  " + p.link.View() + "\n\n")
-		f.WriteString(ui.HelpStyle.Render(" Tab 切换字段  Enter 提交  esc 取消"))
-		body += "\n" + lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).
-			BorderForeground(ui.Accent).Padding(1, 2).Render(f.String())
+		return ui.BoxLines(false,
+			ui.TitleStyle.Render(title),
+			"",
+			" 标签  "+p.tag.View(),
+			" 链接  "+p.link.View(),
+			"",
+			ui.HelpStyle.Render(" Tab 切换字段  Enter 提交  esc 取消"))
 	}
-	if p.mode == 2 {
-		if n := p.cur(); n != nil {
-			body += "\n" + ui.ErrorStyle.Render(" 确认删除节点 \""+ui.SpaceAfterFlag(n.Name)+"\"? (y/n)")
-		}
-	}
-	return body
+	return nil
 }
 
 func (p nodesPage) leftLines() []string {
@@ -543,18 +577,9 @@ func (p nodesPage) leftLines() []string {
 		if i == p.sel {
 			cursor = ui.CursorStyle.Render("❯")
 		}
-		latStr, latStyle := "-", ui.LatencyStyle(0, false, false)
-		if l, ok := p.lat[n.ID]; ok && !l.TestedAt.IsZero() {
-			if l.Alive && l.Ms > 0 {
-				latStr = strconv.Itoa(l.Ms) + "ms"
-			} else if !l.Alive {
-				latStr = "dead"
-			}
-			latStyle = ui.LatencyStyle(l.Ms, l.Alive, true)
-		}
-		lines = append(lines, cursor+" "+ui.PadRight(ui.SpaceAfterFlag(n.Name), max0(p.leftW-24))+
+		lines = append(lines, cursor+" "+ui.PadRight(ui.SpaceAfterFlag(n.Name), max0(p.leftW-15-latCellW(p.leftW)))+
 			ui.HelpStyle.Render(ui.PadRight(n.Protocol, 8))+
-			latStyle.Render(ui.PadLeft(latStr, 9)))
+			latencyCell(p.lat, n.ID, latCellW(p.leftW)))
 	}
 	if p.busy {
 		lines = append(lines, ui.HelpStyle.Render("⏳ 操作进行中…"))
@@ -562,18 +587,44 @@ func (p nodesPage) leftLines() []string {
 	return lines
 }
 
+// leftClick selects the row-th displayed node, mirroring leftLines' prefix
+// and window math so the click lands on the row the user saw.
+func (p *nodesPage) leftClick(row int) {
+	prefix := 0
+	if p.err != nil {
+		prefix++
+	}
+	if len(p.nodes) == 0 {
+		prefix++
+	}
+	if p.nodeView.filter() != "" {
+		prefix++
+	}
+	nodes := p.visibleNodes()
+	if len(p.nodes) > 0 && len(nodes) == 0 {
+		prefix++
+	}
+	row -= prefix
+	if row < 0 {
+		return
+	}
+	rowsH := max0(p.height - 2 - prefix)
+	start := 0
+	if p.sel >= rowsH {
+		start = p.sel - rowsH + 1
+	}
+	i := start + row
+	if i < 0 || i >= len(nodes) || i == p.sel {
+		return
+	}
+	p.sel = i
+	p.expanded = false
+	p.focus = 0
+}
+
 func (p nodesPage) rightLines() []string {
-	if p.mode == 3 {
-		lines := []string{ui.TitleStyle.Render(" 选择要加入的群组")}
-		for i, g := range p.groups {
-			mark, style := "  ", ui.HelpStyle
-			if i == p.pickCursor {
-				mark, style = "❯ ", ui.CursorStyle
-			}
-			lines = append(lines, style.Render(mark+ui.PadRight(g.Name, 24))+
-				ui.HelpStyle.Render(strconv.Itoa(len(g.Nodes))+"节点"))
-		}
-		return append(lines, ui.HelpStyle.Render(" Enter 确认  esc 取消"))
+	if p.mode != 0 {
+		return p.modalLines()
 	}
 	n := p.cur()
 	if n == nil {
@@ -601,11 +652,13 @@ func (p nodesPage) rightLines() []string {
 		lines = append(lines, ui.SelectedStyle.Render("链接  ")+ui.Truncate(n.Link, max0(p.rightW-8)))
 	}
 	if l, ok := p.lat[n.ID]; ok && !l.TestedAt.IsZero() {
-		v := "dead"
+		v := "超时"
+		bar := ""
 		if l.Alive && l.Ms > 0 {
 			v = strconv.Itoa(l.Ms) + "ms"
+			bar = ui.LatencyStyle(l.Ms, l.Alive, true).Render(ui.LatencyBar(l.Ms))
 		}
-		lines = append(lines, ui.SelectedStyle.Render("延迟  ")+v)
+		lines = append(lines, ui.SelectedStyle.Render("延迟  ")+v+"  "+bar)
 	}
 	// Trend: the accumulated samples tell "slowing down" from "one bad
 	// probe", which a single number cannot.

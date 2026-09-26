@@ -64,30 +64,61 @@ func PadLeft(s string, w int) string {
 	return spaces(d) + s
 }
 
-// Pane renders a master/detail pane: a title line, a rule, and the
-// (already windowed) body lines, hard-clamped to height h. The left bar
-// marks which pane holds focus.
-func Pane(title string, focused bool, w, h int, lines []string) string {
-	bar := lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render("│")
+// Pane renders a master/detail pane: a title line, a rule under it, and the
+// (already windowed) body lines. Every line is truncated to w cells so the
+// pane keeps a stable width, and the block is clamped and padded to exactly
+// h lines so the two panes always fill the app frame. With bar=true a
+// divider column prefixes every line, accent-colored when the pane holds
+// focus — the right pane's bar doubles as the divider between the two panes;
+// the left pane passes false because the app frame draws that edge. Focus
+// also lights the title and the rule.
+func Pane(bar bool, title string, focused bool, w, h int, lines []string) string {
+	if w < 4 {
+		w = 4
+	}
+	prefix := "  "
+	if bar {
+		prefix = lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render("│ ")
+		if focused {
+			prefix = lipgloss.NewStyle().Foreground(Accent).Render("▌ ")
+		}
+	}
 	tstyle := lipgloss.NewStyle().Foreground(DimText)
+	rule := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
 	if focused {
-		bar = lipgloss.NewStyle().Foreground(Accent).Render("▌")
 		tstyle = TitleStyle
+		rule = lipgloss.NewStyle().Foreground(Accent)
 	}
 	avail := h - 2
 	if avail < 1 {
 		avail = 1
 	}
-	if len(lines) > avail {
-		lines = lines[:avail]
-	}
 	var b strings.Builder
-	b.WriteString(bar + " " + tstyle.Render(title) + "\n")
-	b.WriteString(bar + " " + lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render(strings.Repeat("─", max0(w-2))) + "\n")
-	for _, l := range lines {
-		b.WriteString(bar + " " + l + "\n")
+	b.WriteString(prefix + truncate(tstyle.Render(title), w) + "\n")
+	b.WriteString(prefix + rule.Render(strings.Repeat("─", w-2)) + "\n")
+	for i := 0; i < avail; i++ {
+		l := ""
+		if i < len(lines) {
+			l = truncate(lines[i], w-2)
+		}
+		b.WriteString(prefix + l + "\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// BoxLines wraps lines in a rounded border — the shared look for in-pane
+// confirmations and small forms. destructive=true draws the border red.
+func BoxLines(destructive bool, lines ...string) []string {
+	if len(lines) == 0 {
+		return nil
+	}
+	st := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
+	if destructive {
+		st = st.BorderForeground(Red)
+	} else {
+		st = st.BorderForeground(Accent)
+	}
+	return strings.Split(st.Render(strings.Join(lines, "\n")), "\n")
 }
 
 func max0(n int) int {

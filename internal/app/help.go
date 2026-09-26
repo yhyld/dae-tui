@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -8,26 +9,26 @@ import (
 	"dae-tui/internal/ui"
 )
 
-func helpView() string {
-	section := func(title string, rows [][2]string) string {
-		var b strings.Builder
-		b.WriteString(ui.SelectedStyle.Render(" "+title) + "\n")
+// helpLines builds the full help block once; the page itself is static and
+// only the scroll window moves.
+func helpLines() []string {
+	section := func(title string, rows [][2]string) []string {
+		lines := []string{ui.SelectedStyle.Render(" " + title)}
 		for _, r := range rows {
-			b.WriteString("  " + ui.PadRight(r[0], 14) + ui.HelpStyle.Render(r[1]) + "\n")
+			lines = append(lines, "  "+ui.PadRight(r[0], 14)+ui.HelpStyle.Render(r[1]))
 		}
-		return b.String() + "\n"
+		return append(lines, "")
 	}
 
-	var b strings.Builder
-	b.WriteString(ui.TitleStyle.Render(" dae-tui 帮助") + "\n\n")
-	b.WriteString(section("全局", [][2]string{
+	lines := []string{ui.TitleStyle.Render(" dae-tui 帮助"), ""}
+	lines = append(lines, section("全局", [][2]string{
 		{"1", "首页：开关/流量/各组当前节点"},
 		{"2/3/4/5", "群组 · 订阅 · 手动节点 · 配置（均为 左列表 + 右详情）"},
 		{"Tab/l/h", "在左右两栏之间切换焦点"},
 		{"A r q", "应用配置(run，全局) · 刷新(重拉全部列表数据) · 退出"},
 		{"-", "测速按需触发（t/T，只测当前列表/组/订阅）；延迟数据每 3 秒轮询当前页可见节点，流量每秒刷新"},
-	}))
-	b.WriteString(section("首页", [][2]string{
+	})...)
+	lines = append(lines, section("首页", [][2]string{
 		{"o", "启动/停止代理 (run；停止=dry，需 y 确认)"},
 		{"j/k + Enter", "路由快速切换：选预设替换当前路由方案（先展示将写入的 DSL，需 y 确认）"},
 		{"Tab", "在「路由快速切换」与「各组当前节点」之间切换焦点"},
@@ -39,8 +40,9 @@ func helpView() string {
 		{"-", "自动策略组显示 ≈ 已测最优节点；没有测量数据时标注「未测速」（估算值，不含毫秒——逐节点延迟去群组页看）"},
 		{"-", "预设只覆盖规则，切换后需 A 应用才生效；自定义规则显示为「自定义规则」"},
 		{"-", "网络块显示各网卡地址与默认路由；配置里写了的网卡不存在时会告警"},
-	}))
-	b.WriteString(section("群组页", [][2]string{
+		{"-", "宽终端下流量图与路由切换并排两栏，窄终端上下堆叠"},
+	})...)
+	lines = append(lines, section("群组页", [][2]string{
 		{"j/k ↑↓", "左栏移动组（默认折叠，不占屏）"},
 		{"Tab/l/Enter", "展开群组：右侧显示 订阅/直接添加节点 分区"},
 		{"j/k (右栏)", "移动节点，窗口自动滚动"},
@@ -52,15 +54,15 @@ func helpView() string {
 		{"s / n / x", "挂订阅 / 加节点(手动+订阅内节点) / 移除订阅或节点"},
 		{"●", "当前组实际使用的节点（fixed 组只读显示）"},
 		{"-", "组被路由方案引用时，R/D 确认框会点名——改名/删除会让那些规则静默失效"},
-	}))
-	b.WriteString(section("订阅页", [][2]string{
+	})...)
+	lines = append(lines, section("订阅页", [][2]string{
 		{"Tab/l/Enter", "右侧显示订阅详情与全部节点（自动拉取）"},
 		{"t (右栏)", "对该订阅全部节点测速"},
 		{"u / n / x / c", "更新 / 新增 / 删除（确认）/ 定时刷新 cron 编辑"},
 		{"e", "编辑订阅标签与链接（保留 ID：群组挂载关系不会丢；改链接不重新拉节点）"},
 		{"y", "复制订阅链接到剪贴板（OSC 52，SSH 下也可用）"},
-	}))
-	b.WriteString(section("手动节点页", [][2]string{
+	})...)
+	lines = append(lines, section("手动节点页", [][2]string{
 		{"a", "批量导入：每行一个分享链接，可整段粘贴；坏链接逐条报错，不影响其他链接"},
 		{"e", "编辑节点标签与链接（保留 ID：删了重导会丢掉群组挂载）"},
 		{"x", "删除选中节点（确认）"},
@@ -68,8 +70,8 @@ func helpView() string {
 		{"y", "复制节点分享链接到剪贴板（OSC 52）"},
 		{"-", "详情页「趋势」是该节点最近约 3 分钟的延迟曲线，能看出是否在持续变慢"},
 		{"Tab 后 G", "把选中节点加入某个群组"},
-	}))
-	b.WriteString(section("配置页", [][2]string{
+	})...)
+	lines = append(lines, section("配置页", [][2]string{
 		{"Tab/l", "进入右栏滚动查看内容（字段列表 / DSL 原文等）"},
 		{"Enter", "切换选中的 config/dns/routing"},
 		{"c / R / D", "新建 / 重命名 / 删除（确认）当前分区的条目"},
@@ -77,19 +79,55 @@ func helpView() string {
 		{"v", "DNS/路由右栏切换：DSL 原文 ↔ 解析后的结构概览（规则清单）"},
 		{"y", "复制当前方案 DSL 到剪贴板（OSC 52）"},
 		{"A (全局)", "应用 (run，需确认)；停止代理在首页 o"},
-	}))
-	b.WriteString(section("节点列表（群组/订阅/手动节点页通用）", [][2]string{
+	})...)
+	lines = append(lines, section("节点列表（群组/订阅/手动节点页通用）", [][2]string{
 		{"/", "打开过滤框：按 名称/协议/标签/地址 子串实时过滤（不区分大小写）"},
 		{"enter", "关闭过滤框并保留过滤结果（之后 j/k 在结果里移动）"},
 		{"esc", "过滤框内按 esc 关闭并清空过滤"},
 		{"o", "循环排序：默认顺序 → 延迟↑ → 延迟↓（未测/死亡节点始终排最后）"},
 		{"t", "测速只测当前可见的节点（过滤后剩下几个就测几个）"},
-	}))
-	b.WriteString(section("关于", [][2]string{
+		{"-", "延迟列 = 微型条 + 毫秒值（同色阶，500ms 打满）；未测显示 -，死亡显示 超时"},
+	})...)
+	lines = append(lines, section("鼠标", [][2]string{
+		{"滚轮", "滚动当前列表 / 页面（等价 j/k，每格 3 行）"},
+		{"点击页签", "切换页面；点击左栏行选中该项"},
+	})...)
+	lines = append(lines, section("关于", [][2]string{
 		{"后端", "daed GraphQL API (v2.1.1, 项目已归档、schema 冻结)"},
 		{"固定节点", "暂未提供：daed v2 的 fixed 组只允许一个成员，固定会静默重组整个组"},
 		{"配置文件", "~/.config/dae-tui/config.toml"},
 		{"架构", "可插拔 driver：后续可加裸 dae / clash-api 后端"},
-	}))
-	return lipgloss.NewStyle().Padding(0, 1).Render(strings.TrimRight(b.String(), "\n"))
+	})...)
+	return lines
+}
+
+// clampHelpScroll bounds the help page's scroll offset to its content.
+func clampHelpScroll(scroll, h int) int {
+	if scroll > len(helpLines())-h {
+		scroll = len(helpLines()) - h
+	}
+	if scroll < 0 {
+		scroll = 0
+	}
+	return scroll
+}
+
+// helpView windows the help block to h lines starting at scroll, with a
+// position footer when there is more content than fits. Lines are truncated
+// to w here — lipgloss pads a block to its widest line, so an over-wide row
+// would otherwise stamp an ellipsis onto every line after the root clamp.
+func helpView(w, h, scroll int) string {
+	lines := helpLines()
+	scroll = clampHelpScroll(scroll, h)
+	end := scroll + h - 1 // one row for the position footer
+	if end >= len(lines) {
+		end = len(lines)
+	}
+	out := make([]string, 0, end-scroll+1)
+	for _, l := range lines[scroll:end] {
+		out = append(out, ui.Truncate(l, max0(w-2)))
+	}
+	out = append(out, ui.HelpStyle.Render(
+		fmt.Sprintf("  %d-%d / %d  j/k 滚动", scroll+1, end, len(lines))))
+	return lipgloss.NewStyle().Padding(0, 1).Render(strings.Join(out, "\n"))
 }

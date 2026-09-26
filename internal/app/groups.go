@@ -204,6 +204,9 @@ func (p *groupsPage) handleGroups(groups []driver.Group, err error) {
 		return
 	}
 	p.err = nil
+	// A stale picker error outlives whatever produced it (e.g. a failed
+	// candidates load); a fresh group list retires it.
+	p.pickErr = ""
 	p.groups = groups
 	p.loading = false
 	if p.gi >= len(p.groups) {
@@ -216,6 +219,7 @@ func (p *groupsPage) setSubs(subs []driver.Subscription, err error) {
 	if err != nil {
 		return
 	}
+	p.pickErr = ""
 	p.subs = subs
 	// A subscription's tag is displayed inside groups too; patch it in place
 	// so a rename does not leave the group pane showing the old tag until the
@@ -453,6 +457,42 @@ func (p *groupsPage) pickableSubs(g *driver.Group) []driver.Subscription {
 	return out
 }
 
+// selectGroupAt moves the left-pane cursor. The detail rows follow the
+// selected group; without the rebuild the right pane would render the
+// previous group's nodes whenever a filter keeps it visible across a group
+// change.
+func (p *groupsPage) selectGroupAt(next int) {
+	p.gi = next
+	p.rc = 0
+	p.expanded = false
+	p.collapseSections()
+	p.rebuild()
+}
+
+// leftClick selects the row-th displayed group, mirroring leftLines' window
+// math so the click lands on the row the user saw.
+func (p *groupsPage) leftClick(row int) {
+	rowsH := max0(p.height - 2)
+	start := 0
+	if p.gi >= rowsH {
+		start = p.gi - rowsH + 1
+	}
+	i := start + row
+	if i < 0 || i >= len(p.groups) || i == p.gi {
+		return
+	}
+	p.selectGroupAt(i)
+}
+
+// rightClick puts the right-pane cursor on the row-th displayed detail row.
+func (p *groupsPage) rightClick(row int) {
+	if p.mode != pickNone || !p.expanded || row >= len(p.rows) {
+		return
+	}
+	p.rc = row
+	p.focus = 1
+}
+
 func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	// The filter box applies to node lists, which exist both in the detail
 	// pane and in the add-node picker; it swallows every key while open.
@@ -494,16 +534,7 @@ func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	}
 
 	if p.focus == 0 {
-		// The detail rows follow the selected group; without this the right
-		// pane would render the previous group's nodes whenever a filter
-		// keeps it visible across a group change.
-		selectGroup := func(next int) {
-			p.gi = next
-			p.rc = 0
-			p.expanded = false
-			p.collapseSections()
-			p.rebuild()
-		}
+		selectGroup := p.selectGroupAt
 		switch msg.String() {
 		case "j", "down":
 			if p.gi < len(p.groups)-1 {
@@ -534,8 +565,13 @@ func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 				return nil
 			}
 			if len(p.pickableSubs(g)) == 0 {
-				p.pickErr = "没有可添加的订阅（全部已挂载或无订阅）"
-				return nil
+				// Toast, not a persistent pane line: there is nothing to
+				// confirm here, and a stuck red note that only a restart
+				// clears reads like a broken state.
+				return func() tea.Msg {
+					return opDoneMsg{Op: "挂载订阅",
+						Err: errors.New("没有可添加的订阅（全部已挂载或无订阅）；先在 3 订阅页新增")}
+				}
 			}
 			p.mode = pickSub
 			p.pickCursor = 0
@@ -871,7 +907,7 @@ func (p groupsPage) View() string {
 
 	left := p.leftLines()
 	right := p.rightLines()
-	lv := ui.Pane(fmt.Sprintf(" 路由组 (%d) ", len(p.groups)), p.focus == 0, p.leftW, p.height, left)
+	lv := ui.Pane(false, fmt.Sprintf(" 路由组 (%d) ", len(p.groups)), p.focus == 0, p.leftW, p.height, left)
 	var title string
 	if g := p.curGroup(); g != nil {
 		title = fmt.Sprintf(" %s · %s ", g.Name, policyLabel(g)) + p.nodeView.sortTitle()
@@ -879,7 +915,7 @@ func (p groupsPage) View() string {
 			title += fmt.Sprintf("已选 %d ", n)
 		}
 	}
-	rv := ui.Pane(title, p.focus == 1, p.rightW, p.height, right)
+	rv := ui.Pane(true, title, p.focus == 1, p.rightW, p.height, right)
 	return lipgloss.JoinHorizontal(lipgloss.Top, lv, " ", rv)
 }
 
@@ -922,27 +958,27 @@ func (p groupsPage) rightLines() []string {
 	if p.mode == pickDetach {
 		if r := p.cur(); r != nil && r.gi < len(p.groups) && r.si < len(p.groups[r.gi].Subscriptions) {
 			sub := p.groups[r.gi].Subscriptions[r.si]
-			return []string{ui.ErrorStyle.Render("确认将订阅 \"" + sub.Tag + "\" 从组 \"" +
-				p.groups[r.gi].Name + "\" 移除?  (y/n)")}
+			return ui.BoxLines(true, "确认将订阅 \""+sub.Tag+"\" 从组 \""+
+				p.groups[r.gi].Name+"\" 移除?  (y/n)")
 		}
 	}
 	if p.mode == pickDeleteGroup {
 		if g := p.curGroup(); g != nil {
-			lines := []string{ui.ErrorStyle.Render("确认删除群组 \"" + g.Name + "\"?  (y/n)")}
+			lines := []string{"确认删除群组 \"" + g.Name + "\"?  (y/n)"}
 			if note := p.refNote(g.Name); note != "" {
 				lines = append(lines, ui.ErrorStyle.Render(" ⚠ "+note))
 			}
-			return lines
+			return ui.BoxLines(true, lines...)
 		}
 	}
 	if p.mode == pickRemoveNode {
 		if r := p.cur(); r != nil && r.kind == rowNode {
-			return []string{ui.ErrorStyle.Render("确认将节点 \"" + ui.SpaceAfterFlag(r.node.Name) + "\" 从组中移除?  (y/n)")}
+			return ui.BoxLines(true, "确认将节点 \""+ui.SpaceAfterFlag(r.node.Name)+"\" 从组中移除?  (y/n)")
 		}
 	}
 	if p.mode == pickRemoveNodes {
 		nodes := p.markedDirectNodes()
-		lines := []string{ui.ErrorStyle.Render(fmt.Sprintf(" 确认将 %d 个节点从组中移除?  (y/n)", len(nodes)))}
+		lines := []string{fmt.Sprintf("确认将 %d 个节点从组中移除?  (y/n)", len(nodes))}
 		for i, n := range nodes {
 			if i >= 5 {
 				lines = append(lines, ui.HelpStyle.Render("  …等共 "+strconv.Itoa(len(nodes))+" 个"))
@@ -950,22 +986,29 @@ func (p groupsPage) rightLines() []string {
 			}
 			lines = append(lines, ui.HelpStyle.Render("  "+ui.SpaceAfterFlag(n.Name)))
 		}
-		return lines
+		return ui.BoxLines(true, lines...)
 	}
 	if p.mode == inputCreate {
-		return []string{ui.TitleStyle.Render(" 创建群组 (默认策略: 自动·最小移动平均)"),
-			"", " 名称  " + p.input.View(), "",
-			ui.HelpStyle.Render(" Enter 确认  esc 取消")}
+		return ui.BoxLines(false,
+			ui.TitleStyle.Render(" 创建群组 (默认策略: 自动·最小移动平均)"),
+			"",
+			" 名称  "+p.input.View(),
+			"",
+			ui.HelpStyle.Render(" Enter 确认  esc 取消"))
 	}
 	if p.mode == inputRename {
-		lines := []string{ui.TitleStyle.Render(" 重命名群组"),
-			"", " 名称  " + p.input.View(), ""}
+		lines := []string{
+			ui.TitleStyle.Render(" 重命名群组"),
+			"",
+			" 名称  " + p.input.View(),
+		}
 		if g := p.curGroup(); g != nil {
 			if note := p.refNote(g.Name); note != "" {
-				lines = append(lines, ui.ErrorStyle.Render(" ⚠ "+note), "")
+				lines = append(lines, "", ui.ErrorStyle.Render(" ⚠ "+note))
 			}
 		}
-		return append(lines, ui.HelpStyle.Render(" Enter 确认  esc 取消"))
+		return ui.BoxLines(false, append(lines, "",
+			ui.HelpStyle.Render(" Enter 确认  esc 取消"))...)
 	}
 	if p.mode == pickPolicy {
 		lines := []string{ui.TitleStyle.Render(" 选择群组策略")}
@@ -1052,18 +1095,6 @@ func (p groupsPage) renderRow(g *driver.Group, i int) string {
 	}
 
 	n := r.node
-	l, hasLat := p.lat[n.ID]
-	latStr, latStyle := "-", ui.LatencyStyle(0, false, false)
-	if hasLat && !l.TestedAt.IsZero() {
-		if l.Alive && l.Ms > 0 {
-			latStr = fmt.Sprintf("%dms", l.Ms)
-		} else if !l.Alive {
-			latStr = "dead"
-		} else {
-			latStr = "…"
-		}
-		latStyle = ui.LatencyStyle(l.Ms, l.Alive, true)
-	}
 	mark := "  "
 	switch {
 	case p.marked[n.ID]:
@@ -1077,12 +1108,13 @@ func (p groupsPage) renderRow(g *driver.Group, i int) string {
 	if r.manual {
 		name += ui.HelpStyle.Render(" (手动)")
 	}
-	latW, protoW := 9, 8
-	nameW := max0(p.rightW - latW - protoW - 12)
+	protoW := 8
+	latW := latCellW(p.rightW)
+	nameW := max0(p.rightW - protoW - latW - 12)
 	return "│  " + mark + cur + " " +
 		ui.PadRight(name, nameW) +
 		ui.HelpStyle.Render(ui.PadRight(n.Protocol, protoW)) +
-		latStyle.Render(ui.PadLeft(latStr, latW))
+		latencyCell(p.lat, n.ID, latW)
 }
 
 func (p groupsPage) subPickRows() [][2]string {

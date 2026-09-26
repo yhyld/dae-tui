@@ -16,6 +16,10 @@ import (
 
 	"dae-tui/internal/config"
 	"dae-tui/internal/driver"
+
+	"github.com/charmbracelet/lipgloss"
+
+	"dae-tui/internal/ui"
 )
 
 // stubDriver feeds the UI canned data; all mutations succeed.
@@ -324,6 +328,36 @@ func mustTraffic(t *testing.T) driver.TrafficSnapshot {
 	t.Helper()
 	s, _ := stubDriver{}.Traffic(nil, 10, 60)
 	return s
+}
+
+// execCmds runs cmd (unwrapping batches) and returns every message it
+// produced, in order. Update handlers may bundle several cmds — e.g. the
+// editor flow also re-enables the mouse — so a single type assert on cmd()
+// is not enough.
+func execCmds(cmd tea.Cmd) []tea.Msg {
+	if cmd == nil {
+		return nil
+	}
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		var out []tea.Msg
+		for _, c := range batch {
+			out = append(out, execCmds(c)...)
+		}
+		return out
+	}
+	return []tea.Msg{msg}
+}
+
+// firstMsgOf returns the first message of type T in msgs.
+func firstMsgOf[T any](msgs []tea.Msg) (T, bool) {
+	for _, m := range msgs {
+		if v, ok := m.(T); ok {
+			return v, true
+		}
+	}
+	var zero T
+	return zero, false
 }
 
 func key(s string) tea.KeyMsg {
@@ -1391,17 +1425,16 @@ func TestConfigsEditorDoneSubmitsChange(t *testing.T) {
 	if _, err := os.Stat(tmp); err != nil {
 		t.Fatalf("edited file removed before validation: %v", err)
 	}
-	msg := cmd() // editorValidatedMsg (stub accepts everything)
-	valMsg, ok := msg.(editorValidatedMsg)
+	valMsg, ok := firstMsgOf[editorValidatedMsg](execCmds(cmd))
 	if !ok {
-		t.Fatalf("msg = %T, want editorValidatedMsg", msg)
+		t.Fatalf("cmd produced %v, want editorValidatedMsg", execCmds(cmd))
 	}
 	if valMsg.Err != nil {
 		t.Fatalf("stub validation should pass: %v", valMsg.Err)
 	}
 	// A valid edit is shown as a diff and waits for confirmation instead of
 	// submitting directly.
-	m, cmd = m.Update(msg)
+	m, cmd = m.Update(valMsg)
 	if cmd != nil {
 		t.Fatal("a validated edit should wait for the diff confirmation, not submit")
 	}
@@ -1433,7 +1466,9 @@ func TestConfigsEditorDoneSubmitsChange(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("changed content should fire the syntax validation")
 	}
-	m, _ = m.Update(cmd())
+	for _, msg := range execCmds(cmd) {
+		m, _ = m.Update(msg)
+	}
 	m, cmd = m.Update(key("n"))
 	if cmd == nil {
 		t.Fatal("declining should at least surface a toast")
@@ -1445,13 +1480,15 @@ func TestConfigsEditorDoneSubmitsChange(t *testing.T) {
 		t.Fatalf("a declined edit must stay on disk for recovery: %v", err)
 	}
 
-	// Unchanged content must not fire.
+	// Unchanged content must not fire a validation (the mouse re-enable
+	// rides along on every editor exit, so a bare cmd != nil check no
+	// longer means "work was queued").
 	tmp3 := filepath.Join(t.TempDir(), "y.dns")
 	os.WriteFile(tmp3, []byte("  fallback: direct  "), 0o600)
 	m2, cmd2 := m.Update(editorDoneMsg{Path: tmp3, Section: "routing", ID: "r1", Old: "fallback: direct"})
 	_ = m2
-	if cmd2 != nil {
-		t.Fatal("unchanged content should not fire a cmd")
+	if _, ok := firstMsgOf[editorValidatedMsg](execCmds(cmd2)); ok {
+		t.Fatal("unchanged content should not fire a validation")
 	}
 }
 
@@ -1476,12 +1513,11 @@ func TestConfigsValidationRejectsBrokenDsl(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("changed content should fire the syntax validation")
 	}
-	msg := cmd() // editorValidatedMsg with the parser error
-	valMsg, ok := msg.(editorValidatedMsg)
+	valMsg, ok := firstMsgOf[editorValidatedMsg](execCmds(cmd))
 	if !ok || valMsg.Err == nil {
-		t.Fatalf("msg = %+v, want a validation error", msg)
+		t.Fatalf("cmd produced %v, want a validation error", execCmds(cmd))
 	}
-	m, cmd = m.Update(msg)
+	m, cmd = m.Update(valMsg)
 	if cmd == nil {
 		t.Fatal("rejection should surface a toast")
 	}
@@ -2771,5 +2807,326 @@ func TestForceRefreshReloadsEverything(t *testing.T) {
 	if !sawGroups || !sawSubs || !sawSel || !sawStatus || !sawManual {
 		t.Fatalf("refresh should reload every list: groups=%v subs=%v selections=%v status=%v manual=%v",
 			sawGroups, sawSubs, sawSel, sawStatus, sawManual)
+	}
+}
+
+// --- frame / fill / fallback layout ---
+
+// TestFrameFillsTerminal: the app renders as a rounded frame that spans the
+// terminal exactly, with the help line anchored to the last inner row.
+func TestFrameFillsTerminal(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("2")) // groups page: its help line is stable
+	for _, sz := range []struct{ w, h int }{{120, 36}, {80, 22}, {100, 24}} {
+		mm, _ := m.Update(tea.WindowSizeMsg{Width: sz.w, Height: sz.h})
+		v := mm.View()
+		lines := strings.Split(v, "\n")
+		if len(lines) != sz.h {
+			t.Fatalf("%dx%d: view is %d lines, want exactly %d", sz.w, sz.h, len(lines), sz.h)
+		}
+		if !strings.HasPrefix(lines[0], "╭") || !strings.HasPrefix(lines[len(lines)-1], "╰") {
+			t.Fatalf("%dx%d: frame borders missing:\n%s", sz.w, sz.h, v)
+		}
+		// help line is the last inner row, never pushed off by page content
+		if !strings.Contains(lines[sz.h-2], "j/k 移动") {
+			t.Fatalf("%dx%d: help line not anchored at bottom:\n%s", sz.w, sz.h, v)
+		}
+	}
+}
+
+// TestSmallTerminalFallback: below the floor the app says what is wrong
+// instead of rendering overflowing panes.
+func TestSmallTerminalFallback(t *testing.T) {
+	m := newTestModel(t)
+	for _, sz := range []struct{ w, h int }{{40, 10}, {minTermW - 1, 36}, {100, minTermH - 1}} {
+		mm, _ := m.Update(tea.WindowSizeMsg{Width: sz.w, Height: sz.h})
+		if v := mm.View(); !strings.Contains(v, "终端太小") {
+			t.Fatalf("%dx%d: expected the too-small fallback:\n%s", sz.w, sz.h, v)
+		}
+	}
+	// and a resize above the floor restores the normal layout
+	mm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	if v := mm.View(); !strings.Contains(v, "dae-tui") {
+		t.Fatalf("resize above floor should restore the layout:\n%s", v)
+	}
+}
+
+// --- help page scroll ---
+
+func TestHelpPageScrolls(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("?"))
+	v := m.View()
+	if !strings.Contains(v, "全局") {
+		t.Fatalf("help should open at the top:\n%s", v)
+	}
+	if strings.Contains(v, "关于") {
+		t.Fatalf("help tail should be below the fold:\n%s", v)
+	}
+	m, _ = m.Update(key("G"))
+	if v := m.View(); !strings.Contains(v, "关于") {
+		t.Fatalf("G should jump to the end of help:\n%s", v)
+	}
+	m, _ = m.Update(key("g"))
+	if v := m.View(); !strings.Contains(v, "全局") || strings.Contains(v, "关于") {
+		t.Fatalf("g should jump back to the top:\n%s", v)
+	}
+}
+
+// --- home page follow-scroll ---
+
+// TestHomeFollowsFocus: at a height where the home page does not fit, the
+// window follows focus so the section the cursor is in stays on screen —
+// the pre-frame layout silently cut the group list instead.
+func TestHomeFollowsFocus(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	if v := m.View(); !strings.Contains(v, "路由快速切换") {
+		t.Fatalf("routing section should be visible unfocused:\n%s", v)
+	}
+	mm, _ := m.Update(key("tab")) // focus the per-group list
+	if v := mm.View(); !strings.Contains(v, "各组当前节点") {
+		t.Fatalf("focusing the group list should scroll it into view:\n%s", v)
+	}
+}
+
+// --- mouse ---
+
+func mouseClick(x, y int) tea.MouseMsg {
+	return tea.MouseMsg{X: x, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress}
+}
+
+func TestMouseTabClick(t *testing.T) {
+	m := newTestModel(t)
+	// Tabs sit on frame row 2, content cols start after the frame border.
+	// Each tab spans lipgloss.Width(label)+2 (TabStyle pads 0,1).
+	tabX := func(i int) int {
+		x := 1
+		for j, t := range tabLabels {
+			if j == i {
+				break
+			}
+			x += lipgloss.Width(t) + 2
+		}
+		return x
+	}
+	m2, _ := m.Update(mouseClick(tabX(1), 2))
+	mm := m2.(Model)
+	if mm.page != pageTree {
+		t.Fatalf("click on the second tab should open the groups page, got page %d", mm.page)
+	}
+	// clicking the "?" tab opens help
+	m3, _ := m2.Update(mouseClick(tabX(len(tabLabels)-1), 2))
+	mm = m3.(Model)
+	if mm.page != pageHelp {
+		t.Fatalf("click on the last tab should open help, got page %d", mm.page)
+	}
+}
+
+func TestMouseWheelScrollsLists(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("2"))
+	wheel := tea.MouseMsg{X: 40, Y: 10, Button: tea.MouseButtonWheelDown}
+	m2, _ := m.Update(wheel)
+	mm := m2.(Model)
+	if mm.groups.gi != 1 {
+		t.Fatalf("wheel down should advance the group cursor (2 groups, 3 notches), got gi=%d", mm.groups.gi)
+	}
+	wheelUp := tea.MouseMsg{X: 40, Y: 10, Button: tea.MouseButtonWheelUp}
+	m3, _ := m2.Update(wheelUp)
+	mm = m3.(Model)
+	if mm.groups.gi != 0 {
+		t.Fatalf("wheel up should move the cursor back, got gi=%d", mm.groups.gi)
+	}
+}
+
+func TestMouseSelectsRows(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("2"))
+	// Left pane rows start at frame row 5; the second group is row 1.
+	m2, _ := m.Update(mouseClick(3, 6))
+	mm := m2.(Model)
+	if mm.groups.gi != 1 {
+		t.Fatalf("click on the second group row should select it, got gi=%d", mm.groups.gi)
+	}
+}
+
+func TestMouseIgnoredWhileModalOpen(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("2"))
+	m, _ = m.Update(key("c"))           // create-group input modal
+	m2, _ := m.Update(mouseClick(9, 2)) // tab click must not fire under a modal
+	mm := m2.(Model)
+	if mm.page != pageTree {
+		t.Fatalf("click under a modal must not switch pages, got page %d", mm.page)
+	}
+	m3, _ := m2.Update(tea.MouseMsg{X: 40, Y: 10, Button: tea.MouseButtonWheelDown})
+	mm = m3.(Model)
+	if mm.groups.gi != 0 {
+		t.Fatalf("wheel under a modal must not move the cursor, got gi=%d", mm.groups.gi)
+	}
+}
+
+// --- latency copy: dead probes read in Chinese like everything else ---
+
+func TestDeadLatencyLabel(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("2"))
+	m, _ = m.Update(key("tab"))
+	// stub group 0 has nodes a/b/c; c is dead (see stubDriver.Latencies).
+	m, _ = m.Update(key("enter")) // expand first section
+	v := m.View()
+	if !strings.Contains(v, "超时") {
+		t.Fatalf("a dead probe should render as 超时:\n%s", v)
+	}
+	if strings.Contains(v, "dead") {
+		t.Fatalf("no English 'dead' label should remain:\n%s", v)
+	}
+}
+
+// --- step-5 polish: two-column home, spinner, latency bars ---
+
+// TestHomeTwoColumnLayout: on a wide terminal the traffic block and the
+// routing picker share rows; below the threshold they stack.
+func TestHomeTwoColumnLayout(t *testing.T) {
+	m := newTestModel(t) // 120x36, content width 118 >= homeTwoColMin
+	v := m.View()
+	sideBySide := false
+	for _, l := range strings.Split(v, "\n") {
+		if strings.Contains(l, "上行") && strings.Contains(l, "路由快速切换") {
+			sideBySide = true
+		}
+	}
+	if !sideBySide {
+		t.Fatalf("wide terminal should put traffic and routing side by side:\n%s", v)
+	}
+
+	m2, _ := newTestModel(t).Update(tea.WindowSizeMsg{Width: 90, Height: 36})
+	v2 := m2.View()
+	for _, l := range strings.Split(v2, "\n") {
+		if strings.Contains(l, "上行") && strings.Contains(l, "路由快速切换") {
+			t.Fatalf("narrow terminal should stack traffic above routing:\n%s", v2)
+		}
+	}
+}
+
+// TestLatencyBarsInNodeRows: an expanded group section shows the micro-bar
+// next to each measured node's value, in step with its latency.
+func TestLatencyBarsInNodeRows(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("2"))
+	m, _ = m.Update(key("tab"))
+	m, _ = m.Update(key("enter")) // expand the subscription section
+	v := m.View()
+	// 东京-01 measured 88ms in the stub; HK-02 (420ms) sits in the
+	// collapsed direct section, so only the 88ms bar is on screen.
+	if !strings.Contains(v, ui.LatencyBar(88)) {
+		t.Fatalf("the 88ms node should carry its micro-bar:\n%s", v)
+	}
+	if strings.Contains(v, "█████") {
+		t.Fatalf("no node here is fast enough for a full bar:\n%s", v)
+	}
+}
+
+// TestSpinnerChain: the tabs bar shows the live indicator and the 120ms
+// chain keeps itself alive only while a test is in flight.
+func TestSpinnerChain(t *testing.T) {
+	m := newTestModel(t)
+	mm := m.(Model)
+	mm.groups.testing = true
+	mm.groups.testIDs = []string{"n1"}
+	if v := mm.View(); !strings.Contains(v, "测速中") {
+		t.Fatalf("tabs bar should show the test progress:\n%s", v)
+	}
+	m2, cmd := mm.Update(spinnerMsg{})
+	if cmd == nil {
+		t.Fatal("spinner should reschedule while a test is in flight")
+	}
+	m3, _ := m2.(Model)
+	m3.groups.testing = false
+	if _, cmd := m3.Update(spinnerMsg{}); cmd != nil {
+		t.Fatal("spinner chain should stop once no test is in flight")
+	}
+}
+
+// TestGroupsAttachAllSubsToast: with every subscription attached, `s`
+// reports "nothing to add" as a toast (auto-dismissing) instead of a red
+// pane line that sticks until restart.
+func TestGroupsAttachAllSubsToast(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("2"))
+	mm := m.(Model)
+	// Attach the second stub subscription to group 0 as well (s1 is already
+	// on it), so nothing is pickable.
+	mm.groups.groups[0].Subscriptions = append(mm.groups.groups[0].Subscriptions,
+		driver.GroupSubscription{SubscriptionID: "s2", Tag: "机场B"})
+	mm.groups.rebuild()
+
+	m2, cmd := mm.Update(key("s"))
+	if cmd == nil {
+		t.Fatal("s with nothing pickable should report via a toast cmd")
+	}
+	msg, ok := cmd().(opDoneMsg)
+	if !ok || msg.Err == nil {
+		t.Fatalf("cmd msg = %T(%+v), want opDoneMsg with an error", msg, msg)
+	}
+	if !strings.Contains(msg.Err.Error(), "没有可添加的订阅") {
+		t.Fatalf("unexpected error text: %v", msg.Err)
+	}
+	m3, _ := m2.Update(msg) // root turns it into a toast
+	if strings.Contains(m3.View(), "✗ 没有可添加的订阅") {
+		t.Fatalf("the pane must not carry the sticky error line:\n%s", m3.View())
+	}
+	if !strings.Contains(m3.View(), "✗ 挂载订阅") {
+		t.Fatalf("the toast should carry the message:\n%s", m3.View())
+	}
+
+	// A stale picker error also retires on a groups refresh.
+	m4 := m3.(Model)
+	m4.groups.pickErr = "拉取失败"
+	m5, _ := m4.Update(groupsMsg{Groups: mustGroups(t)})
+	if v := m5.View(); strings.Contains(v, "✗ 拉取失败") {
+		t.Fatalf("groups refresh should clear a stale pickErr:\n%s", v)
+	}
+}
+
+// TestMouseReenabledAfterExec: both tea.ExecProcess exits ($EDITOR and the
+// journal viewer) must re-arm mouse reporting — bubbletea disables it before
+// handing the terminal to the child and does not restore it afterwards.
+func TestMouseReenabledAfterExec(t *testing.T) {
+	m := newTestModel(t)
+
+	m2, cmd := m.Update(logsDoneMsg{})
+	if cmd == nil {
+		t.Fatal("logsDoneMsg should re-enable the mouse")
+	}
+	if got := fmt.Sprintf("%T", cmd()); !strings.Contains(got, "MouseCellMotion") {
+		t.Fatalf("logsDoneMsg cmd = %s, want a mouse re-enable msg", got)
+	}
+
+	tmp := filepath.Join(t.TempDir(), "x.dns")
+	os.WriteFile(tmp, []byte("upstream {}"), 0o600)
+	_, cmd = m2.Update(editorDoneMsg{Path: tmp, Section: "dns", ID: "d1", Old: "upstream {}"})
+	if cmd == nil {
+		t.Fatal("editorDoneMsg should fire validation and re-enable the mouse")
+	}
+	// The batch may collapse to a single cmd when the edit is a no-op
+	// (unchanged content produces no validation cmd); either shape must
+	// carry the mouse re-enable.
+	sawMouse := false
+	if batch, ok := cmd().(tea.BatchMsg); ok {
+		for _, c := range batch {
+			if c == nil {
+				continue
+			}
+			if got := fmt.Sprintf("%T", c()); strings.Contains(got, "MouseCellMotion") {
+				sawMouse = true
+			}
+		}
+	} else if got := fmt.Sprintf("%T", cmd()); strings.Contains(got, "MouseCellMotion") {
+		sawMouse = true
+	}
+	if !sawMouse {
+		t.Fatalf("editorDoneMsg cmd = %T should re-enable the mouse", cmd())
 	}
 }
