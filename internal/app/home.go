@@ -234,6 +234,14 @@ func (p *homePage) handleSelections(sel driver.Selections, err error, d driver.D
 		}
 		p.routingID, p.routingName, p.routingBody = r.ID, r.Name, r.Body
 		p.routingMode = d.DetectRoutingPreset(r.Body)
+		// Aim the preset cursor at the mode actually in effect, so the
+		// highlight lands on reality on first paint instead of preset #0.
+		for i, preset := range p.presets {
+			if preset.ID == p.routingMode {
+				p.presetCursor = i
+				break
+			}
+		}
 		p.rederiveGroupIdx()
 		return
 	}
@@ -268,11 +276,13 @@ func (p homePage) hasIface(name string) bool {
 // routes) and warns when the selected config binds to an interface that is
 // gone — DHCP renames and replugged USB NICs make that common, and the
 // symptom (proxy silently passing nothing) is invisible without this.
-func (p homePage) netLines() []string {
+func (p homePage) netLines(w int) []string {
 	if len(p.ifaces) == 0 {
 		return nil
 	}
-	parts := make([]string, 0, len(p.ifaces))
+	// One NIC per line with a hanging indent: the joined form truncated
+	// mid-IP and hid exactly the addresses this section exists to show.
+	lines := make([]string, 0, len(p.ifaces))
 	for _, i := range p.ifaces {
 		s := i.Name + " "
 		if i.Up {
@@ -280,15 +290,26 @@ func (p homePage) netLines() []string {
 		} else {
 			s += "↓"
 		}
-		if ips := strings.Join(i.IPs, ","); ips != "" {
+		if ips := strings.Join(i.IPs, " · "); ips != "" {
 			s += " " + ips
 		}
 		if i.Default {
 			s += " 默认路由"
 		}
-		parts = append(parts, s)
+		label := ui.HelpStyle.Render("网卡 ")
+		if len(lines) > 0 {
+			label = "     " // hang under the 网卡 label (4 cols + space)
+		}
+		lines = append(lines, " "+label+ui.Truncate(s, max0(w-6)))
 	}
-	lines := []string{" " + ui.Truncate("网卡 "+strings.Join(parts, "   "), max0(p.width-6))}
+	lines = append(lines, netWarnLines(p)...)
+	return lines
+}
+
+// netWarnLines flags configured lan/wan interfaces that daed cannot see —
+// it binds them by name, so a renamed NIC silently breaks the proxy.
+func netWarnLines(p homePage) []string {
+	var lines []string
 	for _, w := range []struct {
 		label string
 		names []string
@@ -841,7 +862,11 @@ func (p homePage) bodyLines(status driver.Status) ([]string, int) {
 	if presetOff >= 0 {
 		presetStart = row2Start + 1 + presetOff
 	}
-	env := append(p.subLines(), p.netLines()...)
+	envW := full - 4
+	if twoCol {
+		envW = homeRoutingW - 4
+	}
+	env := append(p.subLines(), p.netLines(envW)...)
 	if twoCol && len(env) > 0 {
 		addZone(pairedRow("环境", "", env, "路由", "Enter 切换 · g 换组", routingBody, !p.groupFocus))
 	} else {
@@ -910,7 +935,7 @@ func (p homePage) proxyRows(status driver.Status, w int) []string {
 			Foreground(lipgloss.Color("15")).Background(ui.Red).
 			Padding(0, 1).Render("○ 代理已停止")
 	}
-	rows := []string{badge}
+	rows := []string{badge, ""}
 	if p.caps.ConfigMgmt {
 		name := func(s string) string {
 			if s == "" {
@@ -918,9 +943,12 @@ func (p homePage) proxyRows(status driver.Status, w int) []string {
 			}
 			return s
 		}
+		// One profile per line with the keys column-aligned (8-col label
+		// column): the joined form wrapped or truncated in narrow boxes.
 		rows = append(rows,
-			" "+ui.HelpStyle.Render("方案 config ")+name(p.cfgName)+" · dns "+name(p.dnsName),
-			"      routing "+name(p.routingName))
+			" "+ui.HelpStyle.Render("方案 config  ")+name(p.cfgName),
+			"      "+ui.HelpStyle.Render("dns     ")+name(p.dnsName),
+			"      "+ui.HelpStyle.Render("routing ")+name(p.routingName))
 	}
 	if status.Modified {
 		rows = append(rows, " "+ui.ErrorStyle.Render("⚠ 配置改动未应用（A 应用）"))

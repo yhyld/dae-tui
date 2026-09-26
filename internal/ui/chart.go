@@ -28,37 +28,49 @@ func Sparkline(series []float64, width, height int, style lipgloss.Style, emptyL
 			max = v
 		}
 	}
-	if max <= 0 {
-		max = 1
-	}
-	// Leave the top dot row empty so peaks don't touch the border.
-	dotRows := height*dotsPerCellY - 1
+	// Reserve the top dot row so peaks don't touch the border, and the
+	// bottom one exclusively for the zero axis — curve dots merging into the
+	// axis row produce lopsided braille cells that read as rendering garbage.
+	dotRows := height*dotsPerCellY - 2
 
 	// grid[row][col] of braille bitmasks; row 0 is the top.
 	grid := make([][]rune, height)
 	for r := range grid {
 		grid[r] = []rune(strings.Repeat("⠀", width))
 	}
-	for i, v := range pts {
-		if v <= 0 {
-			continue
-		}
-		h := int(v / max * float64(dotRows))
-		if h < 1 {
-			h = 1
-		}
-		if h > dotRows {
-			h = dotRows
-		}
-		colDot := i % dotsPerCellX
+	// The zero axis: a dotted line along the bottom dot row, always present —
+	// it marks zero while idle and stays put under the curve while traffic
+	// flows, so the chart keeps its reference edge in both states.
+	for i := range pts {
 		col := i / dotsPerCellX
-		for y := 0; y < h; y++ {
-			// y counts up from the baseline.
-			dotRow := dotRows - y // dotRow 0 is bottom
-			cellRow := height - 1 - dotRow/dotsPerCellY
-			bit := brailleBit(dotRow%dotsPerCellY, colDot)
-			if cellRow >= 0 && cellRow < height && col >= 0 && col < width {
-				grid[cellRow][col] = rune(brailleBase + int(grid[cellRow][col]-brailleBase) + bit)
+		grid[height-1][col] = rune(brailleBase +
+			int(grid[height-1][col]-brailleBase) +
+			brailleBit(dotsPerCellY-1, i%dotsPerCellX))
+	}
+	if max > 0 {
+		for i, v := range pts {
+			if v <= 0 {
+				continue
+			}
+			h := int(v / max * float64(dotRows))
+			if h < 1 {
+				h = 1
+			}
+			if h > dotRows {
+				h = dotRows
+			}
+			colDot := i % dotsPerCellX
+			col := i / dotsPerCellX
+			for y := 0; y < h; y++ {
+				// y counts up from the first dot row above the axis (row 0
+				// belongs to the axis alone): bars rise from just over the
+				// reference line without ever touching it.
+				row := y + 1
+				cellRow := height - 1 - row/dotsPerCellY
+				bit := brailleBit(dotsPerCellY-1-row%dotsPerCellY, colDot)
+				if cellRow >= 0 && cellRow < height && col >= 0 && col < width {
+					grid[cellRow][col] = rune(brailleBase + int(grid[cellRow][col]-brailleBase) + bit)
+				}
 			}
 		}
 	}

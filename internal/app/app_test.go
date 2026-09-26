@@ -1627,9 +1627,8 @@ func TestHomeRoutingPresetSwitch(t *testing.T) {
 		}
 	}
 
-	// j/k moves the preset cursor; enter opens the confirmation showing the
-	// exact DSL y would write.
-	m, _ = m.Update(key("j"))
+	// j/k moves the preset cursor (it starts on the detected mode, nonCn);
+	// enter opens the confirmation showing the exact DSL y would write.
 	m, _ = m.Update(key("j")) // cursor on 中国列表
 	m, cmd := m.Update(key("enter"))
 	if cmd != nil {
@@ -1701,8 +1700,8 @@ func TestHomeRoutingPresetSwitch(t *testing.T) {
 // the error surfaces as a toast and nothing is submitted.
 func TestHomeRoutingPresetRejected(t *testing.T) {
 	m := newTestModelWith(t, presetRejectingDriver{})
-	m, _ = m.Update(key("enter")) // cursor on gfw
-	if v := m.View(); !strings.Contains(v, "替换为「GFW 模式」") {
+	m, _ = m.Update(key("enter")) // cursor on the detected mode (nonCn)
+	if v := m.View(); !strings.Contains(v, "替换为「中国列表以外」") {
 		t.Fatalf("confirmation missing:\n%s", v)
 	}
 	m2, cmd := m.Update(key("y"))
@@ -3407,7 +3406,7 @@ func TestHomeSubscriptionDigest(t *testing.T) {
 func TestHomeProfilesLine(t *testing.T) {
 	m := newTestModel(t)
 	v := m.View()
-	for _, want := range []string{"方案 config 默认", "dns 默认DNS", "routing 默认路由"} {
+	for _, want := range []string{"方案 config  默认", "dns     默认DNS", "routing 默认路由"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("profiles line missing %q:\n%s", want, v)
 		}
