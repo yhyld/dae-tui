@@ -1031,23 +1031,23 @@ func (m Model) toastLine() string {
 	return " " + ui.Truncate(m.toast, m.width-3)
 }
 
-// helpKeys returns the two segments riding the frame's bottom edge: the
-// current page's keys on the left and the help call-to-action pinned to
-// the right (clicking that edge anywhere opens the overlay). AppFrame
+// helpKeys returns the two segments riding the frame's bottom edge: only
+// page-wide and global keys live here — a key that works in just one box
+// rides that box's own footer instead (see PaneSpec.Footer). AppFrame
 // truncates the keys first so the call-to-action always survives.
 func (m Model) helpKeys() (keys, hint string) {
 	keys = "A 应用  1-5 切换页面  q 退出"
 	switch m.page {
 	case pageHome:
-		keys = "o 开关代理  Tab 切焦点  j/k+Enter 切换路由/跳群组页  L 日志  g 换组  P 账户  A 应用  r 刷新"
+		keys = "L 日志  P 账户  A 应用  r 刷新"
 	case pageTree:
-		keys = "j/k 移动  Tab/l 展开  Enter(分区)开合  space 标记  a 自动策略  x 移除(选中则批量)  c/R/D/p 建组/改名/删除/策略  s/n 挂订阅/加节点  t 测速  / 过滤  o 排序"
+		keys = "Tab 切栏  a 自动策略  t/T 测速  A 应用  r 刷新"
 	case pageSubs:
-		keys = "j/k 移动  Tab/l 看节点  y 复制链接  u 更新  e 编辑标签/链接  n 新增  x 删除  c 定时刷新  t 测速  / 过滤  o 排序"
+		keys = "u 更新  e 编辑  n 新增  y 复制链接  A 应用  r 刷新"
 	case pageNodes:
-		keys = "j/k 移动  a 批量导入  y 复制链接  e 编辑标签/链接  x 删除  t/T 测速  Tab 后 G 加入群组  / 过滤  o 排序"
+		keys = "a 导入  e 编辑  y 复制  t/T 测速  Tab 切栏  A 应用  r 刷新"
 	case pageConfigs:
-		keys = "j/k 移动  Enter 选择  y 复制 DSL  e 编辑(DSL 先校验后 diff)  v 概览/原文  c/R/D 新建/改名/删除  Tab/l 滚动  A 应用(全局)"
+		keys = "v 概览/原文  y 复制 DSL  Tab 切栏  A 应用  r 刷新"
 	}
 	// The overlay names its own keys while it is up; the trailing hint then
 	// reads as "how to get out".

@@ -128,6 +128,13 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
 
 ## TUI 约定
 
+- **键位提示的位置法则——提示钉在它所隶属容器的底边框上**：只在某个盒内生效的键
+  镶该盒底边框（`TitledBoxFooter` / `PaneSpec.Footer`，放不下自动截断、绝不折行）；
+  左/右框各自生效的键分居双盒各自的底边（模态打开时右盒 footer 换成该模态的键）；
+  **页面级（两种焦点都生效）与全局键才上外框底边**（`helpKeys()` 只保留这些）。不要
+  把键位图例写成盒内容行——那是白占一行内容且和边框语言割裂的旧做法（订阅页右栏
+  `u/e/x/c` 行、节点页详情底行、各选择器尾行均已因此删除）。写新页面时按 handleKey
+  的分发结构归类：focus 分支内的键进对应盒 footer，分支外的进外框。
 - **整个应用包在一个圆角外框里，恰好填满终端**：外框由 `ui.AppFrame` 手工构造（lipgloss
   的 Border 嵌不进文字），**帮助键位嵌在外框底边框**（键位先截断、`? 帮助` 固定右端
   不参与截断）。外框内第一层是**页头盒**（`ui.TitledBoxRight`，通栏 cw-2 宽）：页签嵌
@@ -236,7 +243,7 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   该操作"），订阅/配置页还有横幅；`!TrafficStats` 时首页不渲染流量图、轮询也跳过。
   新 driver 必须如实返回 Caps——`stubDriver` 返回全 true，写"残废后端"测试要内嵌它再覆盖。
 - **测速进度**：`testWindow(n) = 15s + 200ms×n`（上限 2 分钟，与 `testLatencyCmd` 的
-  ctx 超时一致），三个页面各自 `testProgress()`，根模型 `tabsBar` 显示盲文 spinner +
+  ctx 超时一致），三个页面各自 `testProgress()`，根模型 `spinSuffix` 把盲文 spinner +
   "测速中 x/y"——进度是**跨页汇总**的（测速中切页指示不消失）。spinner 由 120ms 的
   `spinnerMsg` 自续链驱动（`spinning` 防止叠链；1s tick 在测速开始时拉起链，无测速时链
   自灭，空闲 UI 不空转）。

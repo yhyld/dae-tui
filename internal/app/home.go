@@ -791,22 +791,30 @@ func (p homePage) bodyLines(status driver.Status) ([]string, int) {
 	}
 	// pairedRow builds one grid row through the shared PaneRow helper: both
 	// boxes' content padded to the same height so their borders align, then
-	// joined at the page seam.
-	pairedRow := func(leftTitle string, left []string, rightTitle string, right []string,
-		rightFocused bool) []string {
-		lw := homeRoutingW
-		rw := p.width - margin*2 - lw - 1
+	// joined at the page seam. Each side carries its own keys in its bottom
+	// edge.
+	lw, rw := homeRoutingW, 0
+	if twoCol {
+		rw = p.width - margin*2 - lw - 1
+	}
+	pairedRow := func(leftTitle, leftFooter string, left []string,
+		rightTitle, rightFooter string, right []string, rightFocused bool) []string {
 		return ui.PaneRow(
-			ui.PaneSpec{Title: leftTitle, Lines: left, W: lw},
-			ui.PaneSpec{Title: rightTitle, Lines: right, Focused: rightFocused, W: rw})
+			ui.PaneSpec{Title: leftTitle, Footer: leftFooter, Lines: left, W: lw},
+			ui.PaneSpec{Title: rightTitle, Footer: rightFooter, Lines: right,
+				Focused: rightFocused, W: rw})
 	}
 
 	// --- zone row 1: proxy state (left) | traffic (right) ---
+	onOff := "o 停止"
+	if !status.Running {
+		onOff = "o 启动"
+	}
 	if twoCol {
-		addZone(pairedRow("代理", p.proxyRows(status, homeRoutingW-4),
-			"流量", p.trafficRows(p.width-margin*2-homeRoutingW-1-4), false))
+		addZone(pairedRow("代理", onOff, p.proxyRows(status, homeRoutingW-4),
+			"流量", "", p.trafficRows(p.width-margin*2-homeRoutingW-1-4), false))
 	} else {
-		addZone(ui.TitledBox("代理", false, full, p.proxyRows(status, full-4)))
+		addZone(ui.TitledBoxFooter("代理", onOff, false, full, p.proxyRows(status, full-4)))
 		addZone(ui.TitledBox("流量", false, full, p.trafficRows(full-4)))
 	}
 
@@ -835,9 +843,9 @@ func (p homePage) bodyLines(status driver.Status) ([]string, int) {
 	}
 	env := append(p.subLines(), p.netLines()...)
 	if twoCol && len(env) > 0 {
-		addZone(pairedRow("环境", env, "路由", routingBody, !p.groupFocus))
+		addZone(pairedRow("环境", "", env, "路由", "Enter 切换 · g 换组", routingBody, !p.groupFocus))
 	} else {
-		addZone(ui.TitledBox("路由", !p.groupFocus, routingBoxW, routingBody))
+		addZone(ui.TitledBoxFooter("路由", "Enter 切换 · g 换组", !p.groupFocus, routingBoxW, routingBody))
 		if len(env) > 0 {
 			addZone(ui.TitledBox("环境", false, full, env))
 		}
@@ -870,13 +878,12 @@ func (p homePage) bodyLines(status driver.Status) ([]string, int) {
 		}
 		groupRows = append(groupRows, row)
 	}
+	groupFooter := "Tab 切到组列表 · Enter 跳群组页"
 	if p.groupFocus {
-		groupRows = append(groupRows, " "+ui.HelpStyle.Render("Enter 跳到群组页并展开该组   Tab 返回路由切换"))
-	} else if len(p.groups) > 0 {
-		groupRows = append(groupRows, " "+ui.HelpStyle.Render("Tab 切换到组列表（Enter 跳到群组页并展开）"))
+		groupFooter = "Enter 跳群组页并展开 · Tab 返回路由切换"
 	}
 	groupStart := len(lines) + 1 // under the box's top border
-	addZone(ui.TitledBox("各组当前节点", p.groupFocus, full, groupRows))
+	addZone(ui.TitledBoxFooter("各组当前节点", groupFooter, p.groupFocus, full, groupRows))
 
 	// Active-line priority: an open confirmation wins above; otherwise it
 	// is the cursor row of the focused zone.
@@ -889,22 +896,21 @@ func (p homePage) bodyLines(status driver.Status) ([]string, int) {
 	return lines, active
 }
 
-// proxyRows is the 代理 zone's content: the on/off badge with its key, the
-// three profiles the global `A` would apply, and — when there is one — the
-// unapplied-changes warning. Every row starts one cell in, on the badge's
-// text baseline; the routing continuation aligns its label under `config`.
+// proxyRows is the 代理 zone's content: the on/off badge (its `o` key rides
+// the box's bottom edge), the three profiles the global `A` would apply,
+// and — when there is one — the unapplied-changes warning. Every row starts
+// one cell in, on the badge's text baseline; the routing continuation
+// aligns its label under `config`.
 func (p homePage) proxyRows(status driver.Status, w int) []string {
 	badge := lipgloss.NewStyle().Bold(true).
 		Foreground(lipgloss.Color("15")).Background(ui.Green).
 		Padding(0, 1).Render("● 代理运行中")
-	hint := ui.HelpStyle.Render("  o 停止")
 	if !status.Running {
 		badge = lipgloss.NewStyle().Bold(true).
 			Foreground(lipgloss.Color("15")).Background(ui.Red).
 			Padding(0, 1).Render("○ 代理已停止")
-		hint = ui.HelpStyle.Render("  o 启动")
 	}
-	rows := []string{badge + hint}
+	rows := []string{badge}
 	if p.caps.ConfigMgmt {
 		name := func(s string) string {
 			if s == "" {
@@ -981,7 +987,7 @@ func (p homePage) routingLines(w int) (body []string, presetStart int) {
 	}
 	head := ui.HelpStyle.Render("当前 ") + ui.SelectedStyle.Render(name)
 	if g := p.proxyGroup(); g != "" {
-		head += ui.HelpStyle.Render(" · 代理组: ") + ui.SelectedStyle.Render(g) + ui.HelpStyle.Render(" (g 换)")
+		head += ui.HelpStyle.Render(" · 代理组: ") + ui.SelectedStyle.Render(g)
 	}
 	body = append(body, " "+head)
 	if p.routingID == "" {
@@ -1008,9 +1014,9 @@ func (p homePage) routingLines(w int) (body []string, presetStart int) {
 	}
 	switch {
 	case p.routingMode != "":
-		body = append(body, " "+ui.HelpStyle.Render("当前: "+presetLabel(p.routingMode)+"   Enter 切换"))
+		body = append(body, " "+ui.HelpStyle.Render("当前: "+presetLabel(p.routingMode)))
 	default:
-		body = append(body, " "+ui.HelpStyle.Render("当前: 自定义规则   Enter 切换为预设"))
+		body = append(body, " "+ui.HelpStyle.Render("当前: 自定义规则"))
 	}
 	return body, presetStart
 }

@@ -489,10 +489,22 @@ func (p nodesPage) View() string {
 	if p.mode == 2 || p.mode == 3 {
 		rvTitle = p.modalTitle()
 	}
+	// Key hints ride the edges of the boxes they belong to: the left box is
+	// the node list (filter/sort/edit/delete), the right box the detail
+	// actions (and the open modal's keys); page-wide keys stay on the frame.
+	rightFooter := "G 加入群组"
+	switch p.mode {
+	case 2:
+		rightFooter = "y 确认 · n/esc 取消"
+	case 3:
+		rightFooter = "Enter 确认 · j/k 移动 · esc 取消"
+	}
 	return strings.Join(ui.PaneRow(
 		ui.PaneSpec{Title: "手动节点" + p.nodeView.countTitle(len(p.visibleNodes()), len(p.nodes)) +
-			p.nodeView.sortTitle(), Lines: p.leftLines(), Focused: p.focus == 0, W: p.leftW, H: p.height},
-		ui.PaneSpec{Title: rvTitle, Lines: p.rightLines(), Focused: p.focus == 1, W: p.rightW, H: p.height},
+			p.nodeView.sortTitle(), Footer: "x 删除 · / 过滤 · o 排序", Lines: p.leftLines(),
+			Focused: p.focus == 0, W: p.leftW, H: p.height},
+		ui.PaneSpec{Title: rvTitle, Footer: rightFooter, Lines: p.rightLines(),
+			Focused: p.focus == 1, W: p.rightW, H: p.height},
 	), "\n")
 }
 
@@ -559,7 +571,7 @@ func (p nodesPage) modalLines() []string {
 			lines = append(lines, style.Render(mark+ui.PadRight(g.Name, 24))+
 				ui.HelpStyle.Render(strconv.Itoa(len(g.Nodes))+"节点"))
 		}
-		return append(lines, ui.HelpStyle.Render(" Enter 确认  esc 取消"))
+		return lines
 	}
 	return nil
 }
@@ -685,7 +697,5 @@ func (p nodesPage) rightLines() []string {
 				ui.Sparkline(series, w, 1, lipgloss.NewStyle().Foreground(ui.Green), ""))
 		}
 	}
-	lines = append(lines, "",
-		ui.HelpStyle.Render(" e 编辑   y 复制链接   G 加入群组   x 删除   T 单节点测速"))
 	return append(report, lines...)
 }

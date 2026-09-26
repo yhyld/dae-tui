@@ -542,10 +542,20 @@ func (p subsPage) View() string {
 		rvTitle = "节点" + p.nodeView.countTitle(len(p.visibleNodes()), len(p.subNodes[s.ID])) +
 			p.nodeView.sortTitle()
 	}
+	// Key hints ride the edges of the boxes they belong to: the left box
+	// carries the left-focused actions, the right box the node-list keys
+	// (and the delete confirmation's y/n while it is open); page-wide keys
+	// stay on the app frame.
+	rightFooter := "t 测速 · / 过滤 · o 排序"
+	if p.mode == 2 {
+		rightFooter = "y 确认 · n/esc 取消"
+	}
 	return strings.Join(ui.PaneRow(
-		ui.PaneSpec{Title: "订阅 (" + strconv.Itoa(len(p.subs)) + ")", Lines: p.leftLines(),
+		ui.PaneSpec{Title: "订阅 (" + strconv.Itoa(len(p.subs)) + ")",
+			Footer: "Tab 展开 · c 定时刷新 · x 删除", Lines: p.leftLines(),
 			Focused: p.focus == 0, W: p.leftW, H: p.height},
-		ui.PaneSpec{Title: rvTitle, Lines: p.rightLines(), Focused: p.focus == 1, W: p.rightW, H: p.height},
+		ui.PaneSpec{Title: rvTitle, Footer: rightFooter, Lines: p.rightLines(),
+			Focused: p.focus == 1, W: p.rightW, H: p.height},
 	), "\n")
 }
 
@@ -702,9 +712,6 @@ func (p subsPage) rightLines() []string {
 		head = append(head, ui.SelectedStyle.Render("信息 ")+ui.Truncate(firstLine(s.Info), max0(p.rightW-10)))
 	}
 	head = append(head, ui.SelectedStyle.Render("更新 ")+ui.TimeAgo(s.UpdatedAt))
-	if p.focus == 0 {
-		head = append(head, ui.HelpStyle.Render(" u 更新  e 编辑标签/链接  x 删除  c 定时刷新"))
-	}
 	head = append(head, "")
 
 	if !p.expanded {

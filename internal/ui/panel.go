@@ -13,7 +13,7 @@ import (
 // rows without ragged edges. focused lights up title and border for the
 // zone that currently owns the keyboard.
 func TitledBox(title string, focused bool, w int, lines []string) []string {
-	return titledBox(title, "", focused, w, lines)
+	return titledBox(title, "", "", focused, w, lines)
 }
 
 // TitledBoxRight is TitledBox with a second, right-aligned segment in the
@@ -21,10 +21,17 @@ func TitledBox(title string, focused bool, w int, lines []string) []string {
 // segment is dropped when the edge has no room for it; an edge must never
 // wrap onto a second row.
 func TitledBoxRight(title, right string, focused bool, w int, lines []string) []string {
-	return titledBox(title, right, focused, w, lines)
+	return titledBox(title, right, "", focused, w, lines)
 }
 
-func titledBox(title, right string, focused bool, w int, lines []string) []string {
+// TitledBoxFooter is TitledBox with key hints embedded in the bottom edge:
+// a box's own keys ride its own border (the same law that puts the page
+// keys on the app frame's bottom edge), instead of stealing a content row.
+func TitledBoxFooter(title, footer string, focused bool, w int, lines []string) []string {
+	return titledBox(title, "", footer, focused, w, lines)
+}
+
+func titledBox(title, right, footer string, focused bool, w int, lines []string) []string {
 	if w < 12 {
 		w = 12
 	}
@@ -57,7 +64,16 @@ func titledBox(title, right string, focused bool, w int, lines []string) []strin
 	for _, l := range lines {
 		out = append(out, border.Render("│ ")+PadRight(Truncate(l, inner), inner)+border.Render(" │"))
 	}
-	out = append(out, border.Render("╰"+strings.Repeat("─", w-2)+"╯"))
+	// ╰─ footer ────╯ — the footer may shrink, the edge never wraps.
+	bottom := border.Render("╰" + strings.Repeat("─", w-2) + "╯")
+	if footer != "" {
+		footer = Truncate(footer, w-6)
+		if fw := lipgloss.Width(footer); fw > 0 {
+			bottom = border.Render("╰─ ") + HelpStyle.Render(footer) +
+				border.Render(" "+strings.Repeat("─", w-5-fw)+"╯")
+		}
+	}
+	out = append(out, bottom)
 	return out
 }
 
@@ -71,6 +87,10 @@ type PaneSpec struct {
 	Focused bool
 	W       int
 	H       int
+	// Footer embeds the pane's own key hints in its bottom edge: keys that
+	// only work while this pane holds focus belong here, not in the app
+	// frame's edge (which carries page-wide and global keys only).
+	Footer string
 }
 
 // PaneRow builds a page's master/detail pair: both sides padded to the
@@ -100,7 +120,7 @@ func PaneRow(left, right PaneSpec) []string {
 	box := func(s PaneSpec, lines []string) []string {
 		padded := make([]string, n)
 		copy(padded, lines)
-		return TitledBox(strings.TrimSpace(s.Title), s.Focused, s.W, padded)
+		return titledBox(strings.TrimSpace(s.Title), "", s.Footer, s.Focused, s.W, padded)
 	}
 	return JoinBoxes(box(left, ll), box(right, rl))
 }

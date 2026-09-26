@@ -948,9 +948,25 @@ func (p groupsPage) View() string {
 			title += fmt.Sprintf(" 已选 %d ", n)
 		}
 	}
+	// Key hints ride the edge of the box they belong to: the left box lists
+	// group management, the right box lists in-list actions (and the active
+	// picker's keys while one is open); page-wide keys stay on the frame.
+	rightFooter := "Enter 开合分区 · space 标记 · x 移除 · / 过滤 · o 排序"
+	switch p.mode {
+	case pickSub:
+		rightFooter = "Enter 挂载 · j/k 移动 · esc 取消"
+	case pickNode:
+		rightFooter = "Enter 添加 · space 标记 · esc 取消"
+	case pickPolicy:
+		rightFooter = "Enter 确认 · j/k 移动 · esc 取消"
+	case pickDetach, pickDeleteGroup, pickRemoveNode, pickRemoveNodes:
+		rightFooter = "y 确认 · n/esc 取消"
+	}
 	return strings.Join(ui.PaneRow(
-		ui.PaneSpec{Title: leftTitle, Lines: left, Focused: p.focus == 0, W: p.leftW, H: p.height},
-		ui.PaneSpec{Title: title, Lines: right, Focused: p.focus == 1, W: p.rightW, H: p.height},
+		ui.PaneSpec{Title: leftTitle, Footer: "s/n 挂订阅/节点 · c/R/D/p 组", Lines: left,
+			Focused: p.focus == 0, W: p.leftW, H: p.height},
+		ui.PaneSpec{Title: title, Footer: rightFooter, Lines: right,
+			Focused: p.focus == 1, W: p.rightW, H: p.height},
 	), "\n")
 }
 
@@ -1032,7 +1048,7 @@ func (p groupsPage) rightLines() []string {
 			}
 			lines = append(lines, style.Render(mark+c.label))
 		}
-		return append(lines, ui.HelpStyle.Render(" Enter 确认  esc 取消"))
+		return lines
 	}
 
 	g := p.curGroup()
@@ -1186,7 +1202,7 @@ func (p groupsPage) candidateLines() []string {
 	if n := len(p.marked); n > 0 {
 		lines[0] += ui.OKStyle.Render(fmt.Sprintf("  已选 %d（Enter 全部添加）", n))
 	}
-	rowsH := max0(p.height - 5 - len(lines))
+	rowsH := max0(p.height - 3 - len(lines))
 	start := 0
 	if p.pickCursor >= rowsH {
 		start = p.pickCursor - rowsH + 1
@@ -1210,7 +1226,7 @@ func (p groupsPage) candidateLines() []string {
 		lines = append(lines, style.Render(mark+ui.PadRight(ui.SpaceAfterFlag(r.node.Name), max0(p.rightW-34)))+tick+
 			ui.HelpStyle.Render(ui.PadRight(src, 16)+r.node.Protocol))
 	}
-	return append(lines, ui.HelpStyle.Render(" Enter 添加  space 标记  esc 取消"))
+	return lines
 }
 
 func (p groupsPage) pickerLines(title string, rows [][2]string, cursor int, busy bool) []string {
@@ -1229,7 +1245,7 @@ func (p groupsPage) pickerLines(title string, rows [][2]string, cursor int, busy
 		}
 		lines = append(lines, style.Render(mark+ui.PadRight(r[0], 28))+ui.HelpStyle.Render(r[1]))
 	}
-	return append(lines, ui.HelpStyle.Render(" Enter 确认  esc 取消"))
+	return lines
 }
 
 // subTotal returns a subscription's total node count from the global list.

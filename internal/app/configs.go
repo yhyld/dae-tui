@@ -831,9 +831,23 @@ func (p configsPage) View(modified bool) string {
 		h--
 		banner = ui.ErrorStyle.Render(" ⚠ 运行配置与选中项不一致（A 应用 / 首页 o 重启）")
 	}
+	// Key hints ride the edges of the boxes they belong to: the left box
+	// lists profile management, the right box the content view's keys (and
+	// the open modal's keys); page-wide keys stay on the app frame.
+	rightFooter := "j/k 滚动"
+	switch p.mode {
+	case 1:
+		rightFooter = "Enter 编辑 · j/k 移动 · esc 取消"
+	case 5:
+		rightFooter = "y 确认 · n/esc 取消"
+	case 6:
+		rightFooter = "y 应用 · n/esc 取消 · j/k 滚动"
+	}
 	body := strings.Join(ui.PaneRow(
-		ui.PaneSpec{Title: "配置方案", Lines: p.leftLines(), Focused: p.focus == 0, W: p.leftW, H: h},
-		ui.PaneSpec{Title: "内容", Lines: p.rightLines(), Focused: p.focus == 1, W: p.rightW, H: h},
+		ui.PaneSpec{Title: "配置方案", Footer: "Enter 选择 · e 编辑 · c/R/D 管理",
+			Lines: p.leftLines(), Focused: p.focus == 0, W: p.leftW, H: h},
+		ui.PaneSpec{Title: "内容", Footer: rightFooter, Lines: p.rightLines(),
+			Focused: p.focus == 1, W: p.rightW, H: h},
 	), "\n")
 	if banner != "" {
 		body = banner + "\n" + body
@@ -853,8 +867,8 @@ func (p configsPage) modalLines() []string {
 		lines := []string{ui.TitleStyle.Render(" 选择要修改的字段") +
 			ui.HelpStyle.Render(fmt.Sprintf("  (%d)", len(fields)))}
 		// Window the picker: a config exposes every global field, far more
-		// than fit on screen.
-		rowsH := max0(p.height - 6)
+		// than fit on screen (its Enter/esc hints ride the box's footer).
+		rowsH := max0(p.height - 4)
 		start := 0
 		if p.pickCursor >= rowsH {
 			start = p.pickCursor - rowsH + 1
@@ -885,7 +899,7 @@ func (p configsPage) modalLines() []string {
 		if start > 0 || end < len(fields) {
 			lines = append(lines, ui.HelpStyle.Render(fmt.Sprintf(" … %d-%d / %d，j/k 滚动", start+1, end, len(fields))))
 		}
-		return append(lines, ui.HelpStyle.Render(" Enter 编辑  esc 取消"))
+		return lines
 	case 5: // delete confirm
 		if r := p.curRow(); r != nil {
 			it := p.item(*r)
@@ -925,7 +939,8 @@ func (p configsPage) modalLines() []string {
 		}
 		// Window the diff: a large edit can easily exceed the pane, and the
 		// clamp is best-effort (the stored scroll is re-based on entry).
-		rowsH := max0(p.height - 6)
+		// The decision box above costs 6 bordered lines of the h-2 budget.
+		rowsH := max0(p.height - 8)
 		if p.scroll > max0(len(lines)-rowsH) {
 			p.scroll = max0(len(lines) - rowsH)
 		}

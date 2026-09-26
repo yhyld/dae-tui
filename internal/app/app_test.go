@@ -2154,7 +2154,7 @@ func TestHomeGroupRowJump(t *testing.T) {
 		t.Fatalf("home should list the groups:\n%s", v)
 	}
 	m, _ = m.Update(key("tab")) // focus the group list
-	if v := m.View(); !strings.Contains(v, "Enter 跳到群组页并展开该组") {
+	if v := m.View(); !strings.Contains(v, "Enter 跳群组页并展开") {
 		t.Fatalf("group-list focus hint missing:\n%s", v)
 	}
 	m, _ = m.Update(key("j")) // cursor onto the second group (direct)
@@ -2828,7 +2828,7 @@ func TestFrameFillsTerminal(t *testing.T) {
 		}
 		// The help keys ride the bottom edge itself, never pushed off by
 		// page content; the tabs ride the header box's top edge (row 1).
-		if !strings.Contains(lines[sz.h-1], "j/k 移动") {
+		if !strings.Contains(lines[sz.h-1], "Tab 切栏") {
 			t.Fatalf("%dx%d: help keys not riding the bottom edge:\n%s", sz.w, sz.h, v)
 		}
 		if !strings.Contains(lines[1], "群组") {
