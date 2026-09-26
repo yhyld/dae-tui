@@ -15,11 +15,11 @@ import (
 	"dae-tui/internal/ui"
 )
 
-// groupsPage: master-detail. Left pane lists groups only (collapsed by
-// default); the right pane shows the selected group's detail — attached
-// subscriptions with their matched nodes, then manually added nodes — with
-// its own cursor and scroll window. Tab/l expands (focus right), h/esc
-// returns to the group list.
+// groupsPage: master-detail. Left pane lists groups; the right column is
+// two stacked boxes — the selected group's info on top, its attached
+// subscriptions with matched nodes and then manually added nodes below,
+// with their own cursor and scroll window. Tab/l moves focus to the right
+// column, h/esc returns to the group list.
 type groupsPage struct {
 	groups []driver.Group
 	subs   []driver.Subscription
@@ -29,9 +29,8 @@ type groupsPage struct {
 	// confirmations must name them.
 	refs map[string][]string
 
-	gi       int  // left cursor: group index
-	focus    int  // 0 left, 1 right
-	expanded bool // detail shown only after the user expands
+	gi    int // left cursor: group index
+	focus int // 0 left, 1 right (detail column)
 	// per-section expansion in the right pane (default collapsed). Keyed by
 	// subscription ID, not by position: a refresh can reorder the group's
 	// subscriptions, and an index key would open someone else's section.
@@ -176,7 +175,8 @@ func (p *groupsPage) rebuild() {
 	}
 }
 
-// collapseSections resets per-section expansion (group change / collapse).
+// collapseSections resets per-section expansion (a group change is what
+// calls it: leaving the detail column keeps the sections as they are).
 func (p *groupsPage) collapseSections() {
 	p.subOpen = map[string]bool{}
 	p.directOpen = false
@@ -369,8 +369,8 @@ func (p *groupsPage) testIDsFor(onlySelected bool) []string {
 // visibleLatencyIDs lists the nodes whose latency the detail pane renders:
 // the node rows of the open sections (the filtered set while a filter is
 // active), or the picker's candidates while the add-node picker is open —
-// its sort-by-latency order reads the same table. A collapsed detail and the
-// other modals show no latency, so they poll nothing.
+// its sort-by-latency order reads the same table. The other modals show no
+// latency, so they poll nothing.
 func (p *groupsPage) visibleLatencyIDs() []string {
 	if p.mode == pickNode {
 		rows := p.visibleCandidates()
@@ -380,7 +380,7 @@ func (p *groupsPage) visibleLatencyIDs() []string {
 		}
 		return ids
 	}
-	if p.mode != pickNone || !p.expanded {
+	if p.mode != pickNone {
 		return nil
 	}
 	seen := map[string]bool{}
@@ -464,7 +464,6 @@ func (p *groupsPage) pickableSubs(g *driver.Group) []driver.Subscription {
 func (p *groupsPage) selectGroupAt(next int) {
 	p.gi = next
 	p.rc = 0
-	p.expanded = false
 	p.collapseSections()
 	p.rebuild()
 }
@@ -514,13 +513,20 @@ func (p *groupsPage) leftClick(row int) {
 	p.selectGroupAt(i)
 }
 
-// rightClick puts the right-pane cursor on the row-th displayed detail row.
+// rightClick puts the right-pane cursor on the row-th displayed detail row,
+// mirroring bodyLines' scroll window so the click lands on the row the user
+// saw.
 func (p *groupsPage) rightClick(row int) {
-	if p.mode != pickNone || !p.expanded || row >= len(p.rows) {
+	if p.mode != pickNone {
 		return
 	}
-	p.rc = row
 	p.focus = 1
+	_, inner := stackedDetail(len(p.infoLines()), p.height)
+	start, _ := p.rowsWindow(inner)
+	i := start + row
+	if i >= 0 && i < len(p.rows) {
+		p.rc = i
+	}
 }
 
 func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
@@ -579,12 +585,9 @@ func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		case "G":
 			selectGroup(max0(len(p.groups) - 1))
 		case "tab", "l", "right", "enter":
+			// The detail column is always rendered; this just moves focus.
 			if len(p.groups) > 0 {
-				p.expanded = true
-				p.rebuild()
-				if len(p.rows) > 0 {
-					p.focus = 1
-				}
+				p.focus = 1
 			}
 		case "s":
 			if !p.caps.Subscriptions {
@@ -657,9 +660,10 @@ func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	case "G":
 		p.rc = len(p.rows) - 1
 	case "tab", "h", "left", "esc":
+		// Leaving the detail keeps the sections as they are: the column
+		// stays visible, and collapsing it under the user's eyes would read
+		// as data loss. A group change is what resets sections (and marks).
 		p.focus = 0
-		p.expanded = false
-		p.collapseSections()
 	case "enter", "l", "right":
 		r := p.cur()
 		if r == nil {
@@ -925,12 +929,12 @@ func (p *groupsPage) candidateRows() []candidateRow {
 }
 
 func (p groupsPage) View() string {
-	// The page is a dual-box row (left list + right detail) built by
-	// PaneRow — the same grid language as the home page's zones. Load
-	// failures and the empty state stay inside the left box so the layout
-	// never collapses to a bare line.
+	// The page is a master/detail row whose detail side is two stacked
+	// boxes (info on top, sections below), built by PaneRowColumn — the
+	// same grid language as the home page's zones. Load failures and the
+	// empty state stay inside the left box so the layout never collapses to
+	// a bare line.
 	left := p.leftLines()
-	right := p.rightLines()
 	leftTitle := fmt.Sprintf("路由组 (%d)", len(p.groups))
 	if p.err != nil {
 		left = []string{ui.ErrorStyle.Render("✗ 加载路由组失败: " + shortErr(p.err))}
@@ -941,15 +945,19 @@ func (p groupsPage) View() string {
 			left = []string{ui.HelpStyle.Render("无路由组（在 daed 中创建组后刷新）")}
 		}
 	}
-	var title string
+	info := p.infoLines()
+	topH, bottomInner := stackedDetail(len(info), p.height)
+	body := p.bodyLines(bottomInner)
+	infoTitle, bodyTitle := "群组", "订阅与节点"
 	if g := p.curGroup(); g != nil {
-		title = fmt.Sprintf(" %s · %s ", g.Name, policyLabel(g)) + p.nodeView.sortTitle()
+		infoTitle = g.Name
+		bodyTitle += p.nodeView.sortTitle()
 		if n := len(p.markedIDs()); n > 0 {
-			title += fmt.Sprintf(" 已选 %d ", n)
+			bodyTitle += fmt.Sprintf(" · 已选 %d", n)
 		}
 	}
 	// Key hints ride the edge of the box they belong to: the left box lists
-	// group management, the right box lists in-list actions (and the active
+	// group management, the bottom box lists in-list actions (and the active
 	// picker's keys while one is open); page-wide keys stay on the frame.
 	rightFooter := "Enter 开合分区 · space 标记 · x 移除 · / 过滤 · o 排序"
 	switch p.mode {
@@ -962,11 +970,12 @@ func (p groupsPage) View() string {
 	case pickDetach, pickDeleteGroup, pickRemoveNode, pickRemoveNodes:
 		rightFooter = "y 确认 · n/esc 取消"
 	}
-	return strings.Join(ui.PaneRow(
+	return strings.Join(ui.PaneRowColumn(
 		ui.PaneSpec{Title: leftTitle, Footer: "s/n 挂订阅/节点 · c/R/D/p 组", Lines: left,
 			Focused: p.focus == 0, W: p.leftW, H: p.height},
-		ui.PaneSpec{Title: title, Footer: rightFooter, Lines: right,
-			Focused: p.focus == 1, W: p.rightW, H: p.height},
+		ui.PaneSpec{Title: infoTitle, Lines: info, W: p.rightW, H: topH},
+		ui.PaneSpec{Title: bodyTitle, Footer: rightFooter, Lines: body,
+			Focused: p.focus == 1, W: p.rightW},
 	), "\n")
 }
 
@@ -999,12 +1008,49 @@ func (p groupsPage) leftLines() []string {
 	return lines
 }
 
-func (p groupsPage) rightLines() []string {
+// infoLines is the right column's top box: the selected group's identity
+// card — policy, membership, and which routing profiles reference it (those
+// break silently when the group is renamed or deleted).
+func (p groupsPage) infoLines() []string {
+	g := p.curGroup()
+	if g == nil {
+		return []string{ui.HelpStyle.Render("（无组）")}
+	}
+	lines := []string{
+		ui.SelectedStyle.Render("策略  ") + policyLabel(g),
+		ui.SelectedStyle.Render("成员  ") + fmt.Sprintf("%d（订阅挂载 %d 个，直接挂载 %d 个）",
+			len(g.Members()), len(g.Subscriptions), len(g.Nodes)),
+	}
+	if note := p.refNote(g.Name); note != "" {
+		lines = append(lines, ui.SelectedStyle.Render("引用  ")+ui.HelpStyle.Render(note))
+	}
+	return lines
+}
+
+// rowsWindow returns the scroll window bodyLines renders the detail rows
+// with, so rightClick can map a displayed row back to its index.
+func (p groupsPage) rowsWindow(inner int) (start, rowsH int) {
+	head := 0
+	if p.nodeView.prompt() != "" {
+		head = 1
+	}
+	rowsH = max0(inner - head)
+	start = 0
+	if p.rc >= rowsH {
+		start = p.rc - rowsH + 1
+	}
+	return start, rowsH
+}
+
+// bodyLines is the right column's bottom box: the group's subscription and
+// direct-node sections (or the active picker/confirmation in their place).
+// inner is the box's content height; the row list windows itself to it.
+func (p groupsPage) bodyLines(inner int) []string {
 	if p.mode == pickSub {
 		return p.pickerLines("选择要添加到组的订阅", p.subPickRows(), p.pickCursor, false)
 	}
 	if p.mode == pickNode {
-		return p.candidateLines()
+		return p.candidateLines(inner)
 	}
 	if p.mode == pickDetach {
 		if r := p.cur(); r != nil && r.gi < len(p.groups) && r.si < len(p.groups[r.gi].Subscriptions) {
@@ -1055,19 +1101,6 @@ func (p groupsPage) rightLines() []string {
 	if g == nil {
 		return []string{ui.HelpStyle.Render("（无组）")}
 	}
-	if !p.expanded && p.nodeView.filter() == "" {
-		direct := len(g.Nodes)
-		lines := []string{
-			ui.HelpStyle.Render(fmt.Sprintf("策略   ") + policyLabel(g)),
-			ui.HelpStyle.Render(fmt.Sprintf("成员   %d（订阅挂载 %d 个，直接挂载 %d 个）", len(g.Members()), len(g.Subscriptions), direct)),
-		}
-		if note := p.refNote(g.Name); note != "" {
-			lines = append(lines, ui.HelpStyle.Render(" 引用   "+note))
-		}
-		lines = append(lines, "",
-			ui.SelectedStyle.Render("按 Tab/l/Enter 展开查看订阅与节点"))
-		return lines
-	}
 	if len(p.rows) == 0 {
 		if p.nodeView.filter() != "" {
 			return []string{ui.HelpStyle.Render(p.nodeView.prompt()),
@@ -1076,17 +1109,11 @@ func (p groupsPage) rightLines() []string {
 		return []string{ui.HelpStyle.Render(" 组为空：按 s 挂订阅 / n 加手动节点")}
 	}
 
-	var head []string
+	start, rowsH := p.rowsWindow(inner)
+	lines := make([]string, 0, rowsH)
 	if prompt := p.nodeView.prompt(); prompt != "" {
-		head = append(head, ui.HelpStyle.Render(prompt))
+		lines = append(lines, ui.HelpStyle.Render(prompt))
 	}
-	rowsH := max0(p.height - 2 - len(head))
-	start := 0
-	if p.rc >= rowsH {
-		start = p.rc - rowsH + 1
-	}
-	lines := make([]string, 0, rowsH+len(head))
-	lines = append(lines, head...)
 	for i := start; i < len(p.rows) && i < start+rowsH; i++ {
 		lines = append(lines, p.renderRow(g, i))
 	}
@@ -1181,7 +1208,7 @@ func (p *groupsPage) visibleCandidates() []candidateRow {
 	return out
 }
 
-func (p groupsPage) candidateLines() []string {
+func (p groupsPage) candidateLines(inner int) []string {
 	title := " 选择要添加到组的节点" + ui.HelpStyle.Render("  (手动 + 各订阅)")
 	lines := []string{ui.TitleStyle.Render(title)}
 	if p.candBusy {
@@ -1202,7 +1229,7 @@ func (p groupsPage) candidateLines() []string {
 	if n := len(p.marked); n > 0 {
 		lines[0] += ui.OKStyle.Render(fmt.Sprintf("  已选 %d（Enter 全部添加）", n))
 	}
-	rowsH := max0(p.height - 3 - len(lines))
+	rowsH := max0(inner - len(lines))
 	start := 0
 	if p.pickCursor >= rowsH {
 		start = p.pickCursor - rowsH + 1

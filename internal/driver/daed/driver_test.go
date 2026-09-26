@@ -1352,3 +1352,31 @@ func TestLogoutClearsCredentials(t *testing.T) {
 		t.Fatalf("HealthCheck: %v", err)
 	}
 }
+
+// Array fields split on the comma only, matching the UI's field validator:
+// an element containing a space survives, a blank value is an empty list
+// (never nil — that would marshal as null instead of []).
+func TestTypedValueArray(t *testing.T) {
+	f := driver.ConfigField{Name: "lanInterface", Type: "array"}
+	v, err := typedValue(f, "eth0, wlan0")
+	if err != nil {
+		t.Fatalf("typedValue: %v", err)
+	}
+	if !reflect.DeepEqual(v, []string{"eth0", "wlan0"}) {
+		t.Fatalf("value = %#v, want [eth0 wlan0]", v)
+	}
+	v, err = typedValue(f, "a b,c")
+	if err != nil {
+		t.Fatalf("typedValue: %v", err)
+	}
+	if !reflect.DeepEqual(v, []string{"a b", "c"}) {
+		t.Fatalf("value = %#v, want [a b c-kept]", v)
+	}
+	v, err = typedValue(f, "  ")
+	if err != nil {
+		t.Fatalf("typedValue: %v", err)
+	}
+	if !reflect.DeepEqual(v, []string{}) {
+		t.Fatalf("blank value = %#v, want an empty non-nil slice", v)
+	}
+}

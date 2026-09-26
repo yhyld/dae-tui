@@ -905,7 +905,7 @@ func (p homePage) bodyLines(status driver.Status) ([]string, int) {
 	}
 	groupFooter := "Tab 切到组列表 · Enter 跳群组页"
 	if p.groupFocus {
-		groupFooter = "Enter 跳群组页并展开 · Tab 返回路由切换"
+		groupFooter = "Enter 跳群组页 · Tab 返回路由切换"
 	}
 	groupStart := len(lines) + 1 // under the box's top border
 	addZone(ui.TitledBoxFooter("各组当前节点", groupFooter, p.groupFocus, full, groupRows))
@@ -927,9 +927,9 @@ func (p homePage) bodyLines(status driver.Status) ([]string, int) {
 // one cell in, on the badge's text baseline; the routing continuation
 // aligns its label under `config`.
 func (p homePage) proxyRows(status driver.Status, w int) []string {
-	badge := lipgloss.NewStyle().Bold(true).
-		Foreground(lipgloss.Color("15")).Background(ui.Green).
-		Padding(0, 1).Render("● 代理运行中")
+	// Solid fills are reserved for anomalies: running is a green dot with
+	// bold text, stopped keeps the loud red chip.
+	badge := " " + ui.OKStyle.Render("● ") + lipgloss.NewStyle().Bold(true).Render("代理运行中")
 	if !status.Running {
 		badge = lipgloss.NewStyle().Bold(true).
 			Foreground(lipgloss.Color("15")).Background(ui.Red).
@@ -949,9 +949,6 @@ func (p homePage) proxyRows(status driver.Status, w int) []string {
 			" "+ui.HelpStyle.Render("方案 config  ")+name(p.cfgName),
 			"      "+ui.HelpStyle.Render("dns     ")+name(p.dnsName),
 			"      "+ui.HelpStyle.Render("routing ")+name(p.routingName))
-	}
-	if status.Modified {
-		rows = append(rows, " "+ui.ErrorStyle.Render("⚠ 配置改动未应用（A 应用）"))
 	}
 	return rows
 }

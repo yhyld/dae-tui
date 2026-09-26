@@ -12,14 +12,14 @@ import (
 	"dae-tui/internal/ui"
 )
 
-// subsPage: master-detail. Left lists subscriptions; the right pane shows
-// the selected subscription's metadata and its full node list (fetched on
-// selection, cached), with a node cursor for latency testing.
+// subsPage: master-detail. Left lists subscriptions; the right column is
+// two stacked boxes — the selected subscription's metadata on top, its
+// full node list below (fetched on selection, cached), with a node cursor
+// for latency testing.
 type subsPage struct {
-	subs     []driver.Subscription
-	sel      int
-	focus    int  // 0 left, 1 right (node list)
-	expanded bool // fetch/show nodes only after expanding
+	subs  []driver.Subscription
+	sel   int
+	focus int // 0 left, 1 right (node list)
 
 	subNodes map[string][]driver.Node
 	loading  string // subID being fetched
@@ -171,10 +171,12 @@ func (p *subsPage) cur() *driver.Subscription {
 }
 
 // ensureNodes returns a fetch command when the selected subscription's
-// nodes are not cached yet (or were just invalidated by an update).
+// nodes are not cached yet (or were just invalidated by an update). The
+// node list is always visible, so plain selection already fetches; any
+// caller is safe — the cache and loading state decide.
 func (p *subsPage) ensureNodes(d driver.Driver) tea.Cmd {
 	s := p.cur()
-	if s == nil || !p.expanded {
+	if s == nil {
 		return nil
 	}
 	if _, ok := p.subNodes[s.ID]; ok || p.loading == s.ID {
@@ -257,6 +259,34 @@ func (p *subsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		if s := p.cur(); s != nil && s.Link != "" {
 			return osc52CopyCmd(s.Link)
 		}
+	case "t":
+		// The node list is always on screen, so `t` probes exactly what it
+		// shows — the filtered, sorted view — from either focus.
+		if !p.caps.TestLatency {
+			return unsupportedCmd("测速")
+		}
+		nodes := p.visibleNodes()
+		ids := make([]string, 0, len(nodes))
+		for i, n := range nodes {
+			if i >= 500 {
+				break
+			}
+			ids = append(ids, n.ID)
+		}
+		if len(ids) == 0 {
+			return nil
+		}
+		p.testing = true
+		p.testStart = time.Now()
+		p.testIDs = ids
+		for _, id := range ids {
+			if l, ok := p.lat[id]; ok {
+				p.baseline[id] = l.TestedAt
+			} else {
+				p.baseline[id] = time.Time{}
+			}
+		}
+		return testLatencyCmd(d, ids)
 	}
 
 	if p.focus == 0 {
@@ -265,26 +295,26 @@ func (p *subsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			if p.sel < len(p.subs)-1 {
 				p.sel++
 				p.nc = 0
-				p.expanded = false
+				return p.ensureNodes(d)
 			}
 		case "k", "up":
 			if p.sel > 0 {
 				p.sel--
 				p.nc = 0
-				p.expanded = false
+				return p.ensureNodes(d)
 			}
 		case "g":
 			p.sel = 0
 			p.nc = 0
-			p.expanded = false
+			return p.ensureNodes(d)
 		case "G":
 			p.sel = len(p.subs) - 1
 			p.nc = 0
-			p.expanded = false
+			return p.ensureNodes(d)
 		case "tab", "l", "right", "enter":
+			// The node list is always rendered; this just moves focus.
 			if s := p.cur(); s != nil {
 				p.focus = 1
-				p.expanded = true
 				return p.ensureNodes(d)
 			}
 		case "x":
@@ -305,7 +335,7 @@ func (p *subsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		return nil
 	}
 
-	// `t` probes exactly what is on screen: the filtered, sorted view.
+	// Right-pane navigation over the node list.
 	nodes := p.visibleNodes()
 	switch msg.String() {
 	case "e":
@@ -329,32 +359,6 @@ func (p *subsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		p.nc = len(nodes) - 1
 	case "tab", "h", "left", "esc":
 		p.focus = 0
-		p.expanded = false
-	case "t":
-		if !p.caps.TestLatency {
-			return unsupportedCmd("测速")
-		}
-		ids := make([]string, 0, len(nodes))
-		for i, n := range nodes {
-			if i >= 500 {
-				break
-			}
-			ids = append(ids, n.ID)
-		}
-		if len(ids) == 0 {
-			return nil
-		}
-		p.testing = true
-		p.testStart = time.Now()
-		p.testIDs = ids
-		for _, id := range ids {
-			if l, ok := p.lat[id]; ok {
-				p.baseline[id] = l.TestedAt
-			} else {
-				p.baseline[id] = time.Time{}
-			}
-		}
-		return testLatencyCmd(d, ids)
 	}
 	return nil
 }
@@ -419,12 +423,9 @@ func (p *subsPage) visibleNodes() []driver.Node {
 	return p.nodeView.visible(p.curNodes(), p.lat)
 }
 
-// visibleLatencyIDs lists the nodes whose latency the right pane renders; a
-// collapsed subscription shows none.
+// visibleLatencyIDs lists the nodes whose latency the right column renders:
+// whatever the node list currently shows (nothing before it is fetched).
 func (p *subsPage) visibleLatencyIDs() []string {
-	if !p.expanded {
-		return nil
-	}
 	nodes := p.visibleNodes()
 	ids := make([]string, 0, len(nodes))
 	for _, n := range nodes {
@@ -532,30 +533,41 @@ func (p *subsPage) editFormKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 }
 
 func (p subsPage) View() string {
-	// The page is a dual-box row; in-pane modals (the delete confirmation)
-	// render inside the right box — the boxes always fill the page height,
-	// so anything appended below them would be pushed off screen.
-	rvTitle := "详情"
-	if p.mode == 2 {
-		rvTitle = "删除确认"
-	} else if s := p.cur(); s != nil && p.expanded {
-		rvTitle = "节点" + p.nodeView.countTitle(len(p.visibleNodes()), len(p.subNodes[s.ID])) +
-			p.nodeView.sortTitle()
+	// The page is a master/detail row whose detail side is two stacked
+	// boxes (subscription info on top, node list below), built by
+	// PaneRowColumn; the in-pane modal (the delete confirmation) renders in
+	// the bottom box — the boxes always fill the page height, so anything
+	// appended below them would be pushed off screen.
+	info := p.infoLines()
+	topH, bottomInner := stackedDetail(len(info), p.height)
+	body := p.bodyLines(bottomInner)
+	topTitle, bottomTitle := "订阅", "节点"
+	if s := p.cur(); s != nil {
+		if s.Tag != "" {
+			topTitle = s.Tag
+		}
+		if p.mode == 2 {
+			bottomTitle = "删除确认"
+		} else if all := p.subNodes[s.ID]; all != nil {
+			bottomTitle += p.nodeView.countTitle(len(p.visibleNodes()), len(all)) +
+				p.nodeView.sortTitle()
+		}
 	}
 	// Key hints ride the edges of the boxes they belong to: the left box
-	// carries the left-focused actions, the right box the node-list keys
+	// carries the left-focused actions, the bottom box the node-list keys
 	// (and the delete confirmation's y/n while it is open); page-wide keys
 	// stay on the app frame.
 	rightFooter := "t 测速 · / 过滤 · o 排序"
 	if p.mode == 2 {
 		rightFooter = "y 确认 · n/esc 取消"
 	}
-	return strings.Join(ui.PaneRow(
+	return strings.Join(ui.PaneRowColumn(
 		ui.PaneSpec{Title: "订阅 (" + strconv.Itoa(len(p.subs)) + ")",
-			Footer: "Tab 展开 · c 定时刷新 · x 删除", Lines: p.leftLines(),
+			Footer: "Tab 切栏 · c 定时刷新 · x 删除", Lines: p.leftLines(),
 			Focused: p.focus == 0, W: p.leftW, H: p.height},
-		ui.PaneSpec{Title: rvTitle, Footer: rightFooter, Lines: p.rightLines(),
-			Focused: p.focus == 1, W: p.rightW, H: p.height},
+		ui.PaneSpec{Title: topTitle, Lines: info, W: p.rightW, H: topH},
+		ui.PaneSpec{Title: bottomTitle, Footer: rightFooter, Lines: body,
+			Focused: p.focus == 1, W: p.rightW},
 	), "\n")
 }
 
@@ -639,31 +651,34 @@ func (p subsPage) leftLines() []string {
 		if i == p.sel {
 			cursor = ui.CursorStyle.Render("❯")
 		}
-		// A bare status string ("failed") never says why; the backend's
-		// info field does, so surface its first line under failed rows.
-		failed := s.Status == "" || containsFold(s.Status, "fail") || containsFold(s.Status, "error")
-		stStyle := ui.OKStyle
-		if failed {
+		// daed never writes the subscription's status field (created as ""
+		// and the refresh flow does not touch it), so emptiness is not a
+		// failure signal — render a dim dash and judge by freshness. A
+		// status that does name a failure gets its info first line below.
+		failed := containsFold(s.Status, "fail") || containsFold(s.Status, "error")
+		st, stStyle := s.Status, ui.OKStyle
+		switch {
+		case failed:
 			stStyle = ui.ErrorStyle
+		case st == "":
+			st, stStyle = "—", ui.HelpStyle
 		}
 		lines = append(lines, cursor+" "+ui.PadRight(s.Tag, max0(p.leftW-26))+
-			stStyle.Render(ui.Truncate(s.Status, 10))+
+			stStyle.Render(ui.Truncate(st, 10))+
 			ui.HelpStyle.Render(" "+strconv.Itoa(s.NodeCount)+"节点"))
 		if failed && s.Info != "" {
 			lines = append(lines, "    "+ui.ErrorStyle.Render(
 				ui.Truncate(firstLine(s.Info), max0(p.leftW-8))))
 		}
 	}
-	if p.busy {
-		lines = append(lines, ui.HelpStyle.Render("⏳ 操作进行中…"))
-	}
 	return lines
 }
 
-// leftClick selects the row-th displayed subscription, mirroring
-// leftLines' prefix and window math so the click lands on the row the user
-// saw.
-func (p *subsPage) leftClick(row int) {
+// leftClick selects the row-th displayed subscription, mirroring leftLines'
+// row layout (prefix lines, failed subs' info rows and the scroll window)
+// so the click lands on the row the user saw. Selecting also (re)fetches
+// the subscription's node list.
+func (p *subsPage) leftClick(row int, d driver.Driver) tea.Cmd {
 	prefix := 0
 	if !p.caps.Subscriptions {
 		prefix++
@@ -676,23 +691,76 @@ func (p *subsPage) leftClick(row int) {
 	}
 	row -= prefix
 	if row < 0 {
-		return
+		return nil
 	}
 	rowsH := max0(p.height - 2)
 	start := 0
 	if p.sel >= rowsH {
 		start = p.sel - rowsH + 1
 	}
-	i := start + row
-	if i < 0 || i >= len(p.subs) || i == p.sel {
-		return
+	// Walk the same rows leftLines renders: each sub has one row and a
+	// failed sub with an info line one more — clicking that info row
+	// selects the failed sub it describes.
+	i := start
+	for i < len(p.subs) {
+		s := p.subs[i]
+		if row == 0 {
+			break
+		}
+		row--
+		if (containsFold(s.Status, "fail") || containsFold(s.Status, "error")) && s.Info != "" {
+			if row == 0 {
+				break
+			}
+			row--
+		}
+		i++
+	}
+	if i >= len(p.subs) || i == p.sel {
+		return nil
 	}
 	p.sel = i
 	p.nc = 0
-	p.expanded = false
+	return p.ensureNodes(d)
 }
 
-func (p subsPage) rightLines() []string {
+// infoLines is the right column's top box: the subscription's metadata,
+// labels on a shared 6-cell column like every other detail pane.
+func (p subsPage) infoLines() []string {
+	s := p.cur()
+	if s == nil {
+		return []string{ui.HelpStyle.Render("（无订阅）")}
+	}
+	// daed never writes the status field (always ""), so emptiness renders
+	// as a dim dash; only a status naming a failure is red.
+	failed := containsFold(s.Status, "fail") || containsFold(s.Status, "error")
+	status := ui.OKStyle.Render(s.Status)
+	switch {
+	case failed:
+		status = ui.ErrorStyle.Render(s.Status)
+	case s.Status == "":
+		status = ui.HelpStyle.Render("—")
+	}
+	cron := onOff(s.CronEnable)
+	if s.CronExp != "" {
+		cron += ui.HelpStyle.Render(" (" + s.CronExp + ")")
+	}
+	lines := []string{
+		ui.SelectedStyle.Render("标签  ") + s.Tag,
+		ui.SelectedStyle.Render("状态  ") + status,
+		ui.SelectedStyle.Render("定时  ") + cron,
+		ui.SelectedStyle.Render("链接  ") + ui.Truncate(s.Link, max0(p.rightW-10)),
+	}
+	if s.Info != "" {
+		lines = append(lines, ui.SelectedStyle.Render("信息  ")+ui.Truncate(firstLine(s.Info), max0(p.rightW-10)))
+	}
+	return append(lines, ui.SelectedStyle.Render("更新  ")+ui.TimeAgo(s.UpdatedAt))
+}
+
+// bodyLines is the right column's bottom box: the subscription's node list
+// (or the delete confirmation in its place). inner is the box's content
+// height; the node list windows itself to it.
+func (p subsPage) bodyLines(inner int) []string {
 	if p.mode == 2 {
 		return p.modalLines() // delete confirmation
 	}
@@ -700,42 +768,25 @@ func (p subsPage) rightLines() []string {
 	if s == nil {
 		return []string{ui.HelpStyle.Render("（无订阅）")}
 	}
-	var head []string
-	cron := ui.HelpStyle.Render("   cron ") + onOff(s.CronEnable)
-	if s.CronExp != "" {
-		cron += ui.HelpStyle.Render(" (" + s.CronExp + ")")
-	}
-	head = append(head, ui.SelectedStyle.Render("标签 ")+s.Tag+cron)
-	head = append(head, ui.SelectedStyle.Render("状态 ")+s.Status)
-	head = append(head, ui.SelectedStyle.Render("链接 ")+ui.Truncate(s.Link, max0(p.rightW-10)))
-	if s.Info != "" {
-		head = append(head, ui.SelectedStyle.Render("信息 ")+ui.Truncate(firstLine(s.Info), max0(p.rightW-10)))
-	}
-	head = append(head, ui.SelectedStyle.Render("更新 ")+ui.TimeAgo(s.UpdatedAt))
-	head = append(head, "")
-
-	if !p.expanded {
-		return append(head, ui.SelectedStyle.Render("按 Tab/l/Enter 展开查看全部节点"))
-	}
 	if err := p.subErr[s.ID]; err != nil {
-		return append(head, ui.ErrorStyle.Render("✗ 拉取节点失败: "+shortErr(err)))
+		return []string{ui.ErrorStyle.Render("✗ 拉取节点失败: " + shortErr(err))}
 	}
 	all := p.subNodes[s.ID]
 	if p.loading == s.ID && all == nil {
-		return append(head, ui.HelpStyle.Render(" 拉取节点中…"))
+		return []string{ui.HelpStyle.Render(" 拉取节点中…")}
 	}
 	if len(all) == 0 {
-		return append(head, ui.HelpStyle.Render(" 无节点（u 更新订阅后重试）"))
+		return []string{ui.HelpStyle.Render(" 无节点（u 更新订阅后重试）")}
 	}
+	var lines []string
 	if prompt := p.nodeView.prompt(); prompt != "" {
-		head = append(head, ui.HelpStyle.Render(prompt))
+		lines = append(lines, ui.HelpStyle.Render(prompt))
 	}
 	nodes := p.visibleNodes()
 	if len(nodes) == 0 {
-		return append(head, ui.ErrorStyle.Render(" 没有匹配的节点（/ 重新编辑，框内 esc 清空）"))
+		return append(lines, ui.ErrorStyle.Render(" 没有匹配的节点（/ 重新编辑，框内 esc 清空）"))
 	}
-
-	rowsH := max0(p.height - len(head) - 3)
+	rowsH := max0(inner - len(lines))
 	start := 0
 	if p.nc >= rowsH {
 		start = p.nc - rowsH + 1
@@ -747,11 +798,11 @@ func (p subsPage) rightLines() []string {
 			cursor = ui.CursorStyle.Render("❯")
 		}
 		nameW := max0(p.rightW - 17 - latCellW(p.rightW-4))
-		head = append(head, cursor+" "+ui.PadRight(ui.SpaceAfterFlag(n.Name), nameW)+
+		lines = append(lines, cursor+" "+ui.PadRight(ui.SpaceAfterFlag(n.Name), nameW)+
 			ui.HelpStyle.Render(ui.PadRight(n.Protocol, 8))+
 			latencyCell(p.lat, n.ID, latCellW(p.rightW-4)))
 	}
-	return head
+	return lines
 }
 
 func onOff(b bool) string {

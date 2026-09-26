@@ -154,7 +154,7 @@ func (stubDriver) Traffic(_ context.Context, w, mp int) (driver.TrafficSnapshot,
 }
 func (stubDriver) ListSubscriptions(context.Context) ([]driver.Subscription, error) {
 	return []driver.Subscription{
-		{ID: "s1", Tag: "机场A", Link: "https://a.example/sub", Status: "updated", NodeCount: 24, CronExp: "0 */6 * * *", CronEnable: true, UpdatedAt: time.Now()},
+		{ID: "s1", Tag: "机场A", Link: "https://a.example/sub", Status: "", NodeCount: 24, CronExp: "0 */6 * * *", CronEnable: true, UpdatedAt: time.Now()}, // status is always "" on real daed
 		{ID: "s2", Tag: "机场B", Link: "https://b.example/sub", Status: "failed", Info: "HTTP 503", NodeCount: 0, UpdatedAt: time.Now().Add(-time.Hour)},
 	}, nil
 }
@@ -162,7 +162,13 @@ func (stubDriver) AddSubscription(_ context.Context, link, tag string) error { r
 func (stubDriver) UpdateSubscriptionCron(_ context.Context, id, cronExp string, enable bool) error {
 	return nil
 }
+
+// lastCreateSrc records the clone source most recently passed to
+// CreateProfile, so tests can assert which profile a `c` press clones.
+var lastCreateSrc *driver.ConfigItem
+
 func (stubDriver) CreateProfile(_ context.Context, section, name string, src *driver.ConfigItem) error {
+	lastCreateSrc = src
 	return nil
 }
 func (stubDriver) UpdateConfigFields(_ context.Context, id string, fields []driver.ConfigField) error {
@@ -289,7 +295,15 @@ func newTestModelWith(t *testing.T, drv driver.Driver) tea.Model {
 	m2, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
 	m2, _ = m2.Update(bootMsg{Users: 1, Status: driver.Status{Version: "v2.1.1", Running: true}})
 	m2, _ = m2.Update(groupsMsg{Groups: mustGroups(t)})
-	m2, _ = m2.Update(subsMsg{Subs: mustSubs(t)})
+	m2, cmd := m2.Update(subsMsg{Subs: mustSubs(t)})
+	// The subscription page's node list is always visible, so selecting a
+	// subscription fetches its nodes right away; run that fetch and feed the
+	// result back so the fixture matches the post-selection state.
+	if cmd != nil {
+		if msg := cmd(); msg != nil {
+			m2, _ = m2.Update(msg)
+		}
+	}
 	m2, _ = m2.Update(selectionsMsg{Sel: mustSel(t)})
 	m2, _ = m2.Update(trafficMsg{Snap: mustTraffic(t)})
 	m2, _ = m2.Update(manualNodesMsg{Nodes: mustManual(t)})
@@ -397,7 +411,7 @@ func TestRenderAllPages(t *testing.T) {
 		"2": "路由组",
 		"3": "订阅",
 		"4": "手动节点",
-		"5": "配置方案",
+		"5": "路由规则",
 	}
 	for _, pageKey := range []string{"1", "2", "3", "4", "5"} {
 		mm, _ := m.Update(key(pageKey))
@@ -443,19 +457,20 @@ func TestGroupsTreeNavigationAndSwitch(t *testing.T) {
 	m := newTestModel(t)
 	m, _ = m.Update(key("2"))
 	v := m.View()
-	// Collapsed by default: only group names on the left, no nodes.
-	for _, want := range []string{"proxy", "direct"} {
+	// The detail column is always visible: section headers show immediately
+	// (collapsed), node rows only after opening a section.
+	for _, want := range []string{"proxy", "direct", "订阅 机场A"} {
 		if !strings.Contains(v, want) {
-			t.Fatalf("left pane missing group %q:\n%s", want, v)
+			t.Fatalf("right column missing %q:\n%s", want, v)
 		}
 	}
-	for _, hidden := range []string{"东京-01", "订阅 机场A"} {
+	for _, hidden := range []string{"东京-01", "HK-02"} {
 		if strings.Contains(v, hidden) {
-			t.Fatalf("detail should be collapsed by default, found %q:\n%s", hidden, v)
+			t.Fatalf("sections should be collapsed by default, found %q:\n%s", hidden, v)
 		}
 	}
 
-	// Expand the group: right pane shows section HEADERS only (collapsed).
+	// Focus the detail column: same picture, the cursor now rides the rows.
 	m, _ = m.Update(key("l"))
 	v = m.View()
 	for _, want := range []string{"订阅 机场A", "直接添加的节点"} {
@@ -520,10 +535,14 @@ func TestGroupsTreeNavigationAndSwitch(t *testing.T) {
 		t.Fatal("t on sub row should fire a test")
 	}
 
-	// h collapses back to the group list.
+	// h returns focus to the group list; the detail column stays as it is —
+	// collapsing it under the user's eyes would read as data loss.
 	m, _ = m.Update(key("h"))
-	if v := m.View(); strings.Contains(v, "东京-01") {
-		t.Fatalf("detail should be collapsed again:\n%s", v)
+	if m.(Model).groups.focus != 0 {
+		t.Fatal("h should move focus back to the group list")
+	}
+	if v := m.View(); !strings.Contains(v, "东京-01") {
+		t.Fatalf("detail column should stay visible after h:\n%s", v)
 	}
 }
 
@@ -605,22 +624,16 @@ func TestGroupAttachDetachFlows(t *testing.T) {
 func TestSubsDetailPaneAndModal(t *testing.T) {
 	m := newTestModel(t)
 	m, _ = m.Update(key("3"))
-	// Expanding fires the node fetch for the selected subscription.
-	m, cmd := m.Update(key("l"))
-	if cmd == nil {
-		t.Fatal("expanding subscription should fetch its nodes")
-	}
-	if msg := cmd(); msg != nil {
-		m, _ = m.Update(msg) // subNodesMsg
-	}
+	// The node list was fetched on selection (the fixture ran that fetch)
+	// and renders without a separate expand step; the info box rides above.
 	v := m.View()
-	for _, want := range []string{"标签 机场A", "机场A-01", "机场A-02", "状态 updated"} {
+	for _, want := range []string{"标签  机场A", "机场A-01", "机场A-02", "状态  —"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("sub detail missing %q:\n%s", want, v)
 		}
 	}
 	// t tests the subscription's nodes.
-	m, cmd = m.Update(key("t"))
+	m, cmd := m.Update(key("t"))
 	if cmd == nil {
 		t.Fatal("t in detail pane should fire a test")
 	}
@@ -675,7 +688,7 @@ func TestGlobalApplyWorksFromAnyPage(t *testing.T) {
 	// On the groups page, A opens the global confirmation; y fires runCmd.
 	m, _ = m.Update(key("2"))
 	m, _ = m.Update(key("A"))
-	if v := m.View(); !strings.Contains(v, "确认应用当前选中") {
+	if v := m.View(); !strings.Contains(v, "确认重载") {
 		t.Fatalf("global apply confirmation missing:\n%s", v)
 	}
 	m, cmd := m.Update(key("y"))
@@ -806,7 +819,10 @@ func TestGroupReferenceWarnings(t *testing.T) {
 	// The configs page lists the referenced groups of a routing profile;
 	// dae built-ins are labeled, never flagged as missing.
 	m, _ = m.Update(key("5"))
-	m, _ = m.Update(key("G")) // last row: the routing profile
+	// Two tabs: 全局配置 → DNS → 路由规则 (each box's first item; Tab, not G,
+	// crosses sections now that j/k stay inside a box).
+	m, _ = m.Update(key("tab"))
+	m, _ = m.Update(key("tab"))
 	v := m.View()
 	if !strings.Contains(v, "引用组") || !strings.Contains(v, "proxy") {
 		t.Fatalf("routing references missing on configs page:\n%s", v)
@@ -1138,18 +1154,19 @@ func TestConfigsProfileManagement(t *testing.T) {
 	m := newTestModel(t)
 	m, _ = m.Update(key("5"))
 
-	// create in the dns section: two j's put the cursor on the DNS header.
-	m, _ = m.Update(key("j")) // c1
-	m, _ = m.Update(key("j")) // DNS 分区标题
+	// create in the dns section: Tab moves to the DNS box (cursor lands on
+	// its remembered item 默认DNS; rows are pure items — c1, d1, d2, r1).
+	m, _ = m.Update(key("tab"))
 	m, cmd := m.Update(key("c"))
 	if v := m.View(); !strings.Contains(v, "新建") {
 		t.Fatalf("create modal missing:\n%s", v)
 	}
 	// The hint must describe what CreateProfile really does: clone the
-	// selected profile of the section (the stub's selected dns has a body),
-	// not "created from the default template".
-	if v := m.View(); !strings.Contains(v, "复制当前选中") || strings.Contains(v, "默认模板") {
-		t.Fatalf("create hint should say it clones the selected profile:\n%s", v)
+	// profile under the cursor (the header row here means the section's
+	// selected profile, the stub's 默认DNS with a body), not "created from
+	// the default template".
+	if v := m.View(); !strings.Contains(v, "将复制「默认DNS」") || strings.Contains(v, "默认模板") {
+		t.Fatalf("create hint should say it clones the cursor profile:\n%s", v)
 	}
 	_ = cmd
 	m, _ = m.Update(key("n"))
@@ -1167,7 +1184,7 @@ func TestConfigsProfileManagement(t *testing.T) {
 		t.Fatalf("expected exactly one cursor marker, got %d:\n%s", n, m.View())
 	}
 
-	// rename (still on the DNS header → the section's selected profile).
+	// rename (the cursor is still on 默认DNS after the reload).
 	m, cmd = m.Update(key("R"))
 	if v := m.View(); !strings.Contains(v, "重命名") {
 		t.Fatalf("rename modal missing:\n%s", v)
@@ -1180,9 +1197,8 @@ func TestConfigsProfileManagement(t *testing.T) {
 		m, _ = m.Update(msg)
 	}
 
-	// delete with confirmation (the reloads leave the cursor on the DNS
-	// header; two j's move past the selected 默认DNS to 备用DNS).
-	m, _ = m.Update(key("j"))
+	// delete with confirmation (the reloads leave the cursor on 默认DNS;
+	// one j moves to 备用DNS).
 	m, _ = m.Update(key("j"))
 	m, _ = m.Update(key("D"))
 	if v := m.View(); !strings.Contains(v, "确认删除") {
@@ -1369,10 +1385,11 @@ func TestConfigsFieldFallbackLabel(t *testing.T) {
 func TestConfigsRoutingSummaryToggle(t *testing.T) {
 	m := newTestModel(t)
 	m, _ = m.Update(key("5"))
-	// Row order: 全局配置, c1, DNS, d1, d2, 路由规则, r1 — G jumps to the last
-	// row, the routing profile.
-	m, _ = m.Update(key("G"))
+	// Two tabs cycle to the routing box (cursor on its first item); l
+	// enters the right pane.
 	m, _ = m.Update(key("tab"))
+	m, _ = m.Update(key("tab"))
+	m, _ = m.Update(key("l"))
 	v := m.View()
 	if !strings.Contains(v, "路由规则 (DSL 原文)") {
 		t.Fatalf("raw DSL should be the default view:\n%s", v)
@@ -1399,10 +1416,10 @@ func TestConfigsRoutingSummaryToggle(t *testing.T) {
 	// The dns profile summarizes its upstreams the same way.
 	m, _ = m.Update(key("h"))
 	m, _ = m.Update(key("g"))
-	for i := 0; i < 3; i++ {
-		m, _ = m.Update(key("j")) // 全局配置 → c1 → DNS → d1
-	}
-	m, _ = m.Update(key("tab"))
+	// shift+Tab cycles back to the DNS box (cursor on its first item d1);
+	// l enters the right pane.
+	m, _ = m.Update(key("shift+tab"))
+	m, _ = m.Update(key("l"))
 	m, _ = m.Update(key("v"))
 	if v := m.View(); !strings.Contains(v, "alidns: udp://223.5.5.5:53") {
 		t.Fatalf("dns summary missing:\n%s", v)
@@ -1438,7 +1455,7 @@ func TestConfigsEditorDoneSubmitsChange(t *testing.T) {
 		t.Fatal("a validated edit should wait for the diff confirmation, not submit")
 	}
 	v := m.View()
-	for _, want := range []string{"确认应用更改", "upstream {}", "alidns"} {
+	for _, want := range []string{"确认提交更改", "upstream {}", "alidns"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("diff confirm missing %q:\n%s", want, v)
 		}
@@ -1497,11 +1514,9 @@ func TestConfigsEditorDoneSubmitsChange(t *testing.T) {
 func TestConfigsValidationRejectsBrokenDsl(t *testing.T) {
 	m := newTestModelWith(t, rejectingDriver{})
 	m, _ = m.Update(key("5"))
-	// Row order: 全局配置, c1, DNS, d1, d2, 路由规则, r1 — three j's put the
-	// cursor on d1, the profile that gets edited.
-	for i := 0; i < 3; i++ {
-		m, _ = m.Update(key("j"))
-	}
+	// Rows: c1, d1, d2, r1 — Tab moves to the DNS box and parks on d1, the
+	// profile that gets edited.
+	m, _ = m.Update(key("tab"))
 	// A short path (t.TempDir embeds the test name) so the assertion can
 	// check the whole path survives the detail pane.
 	tmp := filepath.Join(os.TempDir(), fmt.Sprintf("dae-tui-test-%d.dns", time.Now().UnixNano()))
@@ -1561,7 +1576,7 @@ func TestConfigsDetailPaneAndActions(t *testing.T) {
 	if msg := cmd(); msg != nil {
 		m, _ = m.Update(msg)
 	}
-	if v := m.View(); !strings.Contains(v, "配置方案") {
+	if v := m.View(); !strings.Contains(v, "全局配置") {
 		t.Fatalf("configs view broken:\n%s", v)
 	}
 }
@@ -1648,7 +1663,7 @@ func TestHomeRoutingPresetSwitch(t *testing.T) {
 	if mm, _ := m.Update(key("A")); mm.(Model).page != pageHome {
 		t.Fatal("page switched while a confirmation was open")
 	}
-	if v := m.View(); strings.Contains(v, "确认应用当前选中") {
+	if v := m.View(); strings.Contains(v, "确认重载") {
 		t.Fatalf("A fired while the preset confirmation was open:\n%s", v)
 	}
 
@@ -1880,11 +1895,7 @@ func TestNodeViewFilterAndSort(t *testing.T) {
 func TestSubsNodeFilterAndSort(t *testing.T) {
 	m := newTestModel(t)
 	m, _ = m.Update(key("3"))
-	m, cmd := m.Update(key("l")) // expand → fetch nodes
-	if cmd == nil {
-		t.Fatal("expanding should fetch nodes")
-	}
-	m, _ = m.Update(cmd()) // subNodesMsg
+	// The selected subscription's nodes were fetched on selection.
 	v := m.View()
 	for _, want := range []string{"机场A-01", "机场A-02"} {
 		if !strings.Contains(v, want) {
@@ -1917,7 +1928,7 @@ func TestSubsNodeFilterAndSort(t *testing.T) {
 
 	// t probes exactly the visible nodes.
 	lastTestIDs = nil
-	m, cmd = m.Update(key("t"))
+	m, cmd := m.Update(key("t"))
 	if cmd == nil {
 		t.Fatal("t should fire a test")
 	}
@@ -2068,11 +2079,7 @@ func TestGroupSectionExpansionFollowsSubscriptionID(t *testing.T) {
 func TestSubsNodeCacheSurvivesReload(t *testing.T) {
 	m := newTestModel(t)
 	m, _ = m.Update(key("3"))
-	m, cmd := m.Update(key("l")) // expand s1 → fetch its nodes
-	if cmd == nil {
-		t.Fatal("expanding subscription should fetch its nodes")
-	}
-	m, _ = m.Update(cmd())
+	// s1's nodes were fetched on selection (the fixture ran that fetch).
 	if n := len(m.(Model).subs.subNodes); n != 1 {
 		t.Fatalf("expected one cached node list, got %d", n)
 	}
@@ -2086,7 +2093,7 @@ func TestSubsNodeCacheSurvivesReload(t *testing.T) {
 		t.Fatalf("expanded nodes should render without a re-fetch:\n%s", v)
 	}
 	// An update invalidates just that subscription and re-fetches it.
-	m, cmd = m.Update(key("u"))
+	m, cmd := m.Update(key("u"))
 	if cmd == nil {
 		t.Fatal("u should fire subMutateCmd")
 	}
@@ -2096,6 +2103,42 @@ func TestSubsNodeCacheSurvivesReload(t *testing.T) {
 	}
 	if _, ok := m.(Model).subs.subNodes["s1"]; ok {
 		t.Fatal("the updated subscription's cache should be dropped")
+	}
+}
+
+// A mutation in flight shows the shared braille spinner in the header box's
+// top edge — like the latency-test indicator, not an hourglass in a pane.
+func TestBusyShowsHeaderSpinner(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("3"))
+	m, cmd := m.Update(key("u"))
+	if cmd == nil {
+		t.Fatal("u should fire the update mutation")
+	}
+	if v := m.View(); !strings.Contains(v, "处理中") {
+		t.Fatalf("header should show the busy spinner:\n%s", v)
+	}
+	m, _ = m.Update(cmd()) // subsMsg: the update completed
+	if v := m.View(); strings.Contains(v, "处理中") {
+		t.Fatalf("busy spinner should be gone after the update:\n%s", v)
+	}
+}
+
+// daed never writes the subscription status field, so empty must render as
+// a dim dash instead of reading as a failure; a status that does name a
+// failure keeps its red info line under the row.
+func TestSubsEmptyStatusNotFailed(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("3"))
+	v := m.View()
+	if !strings.Contains(v, "状态  —") {
+		t.Fatalf("empty status should render a dash in the info box:\n%s", v)
+	}
+	if !strings.Contains(v, "— 24节点") {
+		t.Fatalf("empty status should render a dash in the left row:\n%s", v)
+	}
+	if !strings.Contains(v, "HTTP 503") {
+		t.Fatalf("a genuinely failed subscription should keep its info line:\n%s", v)
 	}
 }
 
@@ -2146,14 +2189,15 @@ func TestTestWindowScales(t *testing.T) {
 }
 
 // Enter on a home-page group row jumps to the groups page with that group
-// expanded — the short path to switching a group's node.
+// selected and its detail column focused — the short path to switching a
+// group's node.
 func TestHomeGroupRowJump(t *testing.T) {
 	m := newTestModel(t)
 	if v := m.View(); !strings.Contains(v, "各组当前节点") {
 		t.Fatalf("home should list the groups:\n%s", v)
 	}
 	m, _ = m.Update(key("tab")) // focus the group list
-	if v := m.View(); !strings.Contains(v, "Enter 跳群组页并展开") {
+	if v := m.View(); !strings.Contains(v, "Enter 跳群组页") {
 		t.Fatalf("group-list focus hint missing:\n%s", v)
 	}
 	m, _ = m.Update(key("j")) // cursor onto the second group (direct)
@@ -2173,8 +2217,8 @@ func TestHomeGroupRowJump(t *testing.T) {
 	if !strings.Contains(v, "路由组") {
 		t.Fatalf("should land on the groups page:\n%s", v)
 	}
-	if !strings.Contains(v, "direct · 自动") {
-		t.Fatalf("the chosen group should be expanded:\n%s", v)
+	if !strings.Contains(v, "策略  自动") {
+		t.Fatalf("the chosen group's info should be shown:\n%s", v)
 	}
 	// Coming back home, tab/esc leave the group list without touching the
 	// routing picker.
@@ -2531,6 +2575,39 @@ func TestDiffLines(t *testing.T) {
 	}
 }
 
+// An oversized middle (a huge paste in the builtin editor) must not pay the
+// quadratic LCS table: the unchanged head/tail still frame the change and
+// the middle degrades to a wholesale replacement.
+func TestDiffLinesHugeEdit(t *testing.T) {
+	oldLines := make([]string, 0, 3201)
+	newLines := make([]string, 0, 3201)
+	for i := 0; i < 1600; i++ {
+		oldLines = append(oldLines, fmt.Sprintf("h%d", i))
+		newLines = append(newLines, fmt.Sprintf("h%d", i))
+	}
+	for i := 0; i < 1600; i++ { // middles too large to align pairwise
+		oldLines = append(oldLines, fmt.Sprintf("x%d", i))
+		newLines = append(newLines, fmt.Sprintf("y%d", i))
+	}
+	for i := 0; i < 1600; i++ {
+		oldLines = append(oldLines, fmt.Sprintf("t%d", i))
+		newLines = append(newLines, fmt.Sprintf("t%d", i))
+	}
+	lines := diffLines(strings.Join(oldLines, "\n"), strings.Join(newLines, "\n"))
+	var adds, dels int
+	for _, l := range lines {
+		switch l.kind {
+		case diffAdd:
+			adds++
+		case diffDel:
+			dels++
+		}
+	}
+	if adds != 1600 || dels != 1600 {
+		t.Fatalf("adds = %d, dels = %d, want 1600 and 1600", adds, dels)
+	}
+}
+
 // y copies through OSC 52; off a terminal the command reports the failure
 // instead of writing escape noise into a pipe.
 func TestClipboardCopyFeedback(t *testing.T) {
@@ -2608,20 +2685,13 @@ func TestLatencyPollScopedToVisibleNodes(t *testing.T) {
 		t.Fatalf("polled ids = %v, want only the matching node", lastLatencyIDs)
 	}
 
-	// Subs page polls only while a subscription is expanded.
+	// Subs page polls the selected subscription's node list — the list is
+	// always visible, so the poll does not wait for an expand.
 	m, _ = m.Update(key("3"))
-	if cmd := m.(Model).latencyPollCmd(); cmd != nil {
-		t.Fatal("a collapsed subscription should not poll")
-	}
-	m, cmd = m.Update(key("l"))
-	if cmd == nil {
-		t.Fatal("expanding should fetch the nodes")
-	}
-	m, _ = m.Update(cmd())
 	lastLatencyIDs = nil
 	cmd = m.(Model).latencyPollCmd()
 	if cmd == nil {
-		t.Fatal("an expanded subscription should poll its visible nodes")
+		t.Fatal("the subscription page should poll its visible nodes")
 	}
 	cmd()
 	if len(lastLatencyIDs) != 2 || lastLatencyIDs[0] != "x1" {
@@ -2961,6 +3031,34 @@ func TestMouseWheelScrollsLists(t *testing.T) {
 	}
 }
 
+// The wheel replays j/k, and a j/k on the subs page also fires the newly
+// selected subscription's node fetch: dropping that cmd left the pane stuck
+// on 拉取节点中 forever, because the loading flag never cleared.
+func TestSubsWheelFetchPropagates(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("3"))
+	if _, ok := m.(Model).subs.subNodes["s2"]; ok {
+		t.Fatal("s2 should not be fetched yet")
+	}
+	m2, cmd := m.Update(tea.MouseMsg{X: 40, Y: 10, Button: tea.MouseButtonWheelDown})
+	if cmd == nil {
+		t.Fatal("wheel down must propagate the node fetch cmd")
+	}
+	mm := m2.(Model)
+	if mm.subs.loading != "s2" {
+		t.Fatalf("loading = %q, want s2", mm.subs.loading)
+	}
+	if msg := cmd(); msg != nil {
+		m2, _ = m2.Update(msg)
+	}
+	if mm = m2.(Model); mm.subs.loading != "" {
+		t.Fatalf("loading should clear after the fetch, got %q", mm.subs.loading)
+	}
+	if _, ok := mm.subs.subNodes["s2"]; !ok {
+		t.Fatal("s2's nodes should be cached after the fetch")
+	}
+}
+
 func TestMouseSelectsRows(t *testing.T) {
 	m := newTestModel(t)
 	m, _ = m.Update(key("2"))
@@ -2970,6 +3068,33 @@ func TestMouseSelectsRows(t *testing.T) {
 	mm := m2.(Model)
 	if mm.groups.gi != 1 {
 		t.Fatalf("click on the second group row should select it, got gi=%d", mm.groups.gi)
+	}
+}
+
+// The configs left column stacks three section boxes of equal height; a
+// click must map through the box offsets (and each box's borders) onto the
+// right profile.
+func TestMouseSelectsConfigRows(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("5"))
+	// At 120×36 the page body is 30 rows: three boxes of 10, stacked from
+	// body row 0 (frame y=5). The DNS box spans body rows 10-19, its
+	// content starts at body row 11 (y=16): 默认DNS, then 备用DNS.
+	m2, _ := m.Update(mouseClick(5, 16))
+	mm := m2.(Model)
+	if mm.configs.cur != 1 {
+		t.Fatalf("click on 默认DNS should park the cursor there, cur=%d", mm.configs.cur)
+	}
+	m3, _ := m2.Update(mouseClick(5, 17))
+	mm = m3.(Model)
+	if mm.configs.cur != 2 {
+		t.Fatalf("click on 备用DNS should park the cursor there, cur=%d", mm.configs.cur)
+	}
+	// The routing box's top border (body row 20, y=25) is a no-op.
+	m4, _ := m3.Update(mouseClick(5, 25))
+	mm = m4.(Model)
+	if mm.configs.cur != 2 {
+		t.Fatalf("click on a box border must not move the cursor, cur=%d", mm.configs.cur)
 	}
 }
 
@@ -3047,7 +3172,7 @@ func TestLatencyBarsInNodeRows(t *testing.T) {
 	if !strings.Contains(v, ui.LatencyBar(88)) {
 		t.Fatalf("the 88ms node should carry its micro-bar:\n%s", v)
 	}
-	if strings.Contains(v, "█████") {
+	if strings.Contains(v, "⣿⣿⣿⣿⣿") {
 		t.Fatalf("no node here is fast enough for a full bar:\n%s", v)
 	}
 }
@@ -3164,7 +3289,7 @@ func TestFormsFloatOverPage(t *testing.T) {
 	m, _ = m.Update(key("3"))
 	m, _ = m.Update(key("n")) // add-subscription form
 	v := m.View()
-	for _, want := range []string{"新增订阅", "标签 机场A", "状态 updated"} { // form + pane detail
+	for _, want := range []string{"新增订阅", "标签  机场A", "状态  —"} { // form + pane detail
 		if !strings.Contains(v, want) {
 			t.Fatalf("floating form should coexist with pane content, missing %q:\n%s", want, v)
 		}
@@ -3184,7 +3309,7 @@ func TestApplyConfirmFloats(t *testing.T) {
 	m, _ = m.Update(key("1"))
 	m, _ = m.Update(key("A"))
 	v := m.View()
-	if !strings.Contains(v, "确认应用当前选中") {
+	if !strings.Contains(v, "确认重载") {
 		t.Fatalf("apply confirmation missing:\n%s", v)
 	}
 	// The first body rows still show the page (the proxy zone), not the box.
@@ -3226,7 +3351,15 @@ func newBuiltinModel(t *testing.T, drv driver.Driver) tea.Model {
 	m2, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
 	m2, _ = m2.Update(bootMsg{Users: 1, Status: driver.Status{Version: "v2.1.1", Running: true}})
 	m2, _ = m2.Update(groupsMsg{Groups: mustGroups(t)})
-	m2, _ = m2.Update(subsMsg{Subs: mustSubs(t)})
+	m2, cmd := m2.Update(subsMsg{Subs: mustSubs(t)})
+	// The subscription page's node list is always visible, so selecting a
+	// subscription fetches its nodes right away; run that fetch and feed the
+	// result back so the fixture matches the post-selection state.
+	if cmd != nil {
+		if msg := cmd(); msg != nil {
+			m2, _ = m2.Update(msg)
+		}
+	}
 	m2, _ = m2.Update(selectionsMsg{Sel: mustSel(t)})
 	return m2
 }
@@ -3235,7 +3368,7 @@ func newBuiltinModel(t *testing.T, drv driver.Driver) tea.Model {
 func sectionRow(m tea.Model, section string) tea.Model {
 	mm := m.(Model)
 	for i, r := range mm.configs.rows {
-		if r.kind == rowItem && r.section == section {
+		if r.section == section {
 			mm.configs.cur = i
 			return mm
 		}
@@ -3285,7 +3418,7 @@ func TestBuiltinEditorFlow(t *testing.T) {
 	if mm.configs.mode != 6 {
 		t.Fatalf("a valid edit should reach the diff confirm, mode=%d", mm.configs.mode)
 	}
-	if v := m.View(); !strings.Contains(v, "确认应用更改") {
+	if v := m.View(); !strings.Contains(v, "确认提交更改") {
 		t.Fatalf("diff confirm missing:\n%s", v)
 	}
 
@@ -3319,6 +3452,200 @@ func TestBuiltinEditorValidationKeepsEditorOpen(t *testing.T) {
 	}
 	if v := m.View(); !strings.Contains(v, "校验未通过") && !strings.Contains(v, "mismatched input") {
 		t.Fatalf("the rejection should show inside the editor:\n%s", v)
+	}
+}
+
+// Editing several fields in a row is the common case: the picker must keep
+// its cursor across re-opens and stay open after a field submit, with the
+// cursor still on the field just edited.
+func TestConfigsFieldPickerKeepsCursorAndStaysOpen(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("5"))
+	m, _ = m.Update(key("e")) // picker opens on the config section
+	// orderedFields puts the preferred fields first: logLevel, lanInterface,
+	// then checkInterval — two j's park on it.
+	m, _ = m.Update(key("j"))
+	m, _ = m.Update(key("j"))
+	m, _ = m.Update(key("enter"))
+	mm := m.(Model)
+	if mm.configs.mode != 2 || mm.configs.editField.Name != "checkInterval" {
+		t.Fatalf("input should open on checkInterval, mode=%d field=%s",
+			mm.configs.mode, mm.configs.editField.Name)
+	}
+	for i := 0; i < 3; i++ {
+		m, _ = m.Update(key("backspace"))
+	}
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("45s")})
+	m, cmd := m.Update(key("enter"))
+	if cmd == nil {
+		t.Fatal("field enter should fire configFieldCmd")
+	}
+	for _, msg := range execCmds(cmd) {
+		m, _ = m.Update(msg)
+	}
+	mm = m.(Model)
+	if mm.configs.mode != 1 {
+		t.Fatalf("submit should stay in the picker, mode=%d", mm.configs.mode)
+	}
+	if mm.configs.pickCursor != 2 {
+		t.Fatalf("picker cursor = %d, want 2 (the field just edited)", mm.configs.pickCursor)
+	}
+	// Leaving and re-opening must not restart the hunt from the top.
+	m, _ = m.Update(key("esc"))
+	mm = m.(Model)
+	if mm.configs.mode != 0 {
+		t.Fatalf("esc should close the picker, mode=%d", mm.configs.mode)
+	}
+	m, _ = m.Update(key("e"))
+	if v := m.View(); !strings.Contains(v, "❯ 检查间隔") {
+		t.Fatalf("re-opened picker should keep the cursor position:\n%s", v)
+	}
+}
+
+// c must clone the profile under the cursor (a section header means its
+// selected one) — the same item e/R/D act on — not always the section's
+// selected profile.
+func TestConfigsCloneUsesCursorItem(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("5"))
+	// Rows: c1, d1, d2, r1 — Tab to the DNS box, then j within it parks on
+	// 备用DNS, which is not the section's selected profile.
+	m, _ = m.Update(key("tab"))
+	m, _ = m.Update(key("j"))
+	lastCreateSrc = nil
+	m, cmd := m.Update(key("c"))
+	if v := m.View(); !strings.Contains(v, "将复制「备用DNS」") {
+		t.Fatalf("create hint should name the cursor profile:\n%s", v)
+	}
+	m, _ = m.Update(key("n"))
+	m, _ = m.Update(key("x"))
+	m, cmd = m.Update(key("enter"))
+	if cmd == nil {
+		t.Fatal("create enter should fire profileMutateCmd")
+	}
+	if msg := cmd(); msg != nil {
+		m, _ = m.Update(msg)
+	}
+	if lastCreateSrc == nil || lastCreateSrc.Name != "备用DNS" {
+		t.Fatalf("clone src = %+v, want 备用DNS", lastCreateSrc)
+	}
+}
+
+// Tab cycles the three section boxes; j/k stay inside the active box and
+// each box remembers its own cursor.
+func TestConfigsTabSwitchesSections(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("5"))
+	// Rows: c1 | d1, d2 | r1. Tab: 全局配置 → DNS.
+	m, _ = m.Update(key("tab"))
+	mm := m.(Model)
+	if mm.configs.sec != 1 || mm.configs.cur != 1 {
+		t.Fatalf("tab should enter the DNS box on d1, sec=%d cur=%d", mm.configs.sec, mm.configs.cur)
+	}
+	// j moves inside the box and clamps at its last item.
+	m, _ = m.Update(key("j"))
+	if mm = m.(Model); mm.configs.cur != 2 {
+		t.Fatalf("j should reach 备用DNS, cur=%d", mm.configs.cur)
+	}
+	m, _ = m.Update(key("j"))
+	if mm = m.(Model); mm.configs.cur != 2 {
+		t.Fatalf("j must not leave the box, cur=%d", mm.configs.cur)
+	}
+	// Tab again → routing; coming back to DNS restores its cursor (d2).
+	m, _ = m.Update(key("tab"))
+	if mm = m.(Model); mm.configs.sec != 2 || mm.configs.cur != 3 {
+		t.Fatalf("tab should enter the routing box on r1, sec=%d cur=%d", mm.configs.sec, mm.configs.cur)
+	}
+	m, _ = m.Update(key("tab")) // wraps to 全局配置
+	m, _ = m.Update(key("tab")) // → DNS again
+	if mm = m.(Model); mm.configs.sec != 1 || mm.configs.cur != 2 {
+		t.Fatalf("the DNS box should remember its cursor, sec=%d cur=%d", mm.configs.sec, mm.configs.cur)
+	}
+	// shift+Tab cycles backwards.
+	m, _ = m.Update(key("shift+tab"))
+	if mm = m.(Model); mm.configs.sec != 0 {
+		t.Fatalf("shift+tab should cycle back to 全局配置, sec=%d", mm.configs.sec)
+	}
+	// The active box carries the footer hint.
+	if v := m.View(); !strings.Contains(v, "Tab 切区") {
+		t.Fatalf("the active box should carry the left footer:\n%s", v)
+	}
+}
+
+// The builtin editor holds the only copy of the edit until ctrl+s, so a
+// reflexive esc must arm a guard instead of discarding; the second esc
+// discards, and editing again disarms.
+func TestBuiltinEditorEscGuard(t *testing.T) {
+	m := newBuiltinModel(t, stubDriver{})
+	m, _ = m.Update(key("5"))
+	m = sectionRow(m, "routing")
+	m, _ = m.Update(key("e"))
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("\n# new rule")})
+	m, _ = m.Update(key("esc"))
+	mm := m.(Model)
+	if mm.configs.mode != 7 || !mm.configs.edEscArm {
+		t.Fatalf("first esc should arm the guard (mode=%d arm=%v)",
+			mm.configs.mode, mm.configs.edEscArm)
+	}
+	if v := m.View(); !strings.Contains(v, "再按一次 esc") {
+		t.Fatalf("armed guard should say how to proceed:\n%s", v)
+	}
+	// The user keeps typing instead: the guard disarms.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	if mm = m.(Model); mm.configs.edEscArm {
+		t.Fatal("editing should disarm the guard")
+	}
+	m, _ = m.Update(key("esc"))
+	if mm = m.(Model); mm.configs.mode != 7 || !mm.configs.edEscArm {
+		t.Fatalf("esc after editing should arm again (mode=%d arm=%v)",
+			mm.configs.mode, mm.configs.edEscArm)
+	}
+	m, _ = m.Update(key("esc"))
+	if mm = m.(Model); mm.configs.mode != 0 {
+		t.Fatalf("second esc should discard and close, mode=%d", mm.configs.mode)
+	}
+	// Unchanged content closes on the first esc, no guard.
+	m, _ = m.Update(key("e"))
+	m, _ = m.Update(key("esc"))
+	if mm = m.(Model); mm.configs.mode != 0 || mm.configs.edEscArm {
+		t.Fatalf("esc on unchanged content should close immediately (mode=%d arm=%v)",
+			mm.configs.mode, mm.configs.edEscArm)
+	}
+}
+
+// A rejection that names a line ("line 3:24 …") must mark exactly that line
+// in the raw DSL view, so the error is somewhere to look.
+func TestValidationRejectionHighlightsLine(t *testing.T) {
+	m := newTestModelWith(t, rejectingDriver{})
+	m, _ = m.Update(key("5"))
+	m, _ = m.Update(key("tab")) // DNS box, cursor on d1
+	tmp := filepath.Join(t.TempDir(), "broken.dns")
+	os.WriteFile(tmp, []byte("upstream {{{"), 0o600)
+	m, cmd := m.Update(editorDoneMsg{Path: tmp, Section: "dns", ID: "d1", Old: "upstream {}"})
+	valMsg, ok := firstMsgOf[editorValidatedMsg](execCmds(cmd))
+	if !ok || valMsg.Err == nil {
+		t.Fatalf("cmd produced %v, want a validation error", execCmds(cmd))
+	}
+	m, _ = m.Update(valMsg)
+	mm := m.(Model)
+	if rej := mm.configs.validateErr["d1"]; rej.Line != 1 {
+		t.Fatalf("rejection line = %d, want 1 (the parser points at line 1:24)", rej.Line)
+	}
+	v := m.View()
+	if !strings.Contains(v, "✗ upstream {}") {
+		t.Fatalf("the offending DSL line should be marked:\n%s", v)
+	}
+}
+
+func TestErrLineNo(t *testing.T) {
+	for err, want := range map[string]int{
+		"line 1:24 upstream {{{\n ^: mismatched input": 1,
+		"parse error: line 12:3 oops":                  12,
+		"no line reference here":                       0,
+	} {
+		if got := errLineNo(errors.New(err)); got != want {
+			t.Errorf("errLineNo(%q) = %d, want %d", err, got, want)
+		}
 	}
 }
 

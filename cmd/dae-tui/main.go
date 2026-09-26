@@ -125,7 +125,7 @@ func runStatus(d *daeddrv.Driver) {
 	}
 	mod := ""
 	if st.Modified {
-		mod = "，有未应用改动"
+		mod = "，需重载"
 	}
 	fmt.Printf("dae %s  代理%s%s\n", st.Version, run, mod)
 

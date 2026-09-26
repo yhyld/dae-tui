@@ -83,6 +83,12 @@ func Sparkline(series []float64, width, height int, style lipgloss.Style, emptyL
 
 const brailleBase = 0x2800
 
+// dotFillOrder lists a braille cell's bits in bottom-up, row-major order —
+// the sequence dots light up in as a fill level rises (bottom row left to
+// right, then the rows above): the same rise-from-the-bottom grammar the
+// traffic chart draws its bars with.
+var dotFillOrder = []rune{0x40, 0x80, 0x04, 0x20, 0x02, 0x10, 0x01, 0x08}
+
 // brailleBit maps (row, col) within a 4x2 braille cell to its dot bit.
 // Layout: left column rows 0..3 = dots 1,2,3,7 (0x01,0x02,0x04,0x40);
 // right column rows 0..3 = dots 4,5,6,8 (0x08,0x10,0x20,0x80).

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textarea"
@@ -26,8 +28,16 @@ type configsPage struct {
 	groups []driver.Group // for reference-existence checks in routing profiles
 	ifaces []driver.NetworkInterface
 
-	rows   []rowRef
-	cur    int
+	rows []rowRef
+	cur  int
+	// sec is the active section box; Tab cycles it. secCur remembers each
+	// box's cursor item index (kept in sync with cur for the active box, so
+	// a refresh re-lands on the same row), secRange is each box's
+	// [first,last] row span in rows (-1 when the section is empty).
+	sec      int
+	secCur   [3]int
+	secRange [3][2]int
+
 	scroll int // right pane line offset
 
 	// summaryView shows the parsed structure of a dns/routing profile
@@ -56,13 +66,16 @@ type configsPage struct {
 	// builtin DSL editor (mode 7): the in-app alternative to $EDITOR for
 	// dns/routing text. edCtx identifies what is being edited; edErr is the
 	// backend parser's last rejection, shown inside the floating editor so
-	// the text stays put while it is fixed.
+	// the text stays put while it is fixed. edEscArm is the discard guard:
+	// until ctrl+s the editor holds the only copy of the edit, so the first
+	// esc on changed text arms it and the second one actually discards.
 	builtin   bool
 	ed        textarea.Model
 	edSection string
 	edID      string
 	edOld     string
 	edErr     string
+	edEscArm  bool
 
 	caps driver.Caps
 
@@ -85,19 +98,17 @@ type diffState struct {
 	lines []diffLine
 }
 
+// rowRef points at one profile in the flat cursor list. The left column
+// renders as three stacked section boxes (config/dns/routing); the cursor
+// walks the items across box boundaries and the box holding it lights up —
+// the old "section header is a cursor row" special case is gone with it.
 type rowRef struct {
-	kind    int // rowItem | rowHeader
 	section string
-	index   int // item index within its section (rowItem only)
+	index   int // item index within its section
 }
 
-// Section headers are cursor rows: the flat list jumps between sections
-// without the header ever being selected, which made the cursor position and
-// the visual grouping drift apart.
-const (
-	rowItem = iota
-	rowHeader
-)
+// configSections is the left column's stacking order and rebuild order.
+var configSections = []string{"config", "dns", "routing"}
 
 func itemsOf(sel driver.Selections, section string) []driver.ConfigItem {
 	switch section {
@@ -120,6 +131,7 @@ func newConfigsPage(caps driver.Caps) configsPage {
 type editRejection struct {
 	Path string
 	Err  string // flattened parser error, one display line
+	Line int    // 1-based line the parser pointed at ("line 3:24 …"), 0 unknown
 }
 
 func (p *configsPage) setSize(leftW, rightW, h int) {
@@ -127,11 +139,12 @@ func (p *configsPage) setSize(leftW, rightW, h int) {
 }
 
 // openInput (re)initializes the shared text input for create/rename/field
-// editing modals.
+// editing modals. The limit only bounds a runaway paste: array field values
+// (URL lists) legitimately outrun any name by a lot.
 func (p *configsPage) openInput(placeholder, value string) tea.Cmd {
 	ti := textinput.New()
 	ti.Placeholder = placeholder
-	ti.CharLimit = 512
+	ti.CharLimit = 4096
 	ti.Width = 40
 	ti.SetValue(value)
 	ti.Focus()
@@ -141,18 +154,34 @@ func (p *configsPage) openInput(placeholder, value string) tea.Cmd {
 
 func (p *configsPage) rebuild() {
 	p.rows = p.rows[:0]
-	for _, section := range []string{"config", "dns", "routing"} {
+	p.secRange = [3][2]int{{-1, -1}, {-1, -1}, {-1, -1}}
+	for si, section := range configSections {
 		items := itemsOf(p.sel, section)
+		if n := len(items); p.secCur[si] >= n {
+			p.secCur[si] = max0(n - 1)
+		}
 		if len(items) == 0 {
 			continue
 		}
-		p.rows = append(p.rows, rowRef{kind: rowHeader, section: section})
+		p.secRange[si][0] = len(p.rows)
 		for i := range items {
-			p.rows = append(p.rows, rowRef{kind: rowItem, section: section, index: i})
+			p.rows = append(p.rows, rowRef{section: section, index: i})
+		}
+		p.secRange[si][1] = len(p.rows) - 1
+	}
+	// The active box must hold items; daed guarantees one profile per
+	// section, this only guards a weird backend.
+	if p.secRange[p.sec][0] < 0 {
+		for si := range configSections {
+			if p.secRange[si][0] >= 0 {
+				p.sec = si
+				break
+			}
 		}
 	}
-	if p.cur >= len(p.rows) {
-		p.cur = max0(len(p.rows) - 1)
+	p.cur = p.rowAt(configSections[p.sec], p.secCur[p.sec])
+	if p.cur < 0 && len(p.rows) > 0 {
+		p.cur = 0
 	}
 	p.scroll = 0
 }
@@ -232,17 +261,11 @@ func isIfaceField(name string) bool {
 	return name == "lanInterface" || name == "wanInterface"
 }
 
-// item resolves a row to its profile. A header row stands for the section's
-// selected profile (or its first), so Enter/e/R/D on a header act on the
-// profile the user last chose in that section.
+// item resolves a row to its profile. Every row is a real profile: with the
+// left column zoned into one box per section there is no header row to
+// resolve, and all keys act on exactly what the cursor is on.
 func (p *configsPage) item(r rowRef) *driver.ConfigItem {
 	items := itemsOf(p.sel, r.section)
-	if r.kind == rowHeader {
-		if src := p.srcProfile(r.section); src != nil {
-			return src
-		}
-		return nil
-	}
 	if r.index < 0 || r.index >= len(items) {
 		return nil
 	}
@@ -260,21 +283,6 @@ func (p *configsPage) curRow() *rowRef {
 // sectionName returns a Chinese label for a section.
 func sectionName(section string) string {
 	return sectionTitles[section]
-}
-
-// srcProfile returns the profile a new one should be cloned from: the
-// currently selected one in the section, else the first.
-func (p *configsPage) srcProfile(section string) *driver.ConfigItem {
-	items := itemsOf(p.sel, section)
-	for i := range items {
-		if items[i].Selected {
-			return &items[i]
-		}
-	}
-	if len(items) > 0 {
-		return &items[0]
-	}
-	return nil
 }
 
 // deletable reports whether a profile may be deleted: the selected one and
@@ -312,10 +320,21 @@ func (p *configsPage) modalKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	case 7: // builtin DSL editor
 		switch msg.String() {
 		case "esc":
+			if !p.edEscArm {
+				if text := strings.TrimSpace(p.ed.Value()); text != "" && text != strings.TrimSpace(p.edOld) {
+					// The editor holds the only copy of the edit until
+					// ctrl+s; a reflexive esc must not drop a big paste
+					// without one explicit confirmation.
+					p.edEscArm = true
+					return nil
+				}
+			}
+			p.edEscArm = false
 			p.mode = 0
 			p.ed.Blur()
 			return nil
 		case "ctrl+s":
+			p.edEscArm = false
 			text := strings.TrimSpace(p.ed.Value())
 			if text == "" || text == strings.TrimSpace(p.edOld) {
 				p.mode = 0
@@ -325,6 +344,8 @@ func (p *configsPage) modalKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			p.edErr = ""
 			return validateTextCmd(d, p.edSection, p.edID, text, p.edOld, "")
 		}
+		// Any other key means the user kept editing; the guard disarms.
+		p.edEscArm = false
 		var cmd tea.Cmd
 		p.ed, cmd = p.ed.Update(msg)
 		return cmd
@@ -375,6 +396,11 @@ func (p *configsPage) modalKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		}
 		it := p.item(*r)
 		fields := orderedFields(it.Fields)
+		// The field list can change while the picker is open (the refreshed
+		// selection after a submit); keep the cursor on a real row.
+		if p.pickCursor >= len(fields) {
+			p.pickCursor = max0(len(fields) - 1)
+		}
 		switch msg.String() {
 		case "esc":
 			p.mode = 0
@@ -406,8 +432,15 @@ func (p *configsPage) modalKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			val := strings.TrimSpace(p.input.Value())
 			f := p.editField
 			r := p.curRow()
-			if val == "" || val == f.Value || r == nil {
+			if r == nil {
 				p.mode = 0
+				p.input.Blur()
+				return nil
+			}
+			if val == "" || val == f.Value {
+				// Nothing to submit: back to the picker, which stays open
+				// for the next field.
+				p.mode = 1
 				p.input.Blur()
 				return nil
 			}
@@ -417,7 +450,11 @@ func (p *configsPage) modalKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 				p.fieldErr = err.Error()
 				return nil
 			}
-			p.mode = 0
+			// Stay in the picker once the edit lands: multi-field sessions
+			// (checkInterval + checkTolerance + …) are the common case, the
+			// refreshed value shows up on the picker row itself, and esc is
+			// the explicit way out.
+			p.mode = 1
 			p.input.Blur()
 			it := p.item(*r)
 			return configFieldCmd(d, it.ID, f, val, "修改 "+fieldLabel(f))
@@ -442,8 +479,11 @@ func (p *configsPage) modalKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 				return nil
 			}
 			if kind == 3 {
+				// Clone the profile under the cursor (a section header means
+				// its selected one) — the same item e/R/D act on, not always
+				// the section's selected profile.
 				return profileMutateCmd(d, profileMutation{kind: 0, section: r.section, name: name,
-					src: p.srcProfile(r.section)},
+					src: p.item(*r)},
 					"创建"+sectionName(r.section)+" "+name)
 			}
 			it := p.item(*r)
@@ -504,6 +544,7 @@ func (p *configsPage) openBuiltinEditor(r rowRef, it driver.ConfigItem) tea.Cmd 
 	ta.Focus()
 	p.ed = ta
 	p.edSection, p.edID, p.edOld, p.edErr = r.section, it.ID, it.Body, ""
+	p.edEscArm = false
 	p.mode = 7
 	return textarea.Blink
 }
@@ -573,6 +614,7 @@ func (p *configsPage) reopenBuiltinEditor(st *diffState) tea.Cmd {
 	ta.Focus()
 	p.ed = ta
 	p.edSection, p.edID, p.edOld = st.Section, st.ID, st.Old
+	p.edErr, p.edEscArm = "", false
 	p.mode = 7
 	return textarea.Blink
 }
@@ -592,7 +634,8 @@ func (p *configsPage) handleValidated(msg editorValidatedMsg, d driver.Driver) t
 		if p.validateErr == nil {
 			p.validateErr = map[string]editRejection{}
 		}
-		p.validateErr[msg.ID] = editRejection{Path: msg.Path, Err: flattenErr(msg.Err)}
+		p.validateErr[msg.ID] = editRejection{Path: msg.Path, Err: flattenErr(msg.Err),
+			Line: errLineNo(msg.Err)}
 		return func() tea.Msg {
 			return opDoneMsg{Op: sectionName(msg.Section) + " 校验", Err: errors.New("校验未通过，未保存")}
 		}
@@ -622,6 +665,21 @@ func flattenErr(err error) string {
 	return strings.Join(strings.Fields(err.Error()), " ")
 }
 
+// errLineNo extracts the 1-based line number a daed parse error points at
+// ("line 3:24 …"), so the raw DSL view can mark that line; 0 when the
+// message names no line.
+func errLineNo(err error) int {
+	m := regexp.MustCompile(`(?i)line (\d+)`).FindStringSubmatch(err.Error())
+	if m == nil {
+		return 0
+	}
+	n, convErr := strconv.Atoi(m[1])
+	if convErr != nil || n < 1 || n > 100000 {
+		return 0
+	}
+	return n
+}
+
 func (p *configsPage) bodyLines() []string {
 	r := p.curRow()
 	if r == nil {
@@ -643,7 +701,7 @@ func (p *configsPage) bodyLines() []string {
 			}
 			return lines
 		}
-		return append(lines, fallbackBody(it)...)
+		return append(lines, fallbackBody(it, 0)...)
 	}
 	title := sectionTitles[r.section]
 	lines := []string{}
@@ -677,12 +735,16 @@ func (p *configsPage) bodyLines() []string {
 		return lines
 	}
 	lines = append(lines, ui.SelectedStyle.Render(title+" (DSL 原文) · "+it.Name))
-	return append(lines, fallbackBody(it)...)
+	// A rejected edit highlights the exact line the parser pointed at, so
+	// "line 3" is somewhere to look instead of something to count.
+	return append(lines, fallbackBody(it, p.validateErr[it.ID].Line)...)
 }
 
 // fallbackBody renders a profile's stored text, used when there is nothing
-// better to show (no fields, no parsed structure, or the raw view).
-func fallbackBody(it *driver.ConfigItem) []string {
+// better to show (no fields, no parsed structure, or the raw view). badLine
+// (1-based) is the line a rejected edit's parse error pointed at; it renders
+// marked so the error's "line N" is directly findable.
+func fallbackBody(it *driver.ConfigItem, badLine int) []string {
 	body := it.Body
 	if body == "" {
 		body = it.Detail
@@ -691,7 +753,11 @@ func fallbackBody(it *driver.ConfigItem) []string {
 		return []string{ui.HelpStyle.Render(" （无内容：编辑请在 daed 完成）")}
 	}
 	lines := make([]string, 0, 8)
-	for _, l := range strings.Split(body, "\n") {
+	for i, l := range strings.Split(body, "\n") {
+		if badLine > 0 && i+1 == badLine {
+			lines = append(lines, ui.ErrorStyle.Render("✗ "+l))
+			continue
+		}
 		lines = append(lines, " "+l)
 	}
 	return lines
@@ -712,41 +778,51 @@ func (p *configsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			if body := p.item(*r).Body; body != "" {
 				return osc52CopyCmd(body)
 			}
+			// The config section is a field table with no DSL; say so
+			// instead of silently doing nothing.
+			return func() tea.Msg {
+				return opDoneMsg{Op: "复制", Err: errors.New("该方案没有 DSL 可复制（全局配置是字段表）")}
+			}
 		}
 	}
 	if p.focus == 0 {
 		switch msg.String() {
 		case "j", "down":
-			if p.cur < len(p.rows)-1 {
-				p.cur++
-				p.scroll = 0
+			// j/k stay inside the active box; Tab is how you cross sections.
+			if last := p.secRange[p.sec][1]; last >= 0 && p.cur < last {
+				p.setCursor(p.cur + 1)
 			}
 		case "k", "up":
-			if p.cur > 0 {
-				p.cur--
-				p.scroll = 0
+			if first := p.secRange[p.sec][0]; first >= 0 && p.cur > first {
+				p.setCursor(p.cur - 1)
 			}
 		case "g":
-			p.cur = 0
-			p.scroll = 0
+			if first := p.secRange[p.sec][0]; first >= 0 {
+				p.setCursor(first)
+			}
 		case "G":
-			p.cur = len(p.rows) - 1
-			p.scroll = 0
-		case "tab", "l", "right":
+			if last := p.secRange[p.sec][1]; last >= 0 {
+				p.setCursor(last)
+			}
+		case "tab":
+			p.switchSection((p.sec + 1) % len(configSections))
+		case "shift+tab":
+			p.switchSection((p.sec + len(configSections) - 1) % len(configSections))
+		case "l", "right":
 			p.focus = 1
 		case "enter":
 			if r := p.curRow(); r != nil {
 				it := p.item(*r)
 				return selectCmd(d, r.section, it.ID)
 			}
-		case "c": // clone the selected profile of the section under the cursor
+		case "c": // clone the profile under the cursor
 			if !p.caps.ConfigMgmt {
 				return unsupportedCmd("新建配置")
 			}
 			r := p.curRow()
 			if r != nil {
 				p.mode = 3
-				return p.openInput("名称（将复制当前选中配置）", "")
+				return p.openInput("名称（将复制光标所指方案）", "")
 			}
 		case "R": // rename
 			if !p.caps.ConfigMgmt {
@@ -780,10 +856,17 @@ func (p *configsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			switch r.section {
 			case "config":
 				if len(it.Fields) == 0 {
-					return nil
+					return func() tea.Msg {
+						return opDoneMsg{Op: "编辑", Err: errors.New("该配置没有可编辑字段")}
+					}
+				}
+				// Re-opening the picker keeps the cursor where the user left
+				// it: editing several fields in a row must not restart the
+				// hunt through every global field each time.
+				if n := len(orderedFields(it.Fields)); p.pickCursor >= n {
+					p.pickCursor = n - 1
 				}
 				p.mode = 1
-				p.pickCursor = 0
 				return nil
 			case "dns", "routing":
 				if p.builtin {
@@ -809,7 +892,7 @@ func (p *configsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		p.scroll = 0
 	case "G":
 		p.scroll = len(body) - 1
-	case "tab", "h", "left", "esc":
+	case "tab", "shift+tab", "h", "left", "esc":
 		p.focus = 0
 	}
 	return nil
@@ -821,16 +904,10 @@ var sectionTitles = map[string]string{
 	"routing": "路由规则",
 }
 
-func (p configsPage) View(modified bool) string {
-	// The "modified" banner takes one row of the page budget — appended
-	// below the boxes it would be the first line the frame's clamp cuts.
-	// The boxes shrink by that row instead.
+func (p configsPage) View() string {
+	// Whether the running config is stale is the top bar's "⚠ 需重载" hint;
+	// this page carries no banner of its own.
 	h := p.height
-	var banner string
-	if modified {
-		h--
-		banner = ui.ErrorStyle.Render(" ⚠ 运行配置与选中项不一致（A 应用 / 首页 o 重启）")
-	}
 	// Key hints ride the edges of the boxes they belong to: the left box
 	// lists profile management, the right box the content view's keys (and
 	// the open modal's keys); page-wide keys stay on the app frame.
@@ -841,18 +918,29 @@ func (p configsPage) View(modified bool) string {
 	case 5:
 		rightFooter = "y 确认 · n/esc 取消"
 	case 6:
-		rightFooter = "y 应用 · n/esc 取消 · j/k 滚动"
+		rightFooter = "y 提交 · n/esc 取消 · j/k 滚动"
+	case 2, 3, 4, 7:
+		// A floating window owns every keystroke; the pane behind it
+		// advertises none.
+		rightFooter = ""
 	}
-	body := strings.Join(ui.PaneRow(
-		ui.PaneSpec{Title: "配置方案", Footer: "Enter 选择 · e 编辑 · c/R/D 管理",
-			Lines: p.leftLines(), Focused: p.focus == 0, W: p.leftW, H: h},
-		ui.PaneSpec{Title: "内容", Footer: rightFooter, Lines: p.rightLines(),
-			Focused: p.focus == 1, W: p.rightW, H: h},
-	), "\n")
-	if banner != "" {
-		body = banner + "\n" + body
+	// Left column: three stacked section boxes; right: the detail box. Both
+	// sides are exactly h rows so JoinBoxes keeps them flush.
+	return strings.Join(ui.JoinBoxes(p.leftBoxes(h), p.rightBox(h, rightFooter)), "\n")
+}
+
+// rightBox renders the detail pane at exactly h rows — the content clamped
+// and padded, what PaneRow did for the boxes before the left column grew
+// its own stacked composition.
+func (p configsPage) rightBox(h int, footer string) []string {
+	lines := p.rightLines()
+	if len(lines) > h-2 {
+		lines = lines[:h-2]
 	}
-	return body
+	for len(lines) < h-2 {
+		lines = append(lines, "")
+	}
+	return ui.TitledBoxFooter("内容", footer, p.focus == 1, p.rightW, lines)
 }
 
 // modalLines renders the active modal inside the right pane.
@@ -913,8 +1001,8 @@ func (p configsPage) modalLines() []string {
 		// The decision line lives in a red box of its own: when everything
 		// around it is +/- diff noise, a dim hint row is too easy to miss.
 		head := ui.BoxLines(true,
-			ui.TitleStyle.Render(" 确认应用更改 · "+sectionName(st.Section)+" "+st.Name),
-			ui.OKStyle.Render(" y 应用")+"    "+
+			ui.TitleStyle.Render(" 确认提交更改 · "+sectionName(st.Section)+" "+st.Name),
+			ui.OKStyle.Render(" y 提交")+"    "+
 				ui.ErrorStyle.Render("n / esc 取消")+"    "+
 				ui.HelpStyle.Render("j/k 滚动 diff"),
 			ui.HelpStyle.Render(" 取消后编辑内容保留在 "+ui.TruncateHead(st.Path, max0(p.rightW-8))),
@@ -998,14 +1086,16 @@ func (p configsPage) overlay() *overlaySpec {
 		}
 		hint := " Enter 确认  esc 取消"
 		if p.mode == 3 && r != nil {
-			// Mirror what CreateProfile actually does: it clones the
-			// selected profile of the section, and only falls back to the
-			// built-in template when there is nothing to clone.
-			what := "默认模板"
-			if src := p.srcProfile(r.section); src != nil && (src.Body != "" || len(src.Fields) > 0) {
-				what = "当前选中" + sectionName(r.section) + "的内容"
+			// Mirror what CreateProfile actually does: it clones the profile
+			// under the cursor (a section header means its selected one),
+			// and only falls back to the built-in template when there is
+			// nothing to clone.
+			switch src := p.item(*r); {
+			case src != nil && (src.Body != "" || len(src.Fields) > 0):
+				hint = " 将复制「" + src.Name + "」的内容，之后可 e 编辑  Enter 确认  esc 取消"
+			default:
+				hint = " 将使用默认模板，之后可 e 编辑  Enter 确认  esc 取消"
 			}
-			hint = " 将复制" + what + "，之后可 e 编辑  Enter 确认  esc 取消"
 		}
 		return &overlaySpec{lines: []string{
 			ui.TitleStyle.Render(" " + title),
@@ -1024,6 +1114,9 @@ func (p configsPage) overlay() *overlaySpec {
 		if p.edErr != "" {
 			lines = append(lines, "", ui.ErrorStyle.Render(" ✗ "+ui.Truncate(p.edErr, 76)))
 		}
+		if p.edEscArm {
+			lines = append(lines, "", ui.ErrorStyle.Render(" ⚠ 修改尚未提交：再按一次 esc 放弃，或 ctrl+s 校验保存"))
+		}
 		return &overlaySpec{lines: append(lines, "",
 			ui.HelpStyle.Render(" ctrl+s 校验并预览 diff  esc 取消"),
 			ui.HelpStyle.Render(" 想用 vim/nano 等编辑器：config.toml 里 editor = \"external\""))}
@@ -1031,43 +1124,267 @@ func (p configsPage) overlay() *overlaySpec {
 	return nil
 }
 
-// leftClick parks the left-pane cursor on the row-th row (section headers
-// included — they are valid cursor positions, the same as moving with j/k).
+// leftClick parks the cursor on the clicked row of the stacked section
+// boxes. Box borders and dead space are no-ops; a content row maps back
+// through the same windowing leftBoxes used.
 func (p *configsPage) leftClick(row int) {
-	if row < 0 || row >= len(p.rows) || row == p.cur {
+	if row < 0 || row >= p.height {
 		return
 	}
-	p.cur = row
+	if p.height < 9 {
+		// The flat fallback box (see flatLeftBox): skip its extra lines,
+		// then map through the same window. The clicked row's section
+		// becomes the active one.
+		rowsH := max0(p.height - 2)
+		extra := p.leftLinesExtra()
+		within := row - extra
+		if within < 0 || within >= rowsH-extra {
+			return
+		}
+		i := max0(p.cur-(rowsH-extra)+1) + within
+		if i < len(p.rows) {
+			for si, section := range configSections {
+				if section == p.rows[i].section {
+					p.sec = si
+					break
+				}
+			}
+			p.setCursor(i)
+		}
+		return
+	}
+	shares := leftShares(p.height)
+	for si, section := range configSections {
+		if row >= shares[si] {
+			row -= shares[si]
+			continue
+		}
+		within := row - 1 // the box's top border
+		rowsH := shares[si] - 2
+		if within < 0 || within >= rowsH {
+			return // top border, bottom border or footer edge
+		}
+		if si == 0 {
+			within -= p.leftLinesExtra()
+			if within < 0 {
+				return
+			}
+		}
+		i := p.leftWindow(si, rowsH) + within
+		if i >= 0 && i < len(itemsOf(p.sel, section)) {
+			if si != p.sec {
+				p.switchSection(si) // clicking a box activates it
+			}
+			p.setCursor(p.rowAt(section, i))
+		}
+		return
+	}
+}
+
+// switchSection activates another section box: the cursor jumps to that
+// box's remembered position (or its first item) and the right pane follows.
+func (p *configsPage) switchSection(si int) {
+	if si == p.sec || p.secRange[si][0] < 0 {
+		return
+	}
+	if r := p.curRow(); r != nil {
+		p.secCur[p.sec] = r.index // remember where we leave the cursor
+	}
+	p.sec = si
+	p.scroll = 0
+	p.cur = p.rowAt(configSections[si], p.secCur[si])
+	if p.cur < 0 {
+		p.cur = p.secRange[si][0]
+	}
+}
+
+// setCursor parks the cursor on a flat row of the active box and rewinds
+// the right pane; secCur stays in sync so a refresh re-lands on the row.
+func (p *configsPage) setCursor(i int) {
+	if i < 0 || i >= len(p.rows) || i == p.cur {
+		return
+	}
+	p.cur = i
+	if r := p.curRow(); r != nil && r.section == configSections[p.sec] {
+		p.secCur[p.sec] = r.index
+	}
 	p.scroll = 0
 }
 
-func (p configsPage) leftLines() []string {
-	var lines []string
+// rightClick opens the field editor whose row the user clicked in the right
+// pane. Only the config section renders one line per editable field; the
+// dns/routing panes are scroll views, so a click there is ignored.
+func (p *configsPage) rightClick(row int) tea.Cmd {
+	if p.mode != 0 || row < 0 {
+		return nil
+	}
+	r := p.curRow()
+	if r == nil || r.section != "config" {
+		return nil
+	}
+	fields := orderedFields(p.item(*r).Fields)
+	if len(fields) == 0 {
+		return nil
+	}
+	// bodyLines renders the title line, then one line per field with an
+	// optional interface-warning line after some of them; rightLines windows
+	// those lines by p.scroll. Walk the same layout to find the field.
+	line := p.scroll + row - 1 // -1: the title line
+	if line < 0 {
+		return nil
+	}
+	for i := range fields {
+		if line == 0 {
+			f := fields[i]
+			p.editField = f
+			p.fieldErr = ""
+			p.mode = 2
+			p.focus = 1
+			return p.openInput("新值 ("+f.Type+")", f.Value)
+		}
+		line--
+		if p.ifaceWarning(fields[i]) != "" {
+			line--
+		}
+	}
+	return nil
+}
+
+// leftFooter is the left column's key hint. The keys work in every section
+// box, so they ride the bottom edge of the active one — the lit zone —
+// instead of repeating on all three.
+const leftFooter = "Tab 切区 · e 编辑 · c/R/D 管理"
+
+// leftShares splits the left column's height into three equal box heights
+// (btop zoning: equal shares, dead space stays inside the box); the
+// remainder goes to the top boxes so the stack is exactly h rows.
+func leftShares(h int) (s [3]int) {
+	base, rem := h/3, h%3
+	for i := range s {
+		s[i] = base
+		if i < rem {
+			s[i]++
+		}
+	}
+	return s
+}
+
+// rowAt maps a (section, item index) pair back to its flat cursor row, -1
+// when there is none.
+func (p configsPage) rowAt(section string, index int) int {
+	for i, r := range p.rows {
+		if r.section == section && r.index == index {
+			return i
+		}
+	}
+	return -1
+}
+
+// itemLine renders one left-column profile row: cursor marker, selected
+// mark, name.
+func (p configsPage) itemLine(section string, i int) string {
+	cursor := "  "
+	if row := p.rowAt(section, i); row == p.cur && p.focus == 0 {
+		cursor = ui.CursorStyle.Render("❯")
+	}
+	it := itemsOf(p.sel, section)[i]
+	mark := "  "
+	if it.Selected {
+		mark = ui.OKStyle.Render("● ")
+	}
+	return cursor + " " + mark + ui.PadRight(it.Name, max0(p.leftW-12))
+}
+
+// leftLinesExtra counts the non-item lines heading the first box (caps and
+// load errors) — both the renderer and the click mapping skip them.
+func (p configsPage) leftLinesExtra() int {
+	n := 0
+	if !p.caps.ConfigMgmt {
+		n++
+	}
+	if p.err != nil {
+		n++
+	}
+	return n
+}
+
+// leftWindow returns the first item index shown in box si: boxes other than
+// the active one start at the top, the active box windows so the cursor
+// stays visible (the same rule the field picker uses).
+func (p configsPage) leftWindow(si, rowsH int) int {
+	extra := 0
+	if si == 0 {
+		extra = p.leftLinesExtra()
+	}
+	if si != p.sec || p.cur < 0 || p.cur >= len(p.rows) {
+		return 0
+	}
+	if cur := p.rows[p.cur].index; cur >= rowsH-extra {
+		return cur - (rowsH - extra) + 1
+	}
+	return 0
+}
+
+// leftBoxes renders the left column: one titled box per section, stacked to
+// exactly h rows. The box holding the cursor lights up and carries the
+// column's key hints.
+func (p configsPage) leftBoxes(h int) []string {
+	if h < 9 {
+		// Too short to give every box one content row: fall back to a
+		// single flat box (the right pane's title still says what is shown).
+		return p.flatLeftBox(h)
+	}
+	shares := leftShares(h)
+	out := make([]string, 0, h)
+	for si, section := range configSections {
+		items := itemsOf(p.sel, section)
+		rowsH := shares[si] - 2
+		lines := make([]string, 0, rowsH)
+		if si == 0 {
+			if !p.caps.ConfigMgmt {
+				lines = append(lines, ui.ErrorStyle.Render("✗ 当前后端不支持配置管理"))
+			}
+			if p.err != nil {
+				lines = append(lines, ui.ErrorStyle.Render("✗ "+shortErr(p.err)))
+			}
+		}
+		for i := p.leftWindow(si, rowsH); i < len(items) && len(lines) < rowsH; i++ {
+			lines = append(lines, p.itemLine(section, i))
+		}
+		for len(lines) < rowsH {
+			lines = append(lines, "")
+		}
+		focused := p.focus == 0 && si == p.sec
+		footer := ""
+		if focused {
+			footer = leftFooter
+		}
+		title := fmt.Sprintf("%s %d", sectionTitles[section], len(items))
+		out = append(out, ui.TitledBoxFooter(title, footer, focused, p.leftW, lines)...)
+	}
+	return out
+}
+
+// flatLeftBox is the tiny-terminal fallback: one box, all sections' items in
+// cursor order, no zoning.
+func (p configsPage) flatLeftBox(h int) []string {
+	rowsH := max0(h - 2)
+	extra := p.leftLinesExtra()
+	lines := make([]string, 0, rowsH)
 	if !p.caps.ConfigMgmt {
 		lines = append(lines, ui.ErrorStyle.Render("✗ 当前后端不支持配置管理"))
 	}
 	if p.err != nil {
 		lines = append(lines, ui.ErrorStyle.Render("✗ "+shortErr(p.err)))
 	}
-	for i, r := range p.rows {
-		// The cursor marker renders on header rows too, so the position is
-		// always visible even while parked on a section title.
-		cursor := "  "
-		if i == p.cur && p.focus == 0 {
-			cursor = ui.CursorStyle.Render("❯")
-		}
-		if r.kind == rowHeader {
-			lines = append(lines, cursor+" "+ui.SelectedStyle.Render(sectionTitles[r.section]))
-			continue
-		}
-		it := itemsOf(p.sel, r.section)[r.index]
-		mark := "  "
-		if it.Selected {
-			mark = ui.OKStyle.Render("● ")
-		}
-		lines = append(lines, cursor+" "+mark+ui.PadRight(it.Name, max0(p.leftW-12)))
+	start := max0(p.cur - (rowsH - extra) + 1)
+	for i := start; i < len(p.rows) && len(lines) < rowsH; i++ {
+		lines = append(lines, p.itemLine(p.rows[i].section, p.rows[i].index))
 	}
-	return lines
+	for len(lines) < rowsH {
+		lines = append(lines, "")
+	}
+	return ui.TitledBoxFooter("配置方案", leftFooter, p.focus == 0, p.leftW, lines)
 }
 
 func (p configsPage) rightLines() []string {

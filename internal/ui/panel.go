@@ -93,36 +93,60 @@ type PaneSpec struct {
 	Footer string
 }
 
+// renderPane wraps one pane's lines in its TitledBox. h > 0 is the box's
+// outer height: content beyond h-2 rows is clamped (a pane that outgrows
+// its box loses its last row, never pushes the box past the page height,
+// which would eat a chrome row) and short content is padded so boxes
+// joined into a grid share their borders. h <= 0 sizes the box to the
+// content.
+func renderPane(s PaneSpec, h int) []string {
+	lines := s.Lines
+	if h > 0 && len(lines) > h-2 {
+		lines = lines[:h-2]
+	}
+	n := len(lines)
+	if h > 0 && h-2 > n {
+		n = h - 2
+	}
+	padded := make([]string, n)
+	copy(padded, lines)
+	return titledBox(strings.TrimSpace(s.Title), "", s.Footer, s.Focused, s.W, padded)
+}
+
 // PaneRow builds a page's master/detail pair: both sides padded to the
 // same content height, wrapped in TitledBoxes and joined with a one-space
 // gutter — the same grid language as the home page's paired zones, so the
-// two boxes always share their top and bottom borders. Content beyond
-// H-2 rows is clamped: a pane that outgrows its box loses its last row,
-// never pushes the box past the page height (which would eat a chrome
-// row).
+// two boxes always share their top and bottom borders.
 func PaneRow(left, right PaneSpec) []string {
-	clamp := func(s PaneSpec) []string {
-		if s.H > 0 && len(s.Lines) > s.H-2 {
-			return s.Lines[:s.H-2]
+	h := max(left.H, right.H)
+	return JoinBoxes(renderPane(left, h), renderPane(right, h))
+}
+
+// PaneRowColumn is a master/detail row whose detail side stacks two boxes:
+// a small info pane on top and a content pane filling the rest of the
+// column. left.H is the whole column's height; top.H sizes the info box
+// (0 sizes it to its content); the bottom box takes the remaining rows.
+// All three boxes share their edges, so the column reads as one flush
+// grid, and the same clamp rule as PaneRow applies: a pane that outgrows
+// its box loses its last row, never pushes the column past left.H.
+func PaneRowColumn(left, top, bottom PaneSpec) []string {
+	total := left.H
+	th := top.H
+	if th <= 0 {
+		th = len(top.Lines) + 2
+	}
+	bh := 0
+	if total > 0 {
+		if th > total-2 {
+			th = total - 2
 		}
-		return s.Lines
-	}
-	ll, rl := clamp(left), clamp(right)
-	n := len(ll)
-	if len(rl) > n {
-		n = len(rl)
-	}
-	if h := max(left.H, right.H); h > 0 {
-		if want := h - 2; want > n {
-			n = want
+		if th < 2 {
+			th = 2
 		}
+		bh = total - th
 	}
-	box := func(s PaneSpec, lines []string) []string {
-		padded := make([]string, n)
-		copy(padded, lines)
-		return titledBox(strings.TrimSpace(s.Title), "", s.Footer, s.Focused, s.W, padded)
-	}
-	return JoinBoxes(box(left, ll), box(right, rl))
+	column := append(renderPane(top, th), renderPane(bottom, bh)...)
+	return JoinBoxes(renderPane(left, total), column)
 }
 
 // JoinBoxes places two equal-height line blocks side by side with a

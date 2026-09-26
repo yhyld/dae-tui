@@ -7,7 +7,7 @@ dae-tui 的仓库说明，供后续 ZCode agent 快速上手。细节以 `README
 
 `dae` eBPF 代理的终端管理界面（TUI），**当前唯一后端是 daed 的 GraphQL API**（daed
 v2.1.1，上游已于 2026-09-24 归档，schema 从此冻结）。功能：切换路由组节点、测速、
-实时流量、订阅管理、config/DNS/routing 方案切换与应用。
+实时流量、订阅管理、config/DNS/routing 方案切换与重载。
 
 用户可见文案全部是**中文**（UI 字符串、toast、错误提示）；Go 文档注释用英文。
 
@@ -195,10 +195,15 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   `? 帮助` 固定在该边框右端且**不参与截断**，页签不要放帮助标识）。`anyModal()` 时鼠标全部忽略——弹窗期间误点比不点更糟。
   鼠标 handler 是**值接收者**（与 `handleKey` 一致），别改成指针接收者，否则
   `tea.Model` 的动态类型在键盘/鼠标两条路径上不一致。
-- 每个内容页都是**左列表 + 右详情双盒**：左栏 `j/k` 移动（默认折叠），`Tab/l/Enter`
-  展开到右栏（右栏有自己的高度与滚动），`h/esc` 收起。两栏是 `ui.PaneRow` 拼的一对
-  `TitledBox`（聚焦盒标题+边框点亮），`leftW/rightW` 即盒子**外宽**（左栏上限 38 保
-  内容宽 34，中间 1 格 gutter），加载失败/空列表等早退状态也走同一对盒子（消息进左盒）。
+- 每个内容页都是**左列表 + 右详情**：左栏 `j/k` 移动，`Tab/l/Enter` 把焦点切到右栏，
+  `h/esc` 收回。两栏是 `ui.PaneRow` 拼的一对 `TitledBox`（聚焦盒标题+边框点亮），
+  `leftW/rightW` 即盒子**外宽**（左栏上限 38 保内容宽 34，中间 1 格 gutter），加载
+  失败/空列表等早退状态也走同一布局（消息进左盒）。**群组页与订阅页的右栏是上下双盒**
+  （`ui.PaneRowColumn` + `app.stackedDetail`）：上盒是 content-sized 的信息卡（组=
+  策略/成员/引用，订阅=标签/状态/定时/链接/更新），下盒占满剩余高度放节点内容；没有
+  "展开后才显示"的门控（旧的 `expanded` 字段已删），订阅页节点**选中即拉取**。信息行
+  标签列统一 6 格（`SelectedStyle` 标签 + 两空格），三页一致。配置页左栏是例外（见
+  下面"三个等分竖排分区盒"条目）。
 - **节点列表的过滤/排序统一走 `internal/app/nodelist.go` 的 `nodeView`**（`/` 开过滤框，
   `enter` 保留、`esc` 清空，`o` 循环排序，未测/死亡节点排序时殿后）。群组页右栏、`n`
   选择器、订阅页右栏、手动节点页四处都内嵌它；新增节点列表必须复用，不要另写一套。
@@ -241,7 +246,7 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   数值，别在窄栏里硬塞。自动策略下的"当前节点"是
   估算值，显示时加 `≈` 前缀（没有测量数据时首页标注「未测速」；首页不显示毫秒数，
   逐节点延迟去群组页看）。
-- 破坏性操作（删组/删节点/删配置/停止代理/应用配置）都要 `y` 确认。
+- 破坏性操作（删组/删节点/删配置/停止代理/重载）都要 `y` 确认。
 
 ## 横切机制（改 UI 前必读）
 
@@ -249,11 +254,16 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   各页面。按键按能力位门控，不支持时 `unsupportedCmd(op)` 出 toast（"当前后端不支持
   该操作"），订阅/配置页还有横幅；`!TrafficStats` 时首页不渲染流量图、轮询也跳过。
   新 driver 必须如实返回 Caps——`stubDriver` 返回全 true，写"残废后端"测试要内嵌它再覆盖。
-- **测速进度**：`testWindow(n) = 15s + 200ms×n`（上限 2 分钟，与 `testLatencyCmd` 的
-  ctx 超时一致），三个页面各自 `testProgress()`，根模型 `spinSuffix` 把盲文 spinner +
-  "测速中 x/y"——进度是**跨页汇总**的（测速中切页指示不消失）。spinner 由 120ms 的
-  `spinnerMsg` 自续链驱动（`spinning` 防止叠链；1s tick 在测速开始时拉起链，无测速时链
-  自灭，空闲 UI 不空转）。
+- **测速进度与忙碌指示**：`testWindow(n) = 15s + 200ms×n`（上限 2 分钟，与
+  `testLatencyCmd` 的 ctx 超时一致），三个页面各自 `testProgress()`，根模型 `spinSuffix`
+  把盲文 spinner + "测速中 x/y"——进度是**跨页汇总**的（测速中切页指示不消失）。
+  **mutation 忙碌（`anyBusy` = subs/nodes 页的 `busy`）同样进 `spinSuffix`，显示
+  "处理中"**——别再把进行中的操作画进页面盒内容（旧的"⏳ 操作进行中"行已删）。
+  spinner 由 120ms 的 `spinnerMsg` 自续链驱动（`spinning` 防止叠链；1s tick 在测速或
+  mutation 开始时拉起链，都空闲时链自灭，空闲 UI 不空转）。
+  **鼠标滚轮会重放 j/k 并可能因此产生 cmd——`handleMouse` 的滚轮分支必须把页面
+  `handleKey` 返回的 cmd 传出去**：订阅页 j/k 会触发节点拉取（`ensureNodes` 先置
+  `loading` 再返回 cmd），丢掉 cmd 就是"拉取节点中"永久卡死。
   完成判定仍是"所有 testIDs 的 `TestedAt` 都新于 baseline"。测速期间的 `testIDs` 轮询
   （每秒）与下面的按页轮询并存，互不影响。
 - **延迟按页轮询，无启动全量测速**：每 3 秒只轮询当前页可见节点的 `nodeLatencies`
@@ -273,7 +283,8 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
 - **群组页多选**：`space` 按**节点 ID**标记（`marked map[string]bool`），`t` 只测已标记、
   `x` 批量移除已标记的**直接挂载**节点（订阅贡献的只能随订阅移除，会给 toast 说明）、
   选择器内 `Enter` 批量添加。`markedIDs()/markedDirectNodes()` 必须去重——同一节点可以
-  同时出现在订阅区和直接区两行。换组/收起（`collapseSections`）清空标记。
+  同时出现在订阅区和直接区两行。换组清空标记（`collapseSections`，只在换组时调用——
+  右栏常驻后 esc 离开右栏不再收起分区/清标记，否则等于当着用户的面丢数据）。
 - **首页分区（btop 式网格盒子）**：整页是带标题的圆角盒子（`ui.TitledBox`，标题嵌在
   上边框、聚焦时点亮标题+边框），按严格网格排布：**全页唯一竖缝**（左列 = `homeRoutingW`，
   行行相同）、**同行盒子等高**（`ui.PaneRow` 把短侧内容补空行到等高再包框，边框上下
@@ -284,33 +295,45 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   rows 函数 + TitledBox 包一层；配对用 `pairedRow`（内部即 `PaneRow`），别手拼。
 - **首页重点提亮层级**：一眼要看的（代理状态徽章、上下行**加粗**速率、活动预设 ●、
   组当前节点名）用色块/加粗/亮色；回头查的（方案名、连接/UDP/API、累计、环境事实）
-  一律暗色；异常（未应用改动、订阅过期、接口缺失）黄/红。徽章行不再带版本号（状态栏
+  一律暗色；异常（订阅过期、接口缺失）黄/红。运行配置过期的 "⚠ 需重载 (A)" 提示统一在顶栏状态行（首页代理盒与配置页的本地横幅已删）。徽章行不再带版本号（状态栏
   已有）；`方案 config X · dns Y` + 续行 `routing Z` 在"代理"盒内。
 - **首页信息密度（都不新增轮询，数据来自已有消息流）**：
   - **订阅摘要**（`subLines`，根模型在 `subsMsg` 里喂 `home.setSubs`，渲染进"环境"盒）：
     `订阅 N · 节点 M · 最近更新 <TimeAgo>`；cron 开着但 UpdatedAt 超 24h 的订阅逐个
-    黄字 ⚠（订阅静默失效是最常见的"代理变慢"根因）。Status/Info 字段语义不稳，**不要**
-    拿它当失败信号，新鲜度才是诚实指标。网卡行同盒（`netLines`，前缀"网卡"）。
+    黄字 ⚠（订阅静默失效是最常见的"代理变慢"根因）。**dae-wing 全库确认：`status` 字段
+    只在创建订阅时写死 `""`、刷新流程从不写入（Info 同样从不写入），即 v2.1.1 里恒为
+    空**——空状态渲染暗色 "—"，绝不当失败信号；只有 status 含 fail/error 才标红并
+    显示 info 首行（订阅页左栏），新鲜度才是诚实指标。网卡行同盒（`netLines`，前缀"网卡"）。
   - **组行健康后缀**（`groupHealth`，盒内容宽 ≥68 才显示）：`存活/已测 · <TimeAgo>`，
     **只用 `p.lat` 里已有的数据**（别的页轮询到的），必须带年龄标注，未测组显示
     "未测速"而不是 0/0；**右对齐到盒内右缘**。
   - **流量脚注**：`trafficMsg.Took`（trafficCmd 计时）显示 `API Nms`（SSH 隧道健康
     线索），累计行标注"自 daed 启动"（重启清零，不是月流量）。
 - **首页组行跳转**：`Tab` 在路由选择器与组列表间切焦点（`home.groupFocus`），组行
-  `Enter` 发 `gotoGroupMsg{ID}`，根模型开群组页并展开该组（`expanded/focus=1`）。
+  `Enter` 发 `gotoGroupMsg{ID}`，根模型开群组页、选中该组并聚焦右栏（`focus=1`）。
   焦点在组列表时只吞导航键，`o/P/L/g` 等仍走原路径。
 - **订阅页节点缓存**：`subsMsg` **不再**清空 `subNodes`；只有 `u`（更新）把对应 ID 记入
   `stale`，下次 `handleSubs` 时删那一条（并顺带清理已删除订阅的残留），根模型随后
-  `ensureNodes` 重取。`ensureNodes` 自带 `expanded` 判断，任何地方调用都安全。
+  `ensureNodes` 重取。节点列表常驻右栏下盒，`ensureNodes` 只看缓存与 loading——j/k
+  移动、左栏点击、`subsMsg` 后都会触发拉取，任何地方调用都安全。
 - **群组页分区展开按订阅 ID 键定**（`subOpen map[string]bool`）：刷新后订阅重排不会
   把展开状态错位到别的订阅。`directOpen` 是整个直接区的单个 bool。
 - **DSL 编辑流程**：`$EDITOR` 退出 → 后端校验 → **diff 确认**（`configsPage.diff`，
   mode 6，`y` 提交/`n` 取消）→ 才 `configTextCmd`。临时文件只在"应用后"和"内容未变"
   删除；校验失败和用户取消都保留并在 toast/右栏说明路径。diff 用 `diff.go` 的 LCS，
   长相同行折叠成 gap 标记。
-- **配置页左栏分区标题是光标行**（`rowRef.kind = rowHeader`）：光标会停在标题上，
-  `item()` 对标题行解析为该分区"当前选中（否则第一个）"的条目，所以标题上的
-  `Enter/e/R/D` 作用在用户上次选的方案上。空分区不建行。
+- **配置页左栏是三个等分竖排的分区盒**（全局配置/DNS/路由规则，btop 式分区）：
+  没有分区标题行，`rows` 是纯条目列表（`rowRef{section, index}`，无 kind）。
+  `Tab`/`shift+Tab` 在三盒间循环切换（`sec` 活动盒、`secCur` 每盒记住光标、
+  `secRange` 界定盒内行界），`j/k`/`g/G` 只在当前盒内移动、活动盒点亮并在其底边框
+  携带左栏键位（`leftFooter`）；进右栏用 `l`/`Enter`/`→`，本页 `Tab` **不**切栏
+  （外框键位与 help 浮窗都写明）。所有键一律作用于光标所指条目（`item()` 没有
+  header 特例，`c` 克隆的就是光标处方案）；光标恒在活动盒内（`setCursor` 同步
+  `secCur`，刷新后按它落位）。渲染走 `leftBoxes`（`leftShares` 等分高度、
+  `leftWindow` 窗口跟随光标），`View` 用 `ui.JoinBoxes` 手工拼左右两列（不走
+  `PaneRow`——它会把整块重新包框）；左栏点击映射 `leftClick` 必须与 `leftWindow`
+  的窗口数学一致且会激活所点盒子。页面内容高度 <9 行时 `flatLeftBox` 退化为单个
+  扁平盒子（tiny terminal 兜底，否则每盒连一行内容都放不下）。
 - **字段输入预校验**（`fields.go: validateFieldValue`）：按 `ConfigField.Type`
   （int/bool/duration/array）在客户端挡掉明显非法的值，错误显示在输入框模态内，
   不提交。语义仍然归后端。

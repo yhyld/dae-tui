@@ -604,7 +604,7 @@ func presetTextCmd(d driver.Driver, section, id, text, label string) tea.Cmd {
 }
 
 func runCmd(d driver.Driver, dry bool) tea.Cmd {
-	label := "应用配置 (run)"
+	label := "重载 (run)"
 	if dry {
 		label = "校验配置 (dry-run)"
 	}

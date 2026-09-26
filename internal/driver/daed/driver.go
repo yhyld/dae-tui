@@ -890,12 +890,17 @@ func typedValue(f driver.ConfigField, value string) (any, error) {
 		}
 		return b, nil
 	case "array":
-		// A blank value is a valid empty list (e.g. lanInterface unset), not
-		// an error: cloning a config round-trips every field, unset ones
-		// included.
-		parts := strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ' ' })
-		if parts == nil {
-			parts = []string{}
+		// Comma is the only separator, matching the UI's field validator:
+		// splitting on spaces too would silently rewrite an element that
+		// contains one. A blank value is a valid empty list (e.g.
+		// lanInterface unset), not an error: cloning a config round-trips
+		// every field, unset ones included — hence the non-nil empty slice
+		// (nil would marshal as null).
+		parts := []string{}
+		for _, p := range strings.Split(value, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				parts = append(parts, p)
+			}
 		}
 		return parts, nil
 	default: // string / duration pass through

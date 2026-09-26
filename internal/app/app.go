@@ -137,7 +137,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case spinnerMsg:
 		m.spin++
-		if m.anyTesting() {
+		if m.anyTesting() || m.anyBusy() {
 			return m, spinnerTickCmd()
 		}
 		m.spinning = false
@@ -151,7 +151,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmds []tea.Cmd
 		cmds = append(cmds, tickCmd(msg.n))
 		if m.phase == phaseMain {
-			if m.anyTesting() && !m.spinning {
+			if (m.anyTesting() || m.anyBusy()) && !m.spinning {
 				m.spinning = true
 				cmds = append(cmds, spinnerTickCmd())
 			}
@@ -235,7 +235,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case gotoGroupMsg:
 		// Home page Enter on a group row: open the groups page with that
-		// group already expanded, so the node list is one j/k away.
+		// group selected and the right column focused. The detail column is
+		// always visible now, so there is nothing left to "expand".
 		m.page = pageTree
 		for i, g := range m.groups.groups {
 			if g.ID == msg.ID {
@@ -243,7 +244,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 		}
-		m.groups.expanded = true
 		m.groups.focus = 1
 		m.groups.rc = 0
 		m.groups.rebuild()
@@ -504,6 +504,22 @@ func (m *Model) showToast(s string) {
 	m.toast, m.toastAt = s, time.Now()
 }
 
+// stackedDetail heights for a right column split into a small info box and
+// a content box (groups/subs pages): the info box is content-sized (len+2
+// border rows), clamped so a content box always survives below it, and the
+// content box's inner height is what its scroll windows must use. ui.
+// PaneRowColumn applies the same clamp when rendering.
+func stackedDetail(infoLen, h int) (topH, bottomInner int) {
+	topH = infoLen + 2
+	if topH > h-2 {
+		topH = h - 2
+	}
+	if topH < 2 {
+		topH = 2
+	}
+	return topH, max0(h - topH - 2)
+}
+
 func shortErr(err error) string {
 	s := err.Error()
 	if i := strings.Index(s, "access denied"); i >= 0 {
@@ -719,17 +735,16 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		case pageConfigs:
 			// Right-pane focus scrolls the content view; left-pane focus
 			// moves the cursor, same as the keys.
-			m.configs.handleKey(runeKey(name), m.drv)
-			return m, nil
+			return m, m.configs.handleKey(runeKey(name), m.drv)
 		case pageTree:
-			m.groups.handleKey(runeKey(name), m.drv)
-			return m, nil
+			return m, m.groups.handleKey(runeKey(name), m.drv)
 		case pageSubs:
-			m.subs.handleKey(runeKey(name), m.drv)
-			return m, nil
+			// The wheel replays j/k, and a j/k here also fires the newly
+			// selected subscription's node fetch — dropping that cmd would
+			// leave the pane stuck on 拉取节点中 forever.
+			return m, m.subs.handleKey(runeKey(name), m.drv)
 		case pageNodes:
-			m.nodes.handleKey(runeKey(name), m.drv)
-			return m, nil
+			return m, m.nodes.handleKey(runeKey(name), m.drv)
 		}
 	case tea.MouseButtonLeft:
 		if msg.Action != tea.MouseActionPress {
@@ -775,7 +790,9 @@ func (m Model) click(x, y int) (tea.Model, tea.Cmd) {
 		}
 	case pageSubs:
 		if cx <= m.subs.leftW {
-			m.subs.leftClick(row)
+			// Selecting a subscription also (re)fetches its node list: the
+			// right column shows the nodes without a separate expand step.
+			return m, m.subs.leftClick(row, m.drv)
 		}
 	case pageNodes:
 		if cx <= m.nodes.leftW {
@@ -784,6 +801,8 @@ func (m Model) click(x, y int) (tea.Model, tea.Cmd) {
 	case pageConfigs:
 		if cx <= m.configs.leftW {
 			m.configs.leftClick(row)
+		} else {
+			return m, m.configs.rightClick(row)
 		}
 	}
 	return m, nil
@@ -856,7 +875,7 @@ func (m Model) View() string {
 	case pageNodes:
 		body = m.nodes.View()
 	case pageConfigs:
-		body = m.configs.View(m.status.Modified)
+		body = m.configs.View()
 	}
 	// Hard clamp: a page must never push the chrome (header box, toast,
 	// frame edges) off screen — this was the original scrolling bug. The
@@ -879,8 +898,11 @@ func (m Model) View() string {
 	}
 	if m.confirmApply {
 		body = ui.Overlay(body, overlayBox(&overlaySpec{destructive: true, lines: []string{
-			ui.TitleStyle.Render(" 确认应用当前选中 config+dns+routing (run)？"),
-			ui.OKStyle.Render(" y 确认") + "    " + ui.ErrorStyle.Render("n / esc 取消"),
+			ui.TitleStyle.Render(" 确认重载 (run)？"),
+			" 重载会按当前状态重新生成 dae 配置：方案切换、",
+			" 订阅更新、群组改动都要重载后才生效。",
+			"",
+			ui.OKStyle.Render(" y 重载") + "    " + ui.ErrorStyle.Render("n / esc 取消"),
 		}}, cw-1), cw-1, avail)
 	}
 	if m.helpOpen {
@@ -947,7 +969,7 @@ func (m Model) statusBar() string {
 	}
 	mod := ""
 	if m.status.Modified {
-		mod = ui.ErrorStyle.Render(" ⚠ 未应用")
+		mod = ui.ErrorStyle.Render(" ⚠ 需重载 (A)")
 	}
 	left := ui.TitleStyle.Render("dae-tui") + ui.HelpStyle.Render(" ("+shortEndpoint(m.cfg.Endpoint)+")") +
 		"  " + run + ui.HelpStyle.Render(" dae "+m.status.Version) + mod
@@ -987,15 +1009,23 @@ func (m Model) tabsBar() string {
 	return strings.Join(parts, "")
 }
 
-// spinSuffix is the latency-test indicator, right-aligned in the header
-// box's top edge: the progress is a cross-page fact, so it lives in the
-// chrome rather than in any one page.
+// spinSuffix is the indicator right-aligned in the header box's top edge:
+// the same braille spinner covers in-flight mutations ("处理中") and latency
+// tests ("测速中 x/y"), both cross-page facts, so both survive a page
+// switch and share one chain.
 func (m Model) spinSuffix() string {
-	if done, total := m.testProgress(); total > 0 {
-		return ui.TitleStyle.Render(string(spinnerFrames[m.spin%len(spinnerFrames)])) +
-			ui.HelpStyle.Render(fmt.Sprintf(" 测速中 %d/%d", done, total))
+	var parts []string
+	if m.anyBusy() {
+		parts = append(parts, "处理中")
 	}
-	return ""
+	if done, total := m.testProgress(); total > 0 {
+		parts = append(parts, fmt.Sprintf("测速中 %d/%d", done, total))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return ui.TitleStyle.Render(string(spinnerFrames[m.spin%len(spinnerFrames)])) +
+		ui.HelpStyle.Render(" "+strings.Join(parts, " · "))
 }
 
 // reenableMouse restores mouse reporting after a tea.ExecProcess round-trip
@@ -1010,6 +1040,13 @@ func reenableMouse() tea.Cmd {
 // anyTesting reports whether any page has a latency test in flight.
 func (m Model) anyTesting() bool {
 	return m.groups.testing || m.subs.testing || m.nodes.testing
+}
+
+// anyBusy reports whether a page has a mutation in flight (subscription
+// update/import/edit, node import/remove/edit). Like a running test it is a
+// cross-page fact: the indicator lives in the chrome, not in a pane.
+func (m Model) anyBusy() bool {
+	return m.subs.busy || m.nodes.busy
 }
 
 // testProgress reports the in-flight latency tests as (returned, total)
@@ -1036,18 +1073,18 @@ func (m Model) toastLine() string {
 // rides that box's own footer instead (see PaneSpec.Footer). AppFrame
 // truncates the keys first so the call-to-action always survives.
 func (m Model) helpKeys() (keys, hint string) {
-	keys = "A 应用  1-5 切换页面  q 退出"
+	keys = "A 重载  1-5 切换页面  q 退出"
 	switch m.page {
 	case pageHome:
-		keys = "L 日志  P 账户  A 应用  r 刷新"
+		keys = "L 日志  P 账户  A 重载  r 刷新"
 	case pageTree:
-		keys = "Tab 切栏  a 自动策略  t/T 测速  A 应用  r 刷新"
+		keys = "Tab 切栏  a 自动策略  t/T 测速  A 重载  r 刷新"
 	case pageSubs:
-		keys = "u 更新  e 编辑  n 新增  y 复制链接  A 应用  r 刷新"
+		keys = "u 更新  e 编辑  n 新增  y 复制链接  A 重载  r 刷新"
 	case pageNodes:
-		keys = "a 导入  e 编辑  y 复制  t/T 测速  Tab 切栏  A 应用  r 刷新"
+		keys = "a 导入  e 编辑  y 复制  t/T 测速  Tab 切栏  A 重载  r 刷新"
 	case pageConfigs:
-		keys = "v 概览/原文  y 复制 DSL  Tab 切栏  A 应用  r 刷新"
+		keys = "v 概览/原文  y 复制 DSL  l/Enter 详情  A 重载  r 刷新"
 	}
 	// The overlay names its own keys while it is up; the trailing hint then
 	// reads as "how to get out".

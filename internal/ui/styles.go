@@ -19,7 +19,9 @@ var (
 
 	TitleStyle    = lipgloss.NewStyle().Bold(true).Foreground(Accent)
 	TabStyle      = lipgloss.NewStyle().Foreground(DimText).Padding(0, 1)
-	TabActive     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")).Background(Accent).Padding(0, 1)
+	// TabActive recolors only — same padding/width as TabStyle so tabs never
+	// shift and the click-span math in the app stays trivial.
+	TabActive     = lipgloss.NewStyle().Bold(true).Foreground(Accent).Padding(0, 1)
 	HelpStyle     = lipgloss.NewStyle().Foreground(DimText)
 	ErrorStyle    = lipgloss.NewStyle().Foreground(Red)
 	OKStyle       = lipgloss.NewStyle().Foreground(Green)

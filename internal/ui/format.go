@@ -58,10 +58,12 @@ func Truncate(s string, w int) string {
 }
 
 // LatencyBar renders a fixed 5-cell micro-bar for a latency in ms — 500ms
-// and above fills it, with eighth-block partials in between. The caller
-// styles the result (usually the same color as the numeric value); callers
-// pass ms > 0 only for alive, tested nodes, everything else renders blank
-// so the column stays aligned.
+// and above fills it. Cells fill with braille dots rising from the bottom
+// (the traffic chart's texture and grammar), never block glyphs: adjacent
+// values shade into each other dot by dot instead of jumping between a
+// full block and a thin sliver. The caller styles the result (usually the
+// same color as the numeric value); callers pass ms > 0 only for alive,
+// tested nodes, everything else renders blank so the column stays aligned.
 func LatencyBar(ms int) string {
 	const w = 5
 	if ms <= 0 {
@@ -71,22 +73,24 @@ func LatencyBar(ms int) string {
 	if v > w {
 		v = w
 	}
-	n := int(v)
+	dots := int(v * 8)
+	full := dots / 8
+	part := dots % 8
+	written := full
 	var b strings.Builder
-	for i := 0; i < n; i++ {
-		b.WriteString("█")
+	for i := 0; i < full; i++ {
+		b.WriteRune(brailleBase + 0xFF)
 	}
-	if n < w {
-		// eighths of a cell, blank to near-full
-		parts := []rune(" ▏▎▍▌▋▊▉")
-		idx := int((v - float64(n)) * 8)
-		if idx > 7 {
-			idx = 7
+	if full < w && part > 0 {
+		var bits rune
+		for _, bit := range dotFillOrder[:part] {
+			bits |= bit
 		}
-		b.WriteRune(parts[idx])
-		for i := 0; i < w-n-1; i++ {
-			b.WriteString(" ")
-		}
+		b.WriteRune(brailleBase + bits)
+		written++
+	}
+	for i := 0; i < w-written; i++ {
+		b.WriteString(" ")
 	}
 	return b.String()
 }

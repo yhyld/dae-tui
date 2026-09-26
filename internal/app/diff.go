@@ -45,11 +45,61 @@ func diffLines(old, new string) []diffLine {
 	return out
 }
 
-// lcsDiff computes the edit script between a and b with the classic
-// longest-common-subsequence table. Routing/DNS profiles are tens of lines,
-// so the quadratic table is not a concern here.
+// maxDiffCells caps the LCS table: the builtin editor accepts arbitrarily
+// large pastes, and a quadratic table over a multi-thousand-line diff is
+// real memory for a confirmation the user answers with y/n.
+const maxDiffCells = 1 << 21
+
+// lcsDiff computes the edit script between a and b. The common head and
+// tail are trimmed first — a one-rule change inside a long profile then
+// pays an LCS table for the changed middle only — and a middle that is
+// still too large to diff pairwise degrades to a wholesale replacement
+// (everything deleted, everything added) instead of trying to align it.
 func lcsDiff(a, b []string) []diffLine {
+	pre := 0
+	for pre < len(a) && pre < len(b) && a[pre] == b[pre] {
+		pre++
+	}
+	suf := 0
+	for suf < len(a)-pre && suf < len(b)-pre && a[len(a)-1-suf] == b[len(b)-1-suf] {
+		suf++
+	}
+	ops := make([]diffLine, 0, pre+suf+len(a)+len(b))
+	for i := 0; i < pre; i++ {
+		ops = append(ops, diffLine{kind: diffEqual, text: a[i]})
+	}
+	ma, mb := a[pre:len(a)-suf], b[pre:len(b)-suf]
+	if len(ma)*len(mb) > maxDiffCells {
+		for _, l := range ma {
+			ops = append(ops, diffLine{kind: diffDel, text: l})
+		}
+		for _, l := range mb {
+			ops = append(ops, diffLine{kind: diffAdd, text: l})
+		}
+	} else {
+		ops = append(ops, lcsTable(ma, mb)...)
+	}
+	for i := len(a) - suf; i < len(a); i++ {
+		ops = append(ops, diffLine{kind: diffEqual, text: a[i]})
+	}
+	return ops
+}
+
+// lcsTable is the classic longest-common-subsequence edit script. Routing/
+// DNS profiles are tens of lines (and lcsDiff trims the unchanged frame
+// first), so the quadratic table is not a concern here.
+func lcsTable(a, b []string) []diffLine {
 	n, m := len(a), len(b)
+	if n == 0 || m == 0 {
+		var ops []diffLine
+		for _, l := range a {
+			ops = append(ops, diffLine{kind: diffDel, text: l})
+		}
+		for _, l := range b {
+			ops = append(ops, diffLine{kind: diffAdd, text: l})
+		}
+		return ops
+	}
 	table := make([][]int, n+1)
 	for i := range table {
 		table[i] = make([]int, m+1)

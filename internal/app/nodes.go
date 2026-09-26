@@ -19,11 +19,10 @@ import (
 // share links (one or a pasted batch), edit tag/link in place, remove,
 // latency-test, and attach to a group.
 type nodesPage struct {
-	nodes    []driver.Node
-	sel      int
-	focus    int // 0 left, 1 right
-	expanded bool
-	groups   []driver.Group // for the attach-to-group picker
+	nodes  []driver.Node
+	sel    int
+	focus  int            // 0 left, 1 right
+	groups []driver.Group // for the attach-to-group picker
 
 	lat map[string]driver.Latency
 
@@ -318,12 +317,10 @@ func (p *nodesPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		case "j", "down":
 			if p.sel < len(nodes)-1 {
 				p.sel++
-				p.expanded = false
 			}
 		case "k", "up":
 			if p.sel > 0 {
 				p.sel--
-				p.expanded = false
 			}
 		case "g":
 			p.sel = 0
@@ -332,7 +329,6 @@ func (p *nodesPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		case "tab", "l", "right", "enter":
 			if p.cur() != nil {
 				p.focus = 1
-				p.expanded = true
 			}
 		case "x":
 			if p.cur() != nil {
@@ -349,7 +345,6 @@ func (p *nodesPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	switch msg.String() {
 	case "tab", "h", "left", "esc":
 		p.focus = 0
-		p.expanded = false
 	case "e":
 		if n := p.cur(); n != nil {
 			return p.openEdit(n)
@@ -606,9 +601,6 @@ func (p nodesPage) leftLines() []string {
 			ui.HelpStyle.Render(ui.PadRight(n.Protocol, 8))+
 			latencyCell(p.lat, n.ID, latCellW(p.leftW-4)))
 	}
-	if p.busy {
-		lines = append(lines, ui.HelpStyle.Render("⏳ 操作进行中…"))
-	}
 	return lines
 }
 
@@ -643,7 +635,6 @@ func (p *nodesPage) leftClick(row int) {
 		return
 	}
 	p.sel = i
-	p.expanded = false
 	p.focus = 0
 }
 
@@ -654,16 +645,6 @@ func (p nodesPage) rightLines() []string {
 	n := p.cur()
 	if n == nil {
 		return []string{ui.HelpStyle.Render("（无节点）")}
-	}
-	var report []string
-	if p.importOK > 0 || len(p.importFail) > 0 {
-		report = append(report, ui.SelectedStyle.Render("上次导入 ")+
-			ui.HelpStyle.Render(fmt.Sprintf("%d 成功 / %d 失败", p.importOK, len(p.importFail))))
-		for _, r := range p.importFail {
-			report = append(report, ui.ErrorStyle.Render(" ✗ "+
-				ui.Truncate(r.Link, max0(p.rightW-26))+" — "+ui.Truncate(r.Error, 12)))
-		}
-		report = append(report, "")
 	}
 	lines := []string{
 		ui.SelectedStyle.Render("名称  ") + ui.SpaceAfterFlag(n.Name),
@@ -697,5 +678,16 @@ func (p nodesPage) rightLines() []string {
 				ui.Sparkline(series, w, 1, lipgloss.NewStyle().Foreground(ui.Green), ""))
 		}
 	}
-	return append(report, lines...)
+	// The batch-import report trails the node's own details (a toast line
+	// cannot name the failed links): the pane's subject stays anchored at
+	// the top, the report is the appendix below it.
+	if p.importOK > 0 || len(p.importFail) > 0 {
+		lines = append(lines, "", ui.SelectedStyle.Render("上次导入 ")+
+			ui.HelpStyle.Render(fmt.Sprintf("%d 成功 / %d 失败", p.importOK, len(p.importFail))))
+		for _, r := range p.importFail {
+			lines = append(lines, ui.ErrorStyle.Render(" ✗ "+
+				ui.Truncate(r.Link, max0(p.rightW-26))+" — "+ui.Truncate(r.Error, 12)))
+		}
+	}
+	return lines
 }

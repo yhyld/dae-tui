@@ -31,6 +31,9 @@ func validateFieldValue(f driver.ConfigField, val string) error {
 			return fmt.Errorf("需要时长（如 30s、5m），得到 %q", val)
 		}
 	case "array":
+		// The driver submits with the same comma-only split, so an element
+		// containing spaces survives intact; empties are rejected here
+		// because the backend-side split would silently drop them.
 		for _, item := range strings.Split(val, ",") {
 			if strings.TrimSpace(item) == "" {
 				return errors.New("数组元素不能为空（用逗号分隔）")
@@ -41,13 +44,15 @@ func validateFieldValue(f driver.ConfigField, val string) error {
 }
 
 // configuredIfaces splits an interface field value ("eth0, wlan0") into NIC
-// names. dae accepts the literal "auto" as "detect it yourself" (daed's
+// names, with the same comma-only rule the driver uses to submit the value —
+// checking against a different split would flag names the backend never
+// sees. dae accepts the literal "auto" as "detect it yourself" (daed's
 // default wan_interface) — it is not a NIC name, so it is dropped here and
 // never reported as missing.
 func configuredIfaces(value string) []string {
 	var out []string
-	for _, n := range strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ' ' }) {
-		if n == "" || strings.EqualFold(n, "auto") {
+	for _, n := range strings.Split(value, ",") {
+		if n = strings.TrimSpace(n); n == "" || strings.EqualFold(n, "auto") {
 			continue
 		}
 		out = append(out, n)
