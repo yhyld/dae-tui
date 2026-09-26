@@ -49,8 +49,12 @@ func main() {
 		cfg.Endpoint = *endpointFlag
 	}
 
-	saveCfg := func() {
-		if err := cfg.Save(cfgPath); err != nil {
+	// Credential persistence goes through Config's locked mutators: these
+	// hooks fire on background request goroutines (silent re-auth) while
+	// the UI may be logging out on the tea goroutine, and each save is an
+	// atomic write-then-rename.
+	warnSave := func(err error) {
+		if err != nil {
 			fmt.Fprintln(os.Stderr, "警告: 保存配置失败:", err)
 		}
 	}
@@ -61,15 +65,13 @@ func main() {
 		Password: cfg.Password,
 		Token:    cfg.Token,
 		SaveToken: func(t string) {
-			cfg.Token = t
-			saveCfg()
+			warnSave(cfg.UpdateToken(cfgPath, t))
 		},
 	})
 	// Mirror credentials into the config after interactive login so the
 	// 30-day JWT can be renewed silently on expiry.
 	drv.SetCredHook(func(u, pw string) {
-		cfg.Username, cfg.Password = u, pw
-		saveCfg()
+		warnSave(cfg.UpdateCredentials(cfgPath, u, pw))
 	})
 
 	if *probe {

@@ -22,13 +22,14 @@ type Client struct {
 
 	mu    sync.Mutex
 	token string
-	// reauthing marks a re-auth in flight. The hook issues its own requests
-	// through this client, so it must not be allowed to re-enter Do.
-	reauthing bool
+	// reauthDone is non-nil while a re-auth is in flight and is closed when
+	// it finishes. Concurrent "access denied" responses share that one
+	// refresh instead of each failing on its own.
+	reauthDone chan struct{}
 	// onReAuth is invoked when the backend answers "access denied"; it
 	// should refresh the token (e.g. re-run token() with stored
-	// credentials) or return an error.
-	onReAuth func(*Client) error
+	// credentials) or return an error. Installed once at construction.
+	onReAuth func(ctx context.Context, c *Client) error
 }
 
 func NewClient(endpoint string) *Client {
@@ -54,8 +55,10 @@ func (c *Client) Token() string {
 }
 
 // SetReAuth installs the re-authentication hook (see onReAuth).
-func (c *Client) SetReAuth(f func(*Client) error) {
+func (c *Client) SetReAuth(f func(ctx context.Context, c *Client) error) {
+	c.mu.Lock()
 	c.onReAuth = f
+	c.mu.Unlock()
 }
 
 type gqlRequest struct {
@@ -63,47 +66,67 @@ type gqlRequest struct {
 	Variables map[string]any `json:"variables,omitempty"`
 }
 
+// reauthCtxKey marks the re-auth hook's own requests: they must never
+// trigger another re-auth, or the refresh's leader would wait on itself.
+type reauthCtxKey struct{}
+
 // Do executes a GraphQL document. out may be nil for documents whose data we
 // ignore. On an "access denied" GraphQL error the re-auth hook runs once and
-// the request is replayed; if re-auth fails the call returns
+// the request is replayed; if either fails the call returns
 // driver.ErrNeedAuth.
 func (c *Client) Do(ctx context.Context, query string, vars map[string]any, out any) error {
 	err := c.roundTrip(ctx, query, vars, out)
-	if err == nil {
-		return nil
-	}
-	if !isAccessDenied(err) || c.onReAuth == nil {
+	if !isAccessDenied(err) || c.onReAuth == nil || ctx.Value(reauthCtxKey{}) != nil {
 		return err
 	}
-	// The re-auth hook talks to this same client, so guard against
-	// re-entry: a token request that itself answers "access denied" would
-	// otherwise send Do recursing without bound until the stack blows.
-	if !c.beginReAuth() {
-		return err
+	hookErr, ok := c.reauthenticate(ctx)
+	if !ok {
+		return err // request ctx expired while waiting for the refresh
 	}
-	defer c.endReAuth()
-	if rerr := c.onReAuth(c); rerr != nil {
-		return fmt.Errorf("%w: %v", driver.ErrNeedAuth, rerr)
+	if hookErr != nil {
+		return fmt.Errorf("%w: %v", driver.ErrNeedAuth, hookErr)
 	}
-	return c.roundTrip(ctx, query, vars, out)
+	err = c.roundTrip(ctx, query, vars, out)
+	if isAccessDenied(err) {
+		// The refresh succeeded but the replay is still denied: the session
+		// is not recoverable with the stored credentials.
+		return fmt.Errorf("%w: %v", driver.ErrNeedAuth, err)
+	}
+	return err
 }
 
-// beginReAuth claims the re-auth slot, reporting false when another
-// goroutine is already refreshing the token.
-func (c *Client) beginReAuth() bool {
+// reauthenticate refreshes the session token and reports whether the caller
+// may replay its request. A refresh already in flight is waited on rather
+// than duplicated, so a token expiring under N concurrent requests costs one
+// token() call instead of N spurious failures. ok is false only when ctx
+// expired while waiting; hookErr is the leader's refresh error (always nil
+// for followers, whose replay decides).
+func (c *Client) reauthenticate(ctx context.Context) (hookErr error, ok bool) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.reauthing {
-		return false
+	if c.reauthDone != nil {
+		done := c.reauthDone
+		c.mu.Unlock()
+		select {
+		case <-done:
+			return nil, true
+		case <-ctx.Done():
+			return nil, false
+		}
 	}
-	c.reauthing = true
-	return true
-}
-
-func (c *Client) endReAuth() {
-	c.mu.Lock()
-	c.reauthing = false
+	done := make(chan struct{})
+	c.reauthDone = done
+	hook := c.onReAuth
 	c.mu.Unlock()
+
+	hookErr = hook(context.WithValue(context.Background(), reauthCtxKey{}, struct{}{}), c)
+
+	c.mu.Lock()
+	if c.reauthDone == done {
+		c.reauthDone = nil
+	}
+	c.mu.Unlock()
+	close(done)
+	return hookErr, true
 }
 
 func (c *Client) roundTrip(ctx context.Context, query string, vars map[string]any, out any) error {

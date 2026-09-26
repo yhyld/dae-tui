@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -31,6 +32,11 @@ type Options struct {
 
 type Driver struct {
 	client *Client
+	// optsMu guards opts' credential fields: Login/CreateUser/UpdatePassword/
+	// Logout run on tea cmd goroutines while re-auth reads the credentials
+	// from arbitrary request goroutines. SaveToken and credHook are set once
+	// before the TUI starts and are read without the lock.
+	optsMu sync.Mutex
 	opts   Options
 	// credHook is notified whenever credentials are established via
 	// Login/CreateUser so the caller can persist them.
@@ -51,21 +57,24 @@ func New(opts Options) *Driver {
 	}
 	d := &Driver{client: NewClient(opts.Endpoint), opts: opts}
 	d.client.SetToken(opts.Token)
-	d.client.SetReAuth(func(c *Client) error { return d.reAuth(c) })
+	d.client.SetReAuth(func(ctx context.Context, c *Client) error { return d.reAuth(ctx, c) })
 	return d
 }
 
-func (d *Driver) reAuth(c *Client) error {
-	if d.opts.Username == "" || d.opts.Password == "" {
+func (d *Driver) reAuth(ctx context.Context, c *Client) error {
+	d.optsMu.Lock()
+	username, password, saveToken := d.opts.Username, d.opts.Password, d.opts.SaveToken
+	d.optsMu.Unlock()
+	if username == "" || password == "" {
 		return errors.New("no stored credentials")
 	}
-	tok, err := c.FetchToken(context.Background(), d.opts.Username, d.opts.Password)
+	tok, err := c.FetchToken(ctx, username, password)
 	if err != nil {
 		return err
 	}
 	c.SetToken(tok)
-	if d.opts.SaveToken != nil {
-		d.opts.SaveToken(tok)
+	if saveToken != nil {
+		saveToken(tok)
 	}
 	return nil
 }
@@ -108,13 +117,16 @@ func (d *Driver) Login(ctx context.Context, username, password string) (driver.S
 	if err != nil {
 		return driver.Status{}, err
 	}
-	d.opts.Username, d.opts.Password = username, password
+	d.setCredentials(username, password)
 	if d.credHook != nil {
 		d.credHook(username, password)
 	}
 	d.client.SetToken(tok)
-	if d.opts.SaveToken != nil {
-		d.opts.SaveToken(tok)
+	d.optsMu.Lock()
+	saveToken := d.opts.SaveToken
+	d.optsMu.Unlock()
+	if saveToken != nil {
+		saveToken(tok)
 	}
 	return d.Connect(ctx)
 }
@@ -124,13 +136,16 @@ func (d *Driver) CreateUser(ctx context.Context, username, password string) (dri
 	if err != nil {
 		return driver.Status{}, err
 	}
-	d.opts.Username, d.opts.Password = username, password
+	d.setCredentials(username, password)
 	if d.credHook != nil {
 		d.credHook(username, password)
 	}
 	d.client.SetToken(tok)
-	if d.opts.SaveToken != nil {
-		d.opts.SaveToken(tok)
+	d.optsMu.Lock()
+	saveToken := d.opts.SaveToken
+	d.optsMu.Unlock()
+	if saveToken != nil {
+		saveToken(tok)
 	}
 	return d.Connect(ctx)
 }
@@ -239,7 +254,11 @@ func (d *Driver) ListManualNodes(ctx context.Context) ([]driver.Node, error) {
 				nodes = append(nodes, mapNode(n))
 			}
 		}
-		if !out.Nodes.PageInfo.HasNextPage || len(out.Nodes.Edges) == 0 || page > 20 {
+		// Same defensive page ceiling as SubscriptionNodes (100 pages ×
+		// 200/page over the *global* connection): beyond it something is
+		// wrong with the server's cursor, and paging forever is worse than
+		// returning what we have.
+		if !out.Nodes.PageInfo.HasNextPage || len(out.Nodes.Edges) == 0 || page > 100 {
 			return nodes, nil
 		}
 		after = out.Nodes.PageInfo.EndCursor
@@ -941,7 +960,10 @@ func printable(s string) string {
 
 // UpdatePassword changes the signed-in account's password. daed answers with
 // a fresh token and invalidates the old one, so the new token and the new
-// password (what silent re-auth replays) must both be persisted.
+// password (what silent re-auth replays) must both be persisted. The
+// password is persisted first: a crash between the two saves then leaves
+// (old token + new password), which silent re-auth recovers from — the
+// reverse pairing would lock the session out.
 func (d *Driver) UpdatePassword(ctx context.Context, currentPassword, newPassword string) error {
 	var out struct {
 		UpdatePassword string `json:"updatePassword"`
@@ -950,13 +972,16 @@ func (d *Driver) UpdatePassword(ctx context.Context, currentPassword, newPasswor
 		map[string]any{"currentPassword": currentPassword, "newPassword": newPassword}, &out); err != nil {
 		return err
 	}
+	d.optsMu.Lock()
 	d.opts.Password = newPassword
+	username, saveToken := d.opts.Username, d.opts.SaveToken
+	d.optsMu.Unlock()
 	d.client.SetToken(out.UpdatePassword)
-	if d.opts.SaveToken != nil {
-		d.opts.SaveToken(out.UpdatePassword)
-	}
 	if d.credHook != nil {
-		d.credHook(d.opts.Username, newPassword)
+		d.credHook(username, newPassword)
+	}
+	if saveToken != nil {
+		saveToken(out.UpdatePassword)
 	}
 	return nil
 }
@@ -965,9 +990,18 @@ func (d *Driver) UpdatePassword(ctx context.Context, currentPassword, newPasswor
 // stays valid until it expires — so all this can do is stop replaying the
 // stored credentials.
 func (d *Driver) Logout(ctx context.Context) error {
+	d.optsMu.Lock()
 	d.opts.Username, d.opts.Password, d.opts.Token = "", "", ""
+	d.optsMu.Unlock()
 	d.client.SetToken("")
 	return nil
+}
+
+// setCredentials stores freshly established credentials under optsMu.
+func (d *Driver) setCredentials(username, password string) {
+	d.optsMu.Lock()
+	d.opts.Username, d.opts.Password = username, password
+	d.optsMu.Unlock()
 }
 
 // --- helpers ---

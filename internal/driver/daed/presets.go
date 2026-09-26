@@ -77,8 +77,9 @@ func validGroupName(name string) bool {
 
 // DetectRoutingPreset reports which preset a stored routing DSL corresponds
 // to, or "" when it is custom. It requires the shared prelude and only
-// recognizes the exact rule sets the presets emit, so a hand-written routing
-// that merely looks similar is reported as custom rather than mislabeled.
+// recognizes the exact rule sets the presets emit: a hand-written routing
+// that merely contains a preset's rules (plus extras) reads as custom, so
+// "apply preset" can never silently drop the extras.
 func (d *Driver) DetectRoutingPreset(raw string) string {
 	lines := presetLines(raw)
 	if len(lines) == 0 {
@@ -89,61 +90,92 @@ func (d *Driver) DetectRoutingPreset(raw string) string {
 			return "" // a rule no preset emits → custom
 		}
 	}
-	// The prelude, semantically: any pname(...) -> must_direct line plus the
-	// private-IP rule. daed's own default template spells the pname arguments
-	// differently from our presets, and it is still a nonCn routing.
-	hasMustDirect, hasPrivate := false, false
-	for _, l := range lines {
-		if l == "dip(geoip:private)->direct" {
-			hasPrivate = true
-			continue
-		}
-		if cond, target, ok := splitRule(l); ok &&
-			strings.HasPrefix(cond, "pname(") && target == "must_direct" {
-			hasMustDirect = true
-		}
-	}
-	if !hasMustDirect || !hasPrivate {
-		return "" // without the prelude it is not one of ours
-	}
-
+	// Count every line by category; the switch below then requires the
+	// totals to equal one preset's output exactly. Missing a count anywhere
+	// (a second pname rule, a duplicated cn rule, two fallbacks, …) makes
+	// the routing custom.
+	var pnames, privates, fallbacks int
 	fallback := ""
-	cnDirect, cnProxy, gfwProxy := 0, 0, false
+	hasMustDirect, hasPrivate := false, false
+	var dipCnDirect, domCnDirect, dipCnProxy, domCnProxy int
+	var gfwProxy, gfwOther, cnOther int
 	proxyTargets := map[string]bool{}
 	for _, l := range lines {
 		if strings.HasPrefix(l, "fallback:") {
+			fallbacks++
 			fallback = strings.TrimPrefix(l, "fallback:")
 			continue
 		}
 		cond, target, ok := splitRule(l)
 		if !ok {
-			continue
+			return "" // presetLine passed but there is no rule arrow
 		}
 		isProxy := !builtinOutbounds[target]
-		switch cond {
-		case "dip(geoip:cn)", "domain(geosite:cn)":
+		switch {
+		case strings.HasPrefix(cond, "pname("):
+			pnames++
+			if target == "must_direct" {
+				// daed's own default template spells the pname arguments
+				// differently from our presets and is still a nonCn routing,
+				// so the prelude rule matches semantically, not verbatim.
+				hasMustDirect = true
+			}
+		case cond == "dip(geoip:private)":
+			privates++
+			if target == "direct" {
+				hasPrivate = true
+			}
+		case cond == "dip(geoip:cn)":
 			switch {
 			case target == "direct":
-				cnDirect++
+				dipCnDirect++
 			case isProxy:
-				cnProxy++
+				dipCnProxy++
 				proxyTargets[target] = true
+			default:
+				cnOther++ // e.g. dip(geoip:cn) -> block: no preset emits it
 			}
-		case "domain(geosite:gfw)":
+		case cond == "domain(geosite:cn)":
+			switch {
+			case target == "direct":
+				domCnDirect++
+			case isProxy:
+				domCnProxy++
+				proxyTargets[target] = true
+			default:
+				cnOther++
+			}
+		case cond == "domain(geosite:gfw)":
 			if isProxy {
-				gfwProxy = true
+				gfwProxy++
+			} else {
+				gfwOther++ // gfw -> direct: no preset emits it
 			}
+		default:
+			return "" // not preset output despite the allowed prefix
 		}
 	}
+	// The prelude is exactly one pname rule and one private-IP rule.
+	if pnames != 1 || privates != 1 || !hasMustDirect || !hasPrivate {
+		return ""
+	}
+	if fallbacks != 1 {
+		return "" // a preset always ends with exactly one fallback
+	}
 
+	cnRules := dipCnDirect + domCnDirect + dipCnProxy + domCnProxy + cnOther
+	gfwRules := gfwProxy + gfwOther
 	switch {
-	case gfwProxy && fallback == "direct":
+	case gfwProxy == 1 && gfwOther == 0 && cnRules == 0 && fallback == "direct":
 		return "gfw"
-	case cnDirect == 2 && !builtinOutbounds[fallback]:
+	case dipCnDirect == 1 && domCnDirect == 1 && dipCnProxy == 0 && domCnProxy == 0 &&
+		cnOther == 0 && gfwRules == 0 && !builtinOutbounds[fallback]:
 		return "nonCn"
-	case cnProxy == 2 && len(proxyTargets) == 1 && fallback == "direct":
+	case dipCnProxy == 1 && domCnProxy == 1 && len(proxyTargets) == 1 &&
+		dipCnDirect == 0 && domCnDirect == 0 && cnOther == 0 &&
+		gfwRules == 0 && fallback == "direct":
 		return "cnOnly"
-	case !gfwProxy && cnDirect == 0 && cnProxy == 0 && !builtinOutbounds[fallback]:
+	case cnRules == 0 && gfwRules == 0 && !builtinOutbounds[fallback]:
 		return "global"
 	}
 	return ""

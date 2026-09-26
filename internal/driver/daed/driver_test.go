@@ -3,10 +3,12 @@ package daed
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -182,6 +184,73 @@ func TestAccessDeniedWithoutCredentials(t *testing.T) {
 
 	_, err := d.ListGroups(ctxT(t))
 	if err == nil || !strings.Contains(err.Error(), "need authentication") {
+		t.Fatalf("want ErrNeedAuth, got %v", err)
+	}
+}
+
+// A token expiring under N concurrent requests must cost one shared refresh:
+// the requests that lost the re-auth race wait for it and then replay,
+// instead of each failing with a raw "access denied".
+func TestReAuthSingleflight(t *testing.T) {
+	var tokens int32
+	d, _ := newTestDriver(t, func(op string, vars map[string]any, auth string) (any, []gqlError) {
+		switch op {
+		case "Token":
+			atomic.AddInt32(&tokens, 1)
+			return map[string]any{"token": "jwt-2"}, nil
+		case "NumberUsers":
+			if auth != "Bearer jwt-2" {
+				return nil, []gqlError{{Message: "access denied"}}
+			}
+			return map[string]any{"numberUsers": 1}, nil
+		}
+		return nil, []gqlError{{Message: "unexpected op " + op}}
+	})
+	d.client.SetToken("jwt-expired")
+
+	const n = 8
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			_, errs[i] = d.NumberUsers(ctxT(t))
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("request %d failed: %v", i, err)
+		}
+	}
+	// One refresh for everyone, plus one per straggler whose denial landed
+	// after a refresh had already finished (scheduler-dependent, usually 0-1
+	// extra). Well below n proves the requests shared refreshes instead of
+	// each triggering its own; the old loser-fails behavior is caught by
+	// the err check above.
+	if got := atomic.LoadInt32(&tokens); int(got) > n/2 {
+		t.Fatalf("token refreshed %d times, want <= %d (shared refresh)", got, n/2)
+	}
+}
+
+// When the refresh succeeds but the replay is still denied, the call must
+// surface driver.ErrNeedAuth (the documented contract), not a bare GraphQL
+// error the UI can only string-match on.
+func TestReplayDeniedReturnsErrNeedAuth(t *testing.T) {
+	d, _ := newTestDriver(t, func(op string, vars map[string]any, auth string) (any, []gqlError) {
+		if op == "Token" {
+			return map[string]any{"token": "jwt-2"}, nil
+		}
+		return nil, []gqlError{{Message: "access denied"}}
+	})
+	d.client.SetToken("jwt-expired")
+
+	_, err := d.NumberUsers(ctxT(t))
+	if !errors.Is(err, driver.ErrNeedAuth) {
 		t.Fatalf("want ErrNeedAuth, got %v", err)
 	}
 }
@@ -962,6 +1031,69 @@ func TestDetectRoutingPresetEdgeCases(t *testing.T) {
 func preludeFor() string {
 	return "pname(NetworkManager, systemd-resolved, dnsmasq) -> must_direct\n" +
 		"dip(geoip:private) -> direct"
+}
+
+// A routing that contains a preset's rules plus extras must read as custom:
+// "apply preset" rebuilds the DSL from the template and would silently drop
+// the extras, so detection has to require the exact rule set.
+func TestDetectRoutingPresetRejectsSupersets(t *testing.T) {
+	d := New(Options{})
+	cases := []struct{ name, raw string }{
+		{"nonCn plus extra gfw rule", preludeFor() +
+			"\n domain(geosite:gfw) -> proxy\ndip(geoip:cn) -> direct\ndomain(geosite:cn) -> direct\nfallback: proxy"},
+		{"gfw plus extra cn rule", preludeFor() +
+			"\ndomain(geosite:gfw) -> proxy\nfallback: direct\ndip(geoip:cn) -> direct"},
+		{"duplicated cn rule", preludeFor() +
+			"\ndip(geoip:cn) -> direct\ndip(geoip:cn) -> direct\nfallback: proxy"},
+		{"gfw rule to a builtin target", preludeFor() +
+			"\ndomain(geosite:gfw) -> direct\nfallback: proxy"},
+		{"cn rule to another builtin", preludeFor() +
+			"\ndip(geoip:cn) -> block\nfallback: proxy"},
+		{"prelude only, no fallback", preludeFor()},
+		{"two fallbacks", preludeFor() + "\nfallback: proxy\nfallback: direct"},
+		{"second pname rule", "pname(a) -> must_direct\npname(b) -> must_direct\n" +
+			"dip(geoip:private) -> direct\nfallback: proxy"},
+	}
+	for _, c := range cases {
+		if got := d.DetectRoutingPreset(c.raw); got != "" {
+			t.Errorf("%s: DetectRoutingPreset = %q, want custom", c.name, got)
+		}
+	}
+}
+
+// The manual-node list walks the global nodes connection (subscription
+// nodes included) and must page as deep as the per-subscription walker —
+// a 20-page ceiling hid manual nodes on large instances.
+func TestListManualNodesPaginatesPastTwentyPages(t *testing.T) {
+	const pages = 25
+	d, _ := newTestDriver(t, func(op string, vars map[string]any, auth string) (any, []gqlError) {
+		if op != "AllNodes" {
+			return nil, []gqlError{{Message: "unexpected op " + op}}
+		}
+		page := 1
+		if after, _ := vars["after"].(string); after != "" {
+			n, _ := strconv.Atoi(strings.TrimPrefix(after, "p"))
+			page = n + 1
+		}
+		edges := make([]any, 0, 3)
+		for i := 0; i < 3; i++ {
+			edges = append(edges, map[string]any{
+				"id": fmt.Sprintf("p%d-%d", page, i), "name": "manual", "subscriptionID": "",
+			})
+		}
+		return map[string]any{"nodes": map[string]any{
+			"edges":    edges,
+			"pageInfo": map[string]any{"endCursor": fmt.Sprintf("p%d", page), "hasNextPage": page < pages},
+		}}, nil
+	})
+
+	nodes, err := d.ListManualNodes(ctxT(t))
+	if err != nil {
+		t.Fatalf("ListManualNodes: %v", err)
+	}
+	if len(nodes) != pages*3 {
+		t.Fatalf("got %d manual nodes, want %d", len(nodes), pages*3)
+	}
 }
 
 func TestImportNodesReportsPerLinkResults(t *testing.T) {

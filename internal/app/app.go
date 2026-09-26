@@ -112,10 +112,23 @@ func (m Model) Init() tea.Cmd {
 }
 
 func cfgHasAuth(c *config.Config) bool {
-	return c.Token != "" || (c.Username != "" && c.Password != "")
+	return c.HasAuth()
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// An ErrNeedAuth arriving mid-session means the driver's silent re-auth
+	// already failed (stored credentials rejected): every poll would keep
+	// failing the same way, so route the user back to the login form
+	// instead of an endless stream of error toasts.
+	if m.phase == phaseMain {
+		if err := msgAuthErr(msg); errors.Is(err, driver.ErrNeedAuth) {
+			m.phase = phaseLogin
+			m.login = newLoginForm(false)
+			m.login.username.SetValue(m.cfg.Username)
+			m.login.err = "登录已失效（凭据被拒绝），请重新登录"
+			return m, m.login.init()
+		}
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
@@ -211,8 +224,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case logoutMsg:
 		// Forget the session locally: daed's JWT stays valid until it
 		// expires, but this machine must stop replaying the credentials.
-		m.cfg.Username, m.cfg.Password, m.cfg.Token = "", "", ""
-		if err := m.cfg.Save(m.cfgPath); err != nil {
+		if err := m.cfg.ClearSession(m.cfgPath); err != nil {
 			m.showToast("✗ 清除本机凭据失败: " + shortErr(err))
 		}
 		m.drv.Logout(context.Background())
@@ -247,6 +259,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case trafficMsg:
+		m.home.apiTook = msg.Took
 		if msg.Err == nil {
 			m.home.update(msg.Snap)
 		} else {
@@ -298,6 +311,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case subsMsg:
 		m.subs.handleSubs(msg.Subs, msg.Err)
 		m.groups.setSubs(msg.Subs, msg.Err)
+		m.home.setSubs(msg.Subs, msg.Err)
 		// An `u` update dropped the expanded subscription's cached nodes;
 		// re-fetch them now instead of waiting for a collapse/expand cycle.
 		if cmd := m.subs.ensureNodes(m.drv); cmd != nil {
@@ -355,6 +369,48 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	return m, nil
+}
+
+// msgAuthErr returns the error carried by a driver-backed result message,
+// for the central ErrNeedAuth check (nil when the message carries none).
+// Boot- and login-phase messages are deliberately absent: their errors are
+// auth-specific and handled by their own cases.
+func msgAuthErr(msg tea.Msg) error {
+	switch v := msg.(type) {
+	case statusMsg:
+		return v.Err
+	case groupsMsg:
+		return v.Err
+	case manualNodesMsg:
+		return v.Err
+	case importDoneMsg:
+		return v.Err
+	case nodesChangedMsg:
+		return v.Err
+	case attachCandidatesMsg:
+		return v.Err
+	case subNodesMsg:
+		return v.Err
+	case latenciesMsg:
+		return v.Err
+	case trafficMsg:
+		return v.Err
+	case subsMsg:
+		return v.Err
+	case selectionsMsg:
+		return v.Err
+	case ifacesMsg:
+		return v.Err
+	case opDoneMsg:
+		return v.Err
+	case editorDoneMsg:
+		return v.Err
+	case editorValidatedMsg:
+		return v.Err
+	case presetValidatedMsg:
+		return v.Err
+	}
+	return nil
 }
 
 func (m *Model) enterMain() {
@@ -682,13 +738,13 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 // click maps a cell-coordinate press onto the UI. Frame rows: 0 is the top
 // border, 1 the status line, 2 the tabs, 3+ the body; in a pane page the
-// body starts with the pane title (3) and rule (4), rows start at 5. Column
-// 0 is the frame's left border.
+// body starts with the pane's title-in-rule line (3) and rows start at 4.
+// Column 0 is the frame's left border, column 1 the page-wide margin.
 func (m Model) click(x, y int) (tea.Model, tea.Cmd) {
 	if m.anyModal() || m.confirmApply {
 		return m, nil
 	}
-	cx := x - 1
+	cx := x - 2 // frame border + page-wide left margin
 	if y == 2 && cx >= 0 {
 		return m.tabClick(cx)
 	}
@@ -699,10 +755,10 @@ func (m Model) click(x, y int) (tea.Model, tea.Cmd) {
 		m.helpScroll = 0
 		return m, nil
 	}
-	if y < 5 || cx < 0 {
+	if y < 4 || cx < 0 {
 		return m, nil
 	}
-	row := y - 5
+	row := y - 4
 	switch m.page {
 	case pageTree:
 		if cx <= m.groups.leftW {
@@ -797,7 +853,9 @@ func (m Model) View() string {
 	// Hard clamp: a page must never push the chrome (status/tabs/help)
 	// off screen — this was the original scrolling bug. The body is also
 	// padded up to the available height so the frame always spans exactly
-	// the terminal and the help line stays anchored to the last row.
+	// the terminal and the help line stays anchored to the last row. Every
+	// line gets the page-wide left margin (one cell inside the frame), the
+	// same baseline the home page's boxes and the chrome use.
 	avail := m.height - 6
 	if avail < 1 {
 		avail = 1
@@ -806,18 +864,19 @@ func (m Model) View() string {
 	// Floating windows stack over the page instead of displacing it: the
 	// page's own form/dialog, then the global apply confirmation, then the
 	// help — at most one page overlay is open at a time (anyModal gates
-	// the keys), but A may be pressed over one.
+	// the keys), but A may be pressed over one. They center in the
+	// margin-adjusted content width, matching the clamp below.
 	if ov := m.pageOverlay(); ov != nil {
-		body = ui.Overlay(body, overlayBox(ov, cw), cw, avail)
+		body = ui.Overlay(body, overlayBox(ov, cw-1), cw-1, avail)
 	}
 	if m.confirmApply {
 		body = ui.Overlay(body, overlayBox(&overlaySpec{destructive: true, lines: []string{
 			ui.TitleStyle.Render(" 确认应用当前选中 config+dns+routing (run)？"),
 			ui.OKStyle.Render(" y 确认") + "    " + ui.ErrorStyle.Render("n / esc 取消"),
-		}}, cw), cw, avail)
+		}}, cw-1), cw-1, avail)
 	}
 	if m.helpOpen {
-		body = ui.Overlay(body, helpOverlayBox(cw, avail, m.helpScroll), cw, avail)
+		body = ui.Overlay(body, helpOverlayBox(cw-1, avail, m.helpScroll), cw-1, avail)
 	}
 	lines := strings.Split(body, "\n")
 	if len(lines) > avail {
@@ -828,7 +887,7 @@ func (m Model) View() string {
 	}
 	for i := range lines {
 		if lines[i] != "" {
-			lines[i] = ui.Truncate(lines[i], cw)
+			lines[i] = " " + ui.Truncate(lines[i], cw-1)
 		}
 	}
 
@@ -883,11 +942,11 @@ func (m Model) statusBar() string {
 		s := m.home.snap
 		right = ui.HelpStyle.Render("↑" + ui.Rate(s.UpRate) + " ↓" + ui.Rate(s.DownRate))
 	}
-	gap := m.width - 2 - lipgloss.Width(left) - lipgloss.Width(right)
+	gap := m.width - 3 - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {
 		gap = 1
 	}
-	return ui.Truncate(left+strings.Repeat(" ", gap)+right, m.width-2)
+	return " " + ui.Truncate(left+strings.Repeat(" ", gap)+right, m.width-3)
 }
 
 var tabLabels = []string{"1 首页", "2 群组", "3 订阅", "4 手动节点", "5 配置"}
@@ -912,7 +971,7 @@ func (m Model) tabsBar() string {
 	}
 	// The progress suffix must never wrap the bar onto a second row — the
 	// height math reserves exactly one line for the tabs.
-	return ui.Truncate(bar, m.width-2)
+	return " " + ui.Truncate(bar, m.width-3)
 }
 
 // reenableMouse restores mouse reporting after a tea.ExecProcess round-trip
@@ -945,7 +1004,7 @@ func (m Model) toastLine() string {
 		return ""
 	}
 	// One row, never two: a wrapped toast would steal the help line's row.
-	return ui.Truncate(m.toast, m.width-2)
+	return " " + ui.Truncate(m.toast, m.width-3)
 }
 
 func (m Model) helpLine() string {
@@ -973,10 +1032,10 @@ func (m Model) helpLine() string {
 	// screen on narrow terminals (the body clamp reserves exactly one row).
 	// The keys yield first so the call-to-action survives; clicking this
 	// line anywhere also opens the overlay.
-	avail := m.width - 2
+	avail := m.width - 3
 	hint = "  " + hint
-	keys = ui.Truncate(" "+keys, max0(avail-lipgloss.Width(hint)))
-	return ui.HelpStyle.Render(keys + hint)
+	keys = ui.Truncate(keys, max0(avail-lipgloss.Width(hint)))
+	return ui.HelpStyle.Render(" " + keys + hint)
 }
 
 // overlaySpec is a floating window's content. Decision dialogs and forms

@@ -4,8 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
-	"strconv"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -22,6 +22,20 @@ type homePage struct {
 	groups []driver.Group
 	lat    map[string]driver.Latency
 	trafficPage
+
+	// subs feeds the subscription digest — the same list the subs page
+	// already fetched; the home page adds no poll of its own.
+	subs []driver.Subscription
+
+	// cfgName/dnsName are the selected config/dns profiles; with
+	// routingName they make up the "what would A apply" line.
+	cfgName string
+	dnsName string
+
+	// apiTook is the last traffic round-trip duration: over an SSH tunnel
+	// it is the quickest hint at whether the tunnel or the backend is the
+	// slow part.
+	apiTook time.Duration
 
 	// network state: the NICs the backend sees, plus the interfaces the
 	// selected config binds to. daed binds by interface name, so a config
@@ -112,6 +126,85 @@ func (p *homePage) handleGroups(groups []driver.Group, err error) {
 	p.rederiveGroupIdx()
 }
 
+// setSubs feeds the subscription digest. On error the last known list is
+// kept — the subs page is where fetch failures belong.
+func (p *homePage) setSubs(subs []driver.Subscription, err error) {
+	if err != nil {
+		return
+	}
+	p.subs = subs
+}
+
+// subLines is the subscription digest — the 环境 zone's headline row: how
+// many subscriptions, how many nodes they bring, and how fresh the latest
+// update is. A subscription whose cron is on but whose last update is over
+// a day old is the classic silent killer of "the proxy got slow", so it
+// gets a flag of its own.
+func (p homePage) subLines() []string {
+	if len(p.subs) == 0 || !p.caps.Subscriptions {
+		return nil
+	}
+	nodes := 0
+	var newest time.Time
+	for _, s := range p.subs {
+		nodes += s.NodeCount
+		if s.UpdatedAt.After(newest) {
+			newest = s.UpdatedAt
+		}
+	}
+	fresh := ui.TimeAgo(newest)
+	if newest.IsZero() {
+		fresh = "从未"
+	}
+	lines := []string{" " + fmt.Sprintf("订阅 %d · 节点 %d · 最近更新 ", len(p.subs), nodes) +
+		ui.SelectedStyle.Render(fresh)}
+	for _, s := range p.subs {
+		if s.CronEnable && !s.UpdatedAt.IsZero() && time.Since(s.UpdatedAt) > 24*time.Hour {
+			tag := s.Tag
+			if tag == "" {
+				tag = s.ID
+			}
+			lines = append(lines, " "+lipgloss.NewStyle().Foreground(ui.Yellow).Render(
+				"⚠ "+tag+" 上次更新 "+ui.TimeAgo(s.UpdatedAt)+"，定时刷新已开启"))
+		}
+	}
+	return lines
+}
+
+// groupHealth summarizes a group's measured nodes as "alive/measured · age".
+// It deliberately uses only data other pages already polled — the home page
+// adds no latency poll of its own — which is why the age rides along: a
+// stale count must not read as the current state.
+func (p homePage) groupHealth(g driver.Group) string {
+	var measured, alive int
+	var newest time.Time
+	for _, n := range g.Members() {
+		l, ok := p.lat[n.ID]
+		if !ok || l.TestedAt.IsZero() {
+			continue
+		}
+		measured++
+		if l.Alive {
+			alive++
+		}
+		if l.TestedAt.After(newest) {
+			newest = l.TestedAt
+		}
+	}
+	if measured == 0 {
+		return ui.HelpStyle.Render("未测速")
+	}
+	st := lipgloss.NewStyle().Foreground(ui.Green)
+	switch {
+	case alive == 0:
+		st = lipgloss.NewStyle().Foreground(ui.Red)
+	case alive < measured:
+		st = lipgloss.NewStyle().Foreground(ui.Yellow)
+	}
+	return st.Render(fmt.Sprintf("%d/%d", alive, measured)) +
+		ui.HelpStyle.Render(" · "+ui.TimeAgo(newest))
+}
+
 // handleSelections tracks the selected routing profile: which preset (if
 // any) it currently is, and which proxy group the presets should target. It
 // also records the interfaces the selected config binds to, so the home page
@@ -126,7 +219,14 @@ func (p *homePage) handleSelections(sel driver.Selections, err error, d driver.D
 		}
 		p.lanIf = ifaceNames(c, "lanInterface")
 		p.wanIf = ifaceNames(c, "wanInterface")
+		p.cfgName = c.Name
 		break
+	}
+	for _, d := range sel.Dns {
+		if d.Selected {
+			p.dnsName = d.Name
+			break
+		}
 	}
 	for _, r := range sel.Routings {
 		if !r.Selected {
@@ -188,8 +288,7 @@ func (p homePage) netLines() []string {
 		}
 		parts = append(parts, s)
 	}
-	lines := []string{ui.TitleStyle.Render(" 网络") + "  " +
-		ui.Truncate(strings.Join(parts, "   "), max0(p.width-8))}
+	lines := []string{" " + ui.Truncate("网卡 "+strings.Join(parts, "   "), max0(p.width-6))}
 	for _, w := range []struct {
 		label string
 		names []string
@@ -198,7 +297,7 @@ func (p homePage) netLines() []string {
 			if p.hasIface(n) {
 				continue
 			}
-			lines = append(lines, ui.ErrorStyle.Render(" ⚠ 配置的 "+w.label+" 接口 "+n+
+			lines = append(lines, " "+ui.ErrorStyle.Render("⚠ 配置的 "+w.label+" 接口 "+n+
 				" 不存在（daed 按网卡名绑定，DHCP 改名或换网口后需更新配置）"))
 		}
 	}
@@ -671,14 +770,143 @@ func (p *homePage) scrollBy(d int) {
 // active line — an open confirmation, the account menu, or the cursor row of
 // whichever section holds focus. View windows the list so the active line
 // stays on screen; that is the home page's scrolling.
+// bodyLines lays the home page out as boxed zones — one box per topic,
+// btop-style, on a strict grid: one vertical seam for the whole page
+// (homeRoutingW), every row's boxes share top and bottom borders (the
+// shorter side is padded inside its box), and zone rows sit flush against
+// each other. The left column is the static state (代理, then 环境), the
+// right column the live panels (流量, then 路由); the group list spans the
+// full width below. Narrow terminals stack the boxes full-width instead.
+// The returned active line drives the follow-scroll.
 func (p homePage) bodyLines(status driver.Status) ([]string, int) {
 	var lines []string
 	active := -1
-	add := func(s string) { lines = append(lines, s) }
+	twoCol := p.width >= homeTwoColMin
+	const margin = 1 // keep the boxes off the app frame's border
+	full := p.width - margin*2
+	// Box widths already reserve the page-wide margins; the root model
+	// stamps the left margin on every body line, so zones append bare.
+	addZone := func(zone []string) {
+		lines = append(lines, zone...)
+	}
+	// pairedRow builds one grid row: both boxes' content padded to the
+	// same height so their borders align, then joined at the page seam.
+	pairedRow := func(leftTitle string, left []string, rightTitle string, right []string,
+		rightFocused bool) []string {
+		lw := homeRoutingW
+		rw := p.width - margin*2 - lw - 1
+		n := len(left)
+		if len(right) > n {
+			n = len(right)
+		}
+		return ui.JoinBoxes(
+			ui.TitledBox(leftTitle, false, lw, padZone(left, n)),
+			ui.TitledBox(rightTitle, rightFocused, rw, padZone(right, n)))
+	}
 
-	// --- status & switch line: a solid badge, not colored text — the
-	// proxy's on/off state is the page's primary fact and a background
-	// block reads at a glance from across the room ---
+	// --- zone row 1: proxy state (left) | traffic (right) ---
+	if twoCol {
+		addZone(pairedRow("代理", p.proxyRows(status, homeRoutingW-4),
+			"流量", p.trafficRows(p.width-margin*2-homeRoutingW-1-4), false))
+	} else {
+		addZone(ui.TitledBox("代理", false, full, p.proxyRows(status, full-4)))
+		addZone(ui.TitledBox("流量", false, full, p.trafficRows(full-4)))
+	}
+
+	// The proxy on/off confirmation interrupts between the zones.
+	if p.confirmSwitch {
+		verb := "启动"
+		if status.Running {
+			verb = "停止"
+		}
+		box := ui.BoxLines(true, "确认"+verb+"代理?  (y/n)")
+		addZone(box)
+		active = len(lines) - 1
+	}
+
+	// --- zone row 2: environment digest (left) | routing presets (right) ---
+	routingBoxW := full
+	if twoCol {
+		routingBoxW = p.width - margin*2 - homeRoutingW - 1
+	}
+	routingBody, presetOff := p.routingLines(routingBoxW - 4)
+	// +1: the first content row sits under the box's top border.
+	presetStart := -1
+	row2Start := len(lines)
+	if presetOff >= 0 {
+		presetStart = row2Start + 1 + presetOff
+	}
+	env := append(p.subLines(), p.netLines()...)
+	if twoCol && len(env) > 0 {
+		addZone(pairedRow("环境", env, "路由", routingBody, !p.groupFocus))
+	} else {
+		addZone(ui.TitledBox("路由", !p.groupFocus, routingBoxW, routingBody))
+		if len(env) > 0 {
+			addZone(ui.TitledBox("环境", false, full, env))
+		}
+	}
+
+	// --- zone: current node per group ---
+	groupRows := make([]string, 0, len(p.groups)+2)
+	if len(p.groups) == 0 {
+		groupRows = append(groupRows, " "+ui.HelpStyle.Render("（加载中…）"))
+	}
+	cw := full - 4
+	for i, g := range p.groups {
+		label, style := p.currentNode(g)
+		cursor := " "
+		if i == p.groupCursor && p.groupFocus {
+			cursor = ui.CursorStyle.Render("❯")
+		}
+		row := " " + cursor + " " + ui.PadRight(g.Name, 16) + style.Render(label)
+		// The health suffix is pinned to the box's right edge — a ragged
+		// tail after the node label reads as noise, a column reads as a
+		// column. Density only: on narrow boxes the node label wins.
+		if cw >= 68 {
+			if h := p.groupHealth(g); h != "" {
+				if pad := cw - 1 - lipgloss.Width(row) - lipgloss.Width(h); pad >= 2 {
+					row += strings.Repeat(" ", pad) + h
+				} else {
+					row += "  " + h
+				}
+			}
+		}
+		groupRows = append(groupRows, row)
+	}
+	if p.groupFocus {
+		groupRows = append(groupRows, " "+ui.HelpStyle.Render("Enter 跳到群组页并展开该组   Tab 返回路由切换"))
+	} else if len(p.groups) > 0 {
+		groupRows = append(groupRows, " "+ui.HelpStyle.Render("Tab 切换到组列表（Enter 跳到群组页并展开）"))
+	}
+	groupStart := len(lines) + 1 // under the box's top border
+	addZone(ui.TitledBox("各组当前节点", p.groupFocus, full, groupRows))
+
+	// Active-line priority: an open confirmation wins above; otherwise it
+	// is the cursor row of the focused zone.
+	if active < 0 && presetStart >= 0 && !p.groupFocus {
+		active = presetStart + p.presetCursor
+	}
+	if active < 0 && p.groupFocus && groupStart+p.groupCursor < len(lines) {
+		active = groupStart + p.groupCursor
+	}
+	return lines, active
+}
+
+// padZone extends rows with blank lines to n rows: same-row boxes share
+// their top and bottom borders, so the shorter zone keeps its dead space
+// inside the box instead of dropping a half-finished border.
+func padZone(rows []string, n int) []string {
+	for len(rows) < n {
+		rows = append(rows, "")
+	}
+	return rows
+}
+
+// proxyRows is the 代理 zone's content: the on/off badge with its key, the
+// three profiles the global `A` would apply, and — when there is one — the
+// unapplied-changes warning. Every row starts one cell in, on the badge's
+// text baseline; the routing continuation aligns its label under `config`.
+func (p homePage) proxyRows(status driver.Status, w int) []string {
 	badge := lipgloss.NewStyle().Bold(true).
 		Foreground(lipgloss.Color("15")).Background(ui.Green).
 		Padding(0, 1).Render("● 代理运行中")
@@ -689,155 +917,90 @@ func (p homePage) bodyLines(status driver.Status) ([]string, int) {
 			Padding(0, 1).Render("○ 代理已停止")
 		hint = ui.HelpStyle.Render("  o 启动")
 	}
-	mod := ""
+	rows := []string{badge + hint}
+	if p.caps.ConfigMgmt {
+		name := func(s string) string {
+			if s == "" {
+				return "（无）"
+			}
+			return s
+		}
+		rows = append(rows,
+			" "+ui.HelpStyle.Render("方案 config ")+name(p.cfgName)+" · dns "+name(p.dnsName),
+			"      routing "+name(p.routingName))
+	}
 	if status.Modified {
-		mod = ui.ErrorStyle.Render("  ⚠ 配置改动未应用（4 配置页 A 应用）")
+		rows = append(rows, " "+ui.ErrorStyle.Render("⚠ 配置改动未应用（A 应用）"))
 	}
-	add(" " + badge + hint + ui.HelpStyle.Render("   dae "+status.Version) + mod)
-
-	if p.confirmSwitch {
-		verb := "启动"
-		if status.Running {
-			verb = "停止"
-		}
-		add("")
-		box := ui.BoxLines(true, "确认"+verb+"代理?  (y/n)")
-		lines = append(lines, box...)
-		active = len(lines) - 1
-	}
-	add("")
-
-	// --- traffic + routing quick-switch: side by side on wide terminals,
-	// stacked below homeTwoColMin (the charts and the preset list each need
-	// roughly half a screen; stacking them costs ~7 rows the group list
-	// could use) ---
-	routingW := p.width
-	twoCol := p.width >= homeTwoColMin
-	if twoCol {
-		routingW = homeRoutingW
-	}
-	routingBody, presetOff := p.routingLines(routingW)
-	presetStart := -1
-	if twoCol {
-		leftW := p.width - homeRoutingW - 3
-		chartW := leftW - 24
-		if chartW > 56 {
-			chartW = 56
-		}
-		traffic := p.trafficLines(chartW)
-		n := len(traffic)
-		if len(routingBody) > n {
-			n = len(routingBody)
-		}
-		base := len(lines)
-		for i := 0; i < n; i++ {
-			l, r := "", ""
-			if i < len(traffic) {
-				l = ui.PadRight(ui.Truncate(traffic[i], leftW), leftW)
-			}
-			if i < len(routingBody) {
-				r = ui.Truncate(routingBody[i], homeRoutingW)
-			}
-			add(l + "   " + r)
-		}
-		if presetOff >= 0 {
-			presetStart = base + presetOff
-		}
-	} else {
-		lines = append(lines, p.trafficLines(max0(p.width/2-16))...)
-		add("")
-		if presetOff >= 0 {
-			presetStart = len(lines) + presetOff
-		}
-		lines = append(lines, routingBody...)
-	}
-	// --- network state ---
-	if net := p.netLines(); len(net) > 0 {
-		lines = append(lines, net...)
-		add("")
-	}
-
-	// --- current node per group ---
-	add("")
-	add(ui.TitleStyle.Render(" 各组当前节点"))
-	if len(p.groups) == 0 {
-		add(ui.HelpStyle.Render(" （加载中…）"))
-	}
-	groupStart := len(lines)
-	for i, g := range p.groups {
-		label, style := p.currentNode(g)
-		cursor := " "
-		if i == p.groupCursor && p.groupFocus {
-			cursor = ui.CursorStyle.Render("❯")
-		}
-		add(" " + cursor + " " + ui.PadRight(g.Name, 16) + style.Render(label))
-	}
-	if p.groupFocus {
-		add(ui.HelpStyle.Render("  Enter 跳到群组页并展开该组   Tab 返回路由切换   esc 返回"))
-	} else if len(p.groups) > 0 {
-		add(ui.HelpStyle.Render("  Tab 切换到组列表（Enter 跳到群组页并展开）"))
-	}
-
-	// Active-line priority: an open confirmation or the account menu won
-	// above; otherwise it is the cursor row of the focused section.
-	if active < 0 && presetStart >= 0 && !p.groupFocus {
-		active = presetStart + p.presetCursor
-	}
-	if active < 0 && p.groupFocus && groupStart+p.groupCursor < len(lines) {
-		active = groupStart + p.groupCursor
-	}
-	return lines, active
+	return rows
 }
 
-// trafficLines renders the two rate charts with the counters beside them,
-// charts sized to chartW cells.
-func (p homePage) trafficLines(chartW int) []string {
+// trafficRows is the 流量 zone's content (w = content width inside the
+// box). The rates are the zone's headline — bold, colored, one per half of
+// the box with each chart directly under its rate — while the counters and
+// cumulative totals stay dim footnotes. The emphasis hierarchy is the
+// point: what you glance at (speed) is bright and big, what you look up
+// (totals) is quiet.
+func (p homePage) trafficRows(w int) []string {
 	if !p.caps.TrafficStats {
-		return []string{ui.HelpStyle.Render(" 流量统计：当前后端不支持"), ""}
+		return []string{ui.HelpStyle.Render("当前后端不支持流量统计")}
 	}
-	if chartW < 20 {
-		chartW = 20
+	if w < 24 {
+		w = 24
 	}
-	chartH := 4
+	const chartH = 3
 	green := lipgloss.NewStyle().Foreground(ui.Green)
 	yellow := lipgloss.NewStyle().Foreground(ui.Yellow)
+	greenBold := lipgloss.NewStyle().Bold(true).Foreground(ui.Green)
+	yellowBold := lipgloss.NewStyle().Bold(true).Foreground(ui.Yellow)
 	s := p.snap
-	up := ui.Sparkline(s.UpSeries, chartW, chartH, green, "↑")
-	down := ui.Sparkline(s.DownSeries, chartW, chartH, yellow, "↓")
-	left := "↑ 上行  " + green.Render(ui.Rate(s.UpRate)) + "\n" + up +
-		"\n\n↓ 下行  " + yellow.Render(ui.Rate(s.DownRate)) + "\n" + down
-	right := "连接 " + strconv.Itoa(s.Conns) + "   UDP " + strconv.Itoa(s.UDPSessions) +
-		"\n累计 ↑ " + ui.Bytes(s.UpTotal) + "\n累计 ↓ " + ui.Bytes(s.DownTotal) +
-		"\n\n" + ui.HelpStyle.Render("每秒自动刷新")
-	return strings.Split(lipgloss.JoinHorizontal(lipgloss.Top, left, "    ", right), "\n")
+
+	cw := (w - 3) / 2
+	up := ui.HelpStyle.Render("↑ 上行 ") + greenBold.Render(ui.Rate(s.UpRate))
+	down := ui.HelpStyle.Render("↓ 下行 ") + yellowBold.Render(ui.Rate(s.DownRate))
+	rates := " " + ui.PadRight(up, cw) + " " + down
+	charts := lipgloss.JoinHorizontal(lipgloss.Top,
+		ui.Sparkline(s.UpSeries, cw, chartH, green, ""),
+		" ",
+		ui.Sparkline(s.DownSeries, cw, chartH, yellow, ""))
+
+	counters := ui.HelpStyle.Render(fmt.Sprintf("连接 %d · UDP %d", s.Conns, s.UDPSessions))
+	if p.apiTook > 0 {
+		counters += ui.HelpStyle.Render(fmt.Sprintf(" · API %dms", p.apiTook.Milliseconds()))
+	}
+	// The cumulative counters reset with the dae core, not monthly.
+	total := ui.HelpStyle.Render("累计 ") + green.Render("↑ "+ui.Bytes(s.UpTotal)) +
+		ui.HelpStyle.Render(" · ") + yellow.Render("↓ "+ui.Bytes(s.DownTotal)) +
+		ui.HelpStyle.Render(" · 自 daed 启动")
+
+	rows := []string{rates}
+	for _, l := range strings.Split(charts, "\n") {
+		rows = append(rows, " "+l)
+	}
+	return append(rows, " "+counters, " "+total)
 }
 
-// routingLines renders the preset picker: header, the presets and the
-// current-mode footer. It returns the body truncated to w and the index of
-// the first preset row within it (the switch confirmation floats, see
-// overlay).
+// routingLines renders the 路由 zone's content: the current profile and
+// proxy group, the presets, and the current-mode footer. It returns the
+// rows and the index of the first preset row within them (the switch
+// confirmation floats, see overlay).
 func (p homePage) routingLines(w int) (body []string, presetStart int) {
 	if len(p.presets) == 0 {
 		return nil, -1
 	}
-	head := ui.TitleStyle.Render(" 路由快速切换") + ui.HelpStyle.Render("  "+p.routingName)
-	if g := p.proxyGroup(); g != "" {
-		group := ui.HelpStyle.Render("  代理组: " + g + " (g 换)")
-		if w >= 50 {
-			// One row on wide columns…
-			body = append(body, ui.Truncate(head+group, w))
-		} else {
-			// …and its own dim line in the 44-cell column, instead of an
-			// ellipsized tail.
-			body = append(body, ui.Truncate(head, w), group)
-		}
-	} else {
-		body = append(body, ui.Truncate(head, w))
+	name := p.routingName
+	if name == "" {
+		name = "（无）"
 	}
+	head := ui.HelpStyle.Render("当前 ") + ui.SelectedStyle.Render(name)
+	if g := p.proxyGroup(); g != "" {
+		head += ui.HelpStyle.Render(" · 代理组: ") + ui.SelectedStyle.Render(g) + ui.HelpStyle.Render(" (g 换)")
+	}
+	body = append(body, " "+head)
 	if p.routingID == "" {
-		body = append(body, ui.HelpStyle.Render(" （无路由方案：在 5 配置页创建后可用）"))
+		body = append(body, " "+ui.HelpStyle.Render("（无路由方案：在 5 配置页创建后可用）"))
 	} else if p.proxyGroup() == "" {
-		body = append(body, ui.HelpStyle.Render(" （无群组：预设需要一个代理组，请在 2 群组页创建）"))
+		body = append(body, " "+ui.HelpStyle.Render("（无群组：预设需要一个代理组，请在 2 群组页创建）"))
 	}
 	presetStart = len(body)
 	for i, preset := range p.presets {
@@ -853,14 +1016,14 @@ func (p homePage) routingLines(w int) (body []string, presetStart int) {
 		if i == p.presetCursor {
 			style = ui.CursorStyle
 		}
-		body = append(body, cursor+" "+mark+style.Render(ui.PadRight(presetLabel(preset.ID), 14))+
+		body = append(body, " "+cursor+" "+mark+style.Render(ui.PadRight(presetLabel(preset.ID), 14))+
 			ui.HelpStyle.Render(presetDescs[preset.ID]))
 	}
 	switch {
 	case p.routingMode != "":
-		body = append(body, ui.HelpStyle.Render(" 当前: "+presetLabel(p.routingMode)+"   Enter 切换"))
+		body = append(body, " "+ui.HelpStyle.Render("当前: "+presetLabel(p.routingMode)+"   Enter 切换"))
 	default:
-		body = append(body, ui.HelpStyle.Render(" 当前: 自定义规则   Enter 切换为预设"))
+		body = append(body, " "+ui.HelpStyle.Render("当前: 自定义规则   Enter 切换为预设"))
 	}
 	return body, presetStart
 }

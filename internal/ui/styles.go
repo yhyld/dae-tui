@@ -36,6 +36,11 @@ func LatencyStyle(ms int, alive, tested bool) lipgloss.Style {
 	if !alive {
 		return lipgloss.NewStyle().Foreground(Gray)
 	}
+	if ms <= 0 {
+		// Alive but without a figure: a probe in flight or a record without
+		// a measurement — untested, not worst-latency.
+		return lipgloss.NewStyle().Foreground(Gray)
+	}
 	switch {
 	case ms > 0 && ms < 200:
 		return lipgloss.NewStyle().Foreground(Green)
@@ -89,13 +94,23 @@ func Pane(bar bool, title string, focused bool, w, h int, lines []string) string
 		tstyle = TitleStyle
 		rule = lipgloss.NewStyle().Foreground(Accent)
 	}
-	avail := h - 2
+	avail := h - 1
 	if avail < 1 {
 		avail = 1
 	}
 	var b strings.Builder
-	b.WriteString(prefix + truncate(tstyle.Render(title), w) + "\n")
-	b.WriteString(prefix + rule.Render(strings.Repeat("─", w-2)) + "\n")
+	// The title rides inside the rule line — the same language as the home
+	// page's boxed zones (TitledBox embeds it in the top border) — saving
+	// the separate title row. Callers pass titles with legacy padding;
+	// trim it so the spacing matches the box titles exactly.
+	content := w - 2
+	title = strings.TrimSpace(title)
+	tt := truncate(tstyle.Render(title), max0(content-4))
+	dashes := content - 3 - lipgloss.Width(tt)
+	if dashes < 1 {
+		dashes = 1
+	}
+	b.WriteString(prefix + rule.Render("─ ") + tt + rule.Render(" "+strings.Repeat("─", dashes)) + "\n")
 	for i := 0; i < avail; i++ {
 		l := ""
 		if i < len(lines) {

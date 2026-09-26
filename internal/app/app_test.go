@@ -1205,7 +1205,7 @@ func TestHomeNetworkStateWarnsMissingInterface(t *testing.T) {
 	}})
 	m = m2
 	v := m.View()
-	for _, want := range []string{"网络", "eth0", "192.168.1.5", "默认路由"} {
+	for _, want := range []string{"环境", "网卡", "eth0", "192.168.1.5", "默认路由"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("home network state missing %q:\n%s", want, v)
 		}
@@ -1618,7 +1618,7 @@ func TestHomeRoutingPresetSwitch(t *testing.T) {
 	m := newTestModel(t)
 	v := m.View()
 	for _, want := range []string{
-		"路由快速切换", "默认路由", "代理组: proxy",
+		"当前 默认路由", "代理组: proxy",
 		"GFW 模式", "中国列表以外", "中国列表", "全局代理",
 		"当前: 中国列表以外", // the stub routing matches the nonCn preset
 	} {
@@ -2895,7 +2895,7 @@ func TestHelpOverlay(t *testing.T) {
 func TestHomeFollowsFocus(t *testing.T) {
 	m := newTestModel(t)
 	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
-	if v := m.View(); !strings.Contains(v, "路由快速切换") {
+	if v := m.View(); !strings.Contains(v, "GFW 模式") {
 		t.Fatalf("routing section should be visible unfocused:\n%s", v)
 	}
 	mm, _ := m.Update(key("tab")) // focus the per-group list
@@ -2915,7 +2915,7 @@ func TestMouseTabClick(t *testing.T) {
 	// Tabs sit on frame row 2, content cols start after the frame border.
 	// Each tab spans lipgloss.Width(label)+2 (TabStyle pads 0,1).
 	tabX := func(i int) int {
-		x := 1
+		x := 2 // frame border + page-wide left margin
 		for j, t := range tabLabels {
 			if j == i {
 				break
@@ -2959,8 +2959,9 @@ func TestMouseWheelScrollsLists(t *testing.T) {
 func TestMouseSelectsRows(t *testing.T) {
 	m := newTestModel(t)
 	m, _ = m.Update(key("2"))
-	// Left pane rows start at frame row 5; the second group is row 1.
-	m2, _ := m.Update(mouseClick(3, 6))
+	// Left pane rows start at frame row 4 (the pane's title rides in its
+	// rule line); the second group is row 1.
+	m2, _ := m.Update(mouseClick(3, 5))
 	mm := m2.(Model)
 	if mm.groups.gi != 1 {
 		t.Fatalf("click on the second group row should select it, got gi=%d", mm.groups.gi)
@@ -3007,21 +3008,23 @@ func TestDeadLatencyLabel(t *testing.T) {
 func TestHomeTwoColumnLayout(t *testing.T) {
 	m := newTestModel(t) // 120x36, content width 118 >= homeTwoColMin
 	v := m.View()
+	// The proxy badge (代理 zone) and the up-rate row (流量 zone) share a
+	// line only when the zones sit side by side.
 	sideBySide := false
 	for _, l := range strings.Split(v, "\n") {
-		if strings.Contains(l, "上行") && strings.Contains(l, "路由快速切换") {
+		if strings.Contains(l, "代理运行中") && strings.Contains(l, "上行") {
 			sideBySide = true
 		}
 	}
 	if !sideBySide {
-		t.Fatalf("wide terminal should put traffic and routing side by side:\n%s", v)
+		t.Fatalf("wide terminal should pair the proxy and traffic zones:\n%s", v)
 	}
 
 	m2, _ := newTestModel(t).Update(tea.WindowSizeMsg{Width: 90, Height: 36})
 	v2 := m2.View()
 	for _, l := range strings.Split(v2, "\n") {
-		if strings.Contains(l, "上行") && strings.Contains(l, "路由快速切换") {
-			t.Fatalf("narrow terminal should stack traffic above routing:\n%s", v2)
+		if strings.Contains(l, "代理运行中") && strings.Contains(l, "上行") {
+			t.Fatalf("narrow terminal should stack the zones:\n%s", v2)
 		}
 	}
 }
@@ -3179,9 +3182,13 @@ func TestApplyConfirmFloats(t *testing.T) {
 	if !strings.Contains(v, "确认应用当前选中") {
 		t.Fatalf("apply confirmation missing:\n%s", v)
 	}
-	// The first body row still shows the page (the proxy badge), not the box.
+	// The first body rows still show the page (the proxy zone), not the box.
 	lines := strings.Split(v, "\n")
-	if len(lines) < 5 || !strings.Contains(lines[3], "代理运行中") {
+	badge := false
+	for _, l := range lines[3:7] {
+		badge = badge || strings.Contains(l, "代理运行中")
+	}
+	if len(lines) < 5 || !badge {
 		t.Fatalf("the page should stay in place under the floating confirm:\n%s", v)
 	}
 }
@@ -3347,5 +3354,93 @@ func TestHelpHintOnKeyLine(t *testing.T) {
 	m := newTestModel(t)
 	if tabs := strings.Split(m.View(), "\n")[2]; strings.Contains(tabs, "帮助") {
 		t.Fatalf("tabs bar should not carry a help label: %q", tabs)
+	}
+}
+
+// A rejected session mid-run must send the user back to the login form with
+// an explanation, instead of toasting the same error on every poll forever.
+func TestErrNeedAuthReturnsToLogin(t *testing.T) {
+	m := newTestModel(t)
+	m2, _ := m.Update(trafficMsg{Err: fmt.Errorf("%w: access denied", driver.ErrNeedAuth)})
+	mm, ok := m2.(Model)
+	if !ok || mm.phase != phaseLogin {
+		t.Fatalf("phase after ErrNeedAuth = %v, want phaseLogin", m2)
+	}
+	if !strings.Contains(mm.View(), "登录已失效") {
+		t.Fatal("login form should explain why the session ended")
+	}
+	// A non-auth error must not end the session.
+	m3, _ := m.Update(latenciesMsg{Err: errors.New("boom")})
+	if m3.(Model).phase != phaseMain {
+		t.Fatal("ordinary errors must not redirect to login")
+	}
+}
+
+// The subscription digest is the home page's node-supply signal: counts,
+// total nodes and freshness — plus a flag when a cron-enabled subscription
+// has not updated in over a day (the silent "proxy got slow" case).
+func TestHomeSubscriptionDigest(t *testing.T) {
+	m := newTestModel(t)
+	v := m.View()
+	if !strings.Contains(v, "订阅 2 · 节点 24") {
+		t.Fatalf("subscription digest missing:\n%s", v)
+	}
+	if strings.Contains(v, "上次更新") {
+		t.Fatalf("fresh subscriptions must not carry a stale flag:\n%s", v)
+	}
+	m2, _ := m.Update(subsMsg{Subs: []driver.Subscription{
+		{ID: "s1", Tag: "机场C", NodeCount: 5, CronEnable: true,
+			UpdatedAt: time.Now().Add(-30 * time.Hour)},
+	}})
+	if v2 := m2.View(); !strings.Contains(v2, "机场C 上次更新") {
+		t.Fatalf("stale subscription not flagged:\n%s", v2)
+	}
+}
+
+// The profiles line names the three things the global `A` would apply.
+func TestHomeProfilesLine(t *testing.T) {
+	m := newTestModel(t)
+	v := m.View()
+	for _, want := range []string{"方案 config 默认", "dns 默认DNS", "routing 默认路由"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("profiles line missing %q:\n%s", want, v)
+		}
+	}
+}
+
+// Group rows carry an alive/measured suffix built only from already-polled
+// latencies, with the measurement age attached.
+func TestHomeGroupHealthSuffix(t *testing.T) {
+	m := newTestModel(t)
+	// mustLats: n1/n2 alive, n3 dead; the proxy group's deduped members are
+	// n1, n2, n3 → 2 of 3 alive.
+	if v := m.View(); !strings.Contains(v, "2/3 · ") {
+		t.Fatalf("group health suffix missing:\n%s", v)
+	}
+	// With no measurement at all the row says so instead of 0/0 — both in
+	// the current-node label and in the health suffix.
+	var m3 tea.Model = New(stubDriver{}, &config.Config{Endpoint: "http://127.0.0.1:2023/graphql"}, "/tmp/dae-tui-test.toml")
+	m3, _ = m3.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	m3, _ = m3.Update(bootMsg{Users: 1, Status: driver.Status{Version: "v2.1.1", Running: true}})
+	m3, _ = m3.Update(groupsMsg{Groups: mustGroups(t)})
+	if got := strings.Count(m3.View(), "未测速"); got < 2 {
+		t.Fatalf("untested group should say so twice (label + suffix), got %d:\n%s", got, m3.View())
+	}
+}
+
+// The traffic block's footnote carries the counter scope, and the API
+// round-trip once a request has actually been timed.
+func TestHomeTrafficFootnotes(t *testing.T) {
+	m := newTestModel(t)
+	v := m.View()
+	if !strings.Contains(v, "自 daed 启动") {
+		t.Fatalf("cumulative scope note missing:\n%s", v)
+	}
+	if strings.Contains(v, "API ") {
+		t.Fatal("API latency shown before any request was timed")
+	}
+	m2, _ := m.Update(trafficMsg{Snap: mustTraffic(t), Took: 4 * time.Millisecond})
+	if v2 := m2.View(); !strings.Contains(v2, "API 4ms") {
+		t.Fatalf("API latency missing:\n%s", v2)
 	}
 }

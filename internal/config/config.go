@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/BurntSushi/toml"
 )
@@ -23,6 +24,12 @@ type Config struct {
 	// floating textarea (no editor keybindings, but works without an
 	// editor installed and keeps the TUI on screen).
 	Editor string `toml:"editor"`
+
+	// mu serializes mutations + saves: driver hooks persist new tokens and
+	// credentials from background request goroutines while the UI's logout
+	// clears the session on the tea goroutine. Unexported, so the struct
+	// must stay behind a pointer (it is everywhere).
+	mu sync.Mutex
 }
 
 // DefaultEndpoint is the daed default GraphQL address.
@@ -59,15 +66,77 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
+// HasAuth reports whether the stored credentials could authenticate a
+// session. Locked: background token refreshes may write concurrently.
+func (c *Config) HasAuth() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.Token != "" || (c.Username != "" && c.Password != "")
+}
+
 // Save writes the config back with 0600 permissions (it contains
 // credentials and a bearer token).
 func (c *Config) Save(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.saveLocked(path)
+}
+
+// UpdateToken replaces the bearer token and persists it. Driver hooks call
+// this from background request goroutines whenever a refresh produces a new
+// token.
+func (c *Config) UpdateToken(path, token string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Token = token
+	return c.saveLocked(path)
+}
+
+// UpdateCredentials replaces the stored username/password and persists them.
+func (c *Config) UpdateCredentials(path, username, password string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Username, c.Password = username, password
+	return c.saveLocked(path)
+}
+
+// ClearSession wipes every stored credential and persists (logout).
+func (c *Config) ClearSession(path string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Username, c.Password, c.Token = "", "", ""
+	return c.saveLocked(path)
+}
+
+// saveLocked persists the config atomically: a temp file in the same
+// directory is written, synced and renamed over the target, so a crash
+// mid-save can never truncate the only copy of the stored credentials, and
+// the final file always ends up 0600 (CreateTemp creates it that way;
+// os.WriteFile would keep a pre-existing file's looser mode).
+func (c *Config) saveLocked(path string) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	raw, err := toml.Marshal(c)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, raw, 0o600)
+	tmp, err := os.CreateTemp(dir, ".config-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name()) // no-op once the rename succeeded
+	if _, err := tmp.Write(raw); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }

@@ -56,8 +56,13 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
 ## daed API 坑（改驱动前必读）
 
 - 认证失败是 **HTTP 200 内的 GraphQL error `"access denied"`**，不是 401。`Client.Do`
-  检测到后自动跑一次 re-auth（用保存的凭据重取 30 天 JWT）并重放，仍失败才返回
-  `driver.ErrNeedAuth`。
+  检测到后自动跑一次 re-auth（用保存的凭据重取 30 天 JWT）并重放；re-auth 是
+  **singleflight** 的——并发请求同时在飞时共享同一次刷新、等它完成后重放，而不是
+  各自报错。re-auth 失败或重放仍被拒都返回 `driver.ErrNeedAuth`（app 根模型对所有
+  带 Err 的结果消息做 `errors.Is` 检查，会话中途遇到就直接回 `phaseLogin`，不会
+  toast 刷屏）。re-auth hook 自己的请求带 `reauthCtxKey` 标记，防止在刷新 leader
+  身上自我死等。`d.opts` 凭据字段由 `optsMu` 保护（Login/改密/退出在写、任意请求
+  goroutine 的 re-auth 在读）。
 - `uploadTotal`/`downloadTotal` 在 SDL 里是 **String**，要 `parseInt64`。
 - `Group.Nodes` **只含直接挂载的节点**；完整成员列表用 `Group.Members()`（订阅贡献的
   节点 + 直接节点，按 ID 去重）。
@@ -87,11 +92,14 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   （`pname(NetworkManager, systemd-resolved, dnsmasq) -> must_direct` +
   `dip(geoip:private) -> direct`）。组名是直接插值进 DSL 的，**必须先过
   `validGroupName`**，否则生成出的 DSL 后端解析不了。`DetectRoutingPreset` 要求前缀
-  存在且每一行都是预设自身能产生的规则才识别——daed 自带默认模板的 pname 参数与我们的
+  存在且**规则集与某预设的产出严格相等**（逐类计数：多一条重复/额外规则、两条
+  fallback、第二个 pname 行都算自定义）——daed 自带默认模板的 pname 参数与我们的
   不同（没有 dnsmasq），所以前缀按语义匹配而不是整行比对。改模板要同步改检测，两边都有
-  单测兜着（生成的 DSL 必须 round-trip 回同一预设）。
+  单测兜着（生成的 DSL 必须 round-trip 回同一预设，超集/重复规则必须判自定义）。
 - `run(dry: true)` 是**停止代理**，不是校验。别把它当 dry-run 用。
-- 节点列表是 connection，cursor 就是节点 ID；驱动内循环翻页（200/页，带防御性页数上限）。
+- 节点列表是 connection，cursor 就是节点 ID；驱动内循环翻页（200/页，带防御性页数
+  上限 100 页，`ListManualNodes` 与 `SubscriptionNodes` 一致——它翻的是全量节点
+  connection 再客户端过滤，上限不一致会在大实例上静默丢手动节点）。
 - `testNodeLatencies` 的 ID 列表超过 100 个要分块，否则 HTTP 超时。
 - 老版本 daed 没有 `GroupSubscription` 类型：`qGroupsRich` 会 schema 校验失败，驱动据此
   永久降级到 `qGroups`（`groupsFallback`）。
@@ -126,10 +134,18 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   页面内容高度是 `height-6`、宽度 `width-2`——改 chrome 行数要同步改这两处与
   `View` 里的钳制。终端小于 60×12（`minTermW/minTermH`）时渲染 `smallView` 降级页，
   别让两栏数学溢出换行。
+- **全页统一边距与标题语言（与首页盒网格对齐）**：外框内所有可见行——chrome 行与
+  正文每行——共享同一左基线（外框内缩 1 格，右边距 1 格）：正文行在根模型钳制处统一
+  `" " + Truncate(line, cw-1)`（首页的盒子宽度已按 cw-2 计算，**不要**在页面里再自己加
+  前缀）；status/tabs/toast/help 行同理自带前缀；浮窗用 `cw-1` 居中。窗格/盒子的标题
+  一律"嵌在分隔线里"（`TitledBox` 嵌上边框、`ui.Pane` 嵌规则线，Pane 会 trim 标题的
+  历史空格），不再有独立标题行。
 - **chrome 行（status/tabs/toast/help）与 body 每行都必须过 `ui.Truncate` 到内容宽**：
   高度数学假设它们各占一行，lipgloss 的 `Width()` 会把超宽行折行，折一行就挤掉一个
   chrome 行。`ui.Pane` 也按宽度截断每行、按高度补齐空行（左栏 `bar=false`——外框就是
-  它的边缘；右栏 `bar=true`——那根竖线兼作两栏分隔线，聚焦时变 `▌`）。
+  它的边缘；右栏 `bar=true`——那根竖线兼作两栏分隔线，聚焦时变 `▌`）；标题行合并进
+  规则线后内容行多出一行（`avail = h-1`），页面窗口数学仍按 `height-2` 预留——末行
+  留空无害，别为这一行去改各页窗口计算。
 - **一次性动作反馈走 `opDoneMsg` toast**（根模型 4 秒自动消失），不要写进 `pickErr` 这类
   常驻面板字段——它会留到重启才消失，看起来像坏了的状态。`pickErr` 只留给"选择器打开
   期间拉取失败"这种与当前模态绑定的错误，并在 groups/subs 刷新时清空。
@@ -155,7 +171,8 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   在任何按键后重新启用；滚轮 `scrollBy` 暂时关闭跟随）。帮助是浮窗，内容用 `helpScroll`
   （j/k/G）在盒内滚动，`clampHelpScroll` 的窗口数来自 `helpWinBody`。
 - **鼠标已启用**（`tea.WithMouseCellMotion`）：滚轮 = 3×j/k（帮助浮窗/首页直接滚偏移），
-  点页签切页（`tabClick` 按渲染宽度算 span），点左栏行选中（各页 `leftClick` 复算
+  点页签切页（`tabClick` 按渲染宽度算 span，x 要减去外框+页内边距 2 格），点左栏行选中
+  （pane 标题合并后行从外框第 4 行起，`row = y-4`；各页 `leftClick` 复算
   `leftLines` 的窗口偏移），点底部键位行任意位置打开帮助浮窗（呼出键 `? 帮助` 固定在
   该行右端且**不参与截断**——`helpLine` 先截键位再拼提示，页签栏不要放帮助标识）。`anyModal()` 时鼠标全部忽略——弹窗期间误点比不点更糟。
   鼠标 handler 是**值接收者**（与 `handleKey` 一致），别改成指针接收者，否则
@@ -237,9 +254,28 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   `x` 批量移除已标记的**直接挂载**节点（订阅贡献的只能随订阅移除，会给 toast 说明）、
   选择器内 `Enter` 批量添加。`markedIDs()/markedDirectNodes()` 必须去重——同一节点可以
   同时出现在订阅区和直接区两行。换组/收起（`collapseSections`）清空标记。
-- **首页两栏**：内容宽 ≥96 列（`homeTwoColMin`）时流量块与路由预设并排
-  （`homeRoutingW=44`），窄于此保持上下堆叠；`bodyLines` 里手工逐行拼（左栏 PadRight 到
-  leftW 再接右栏），预设行的 active 索引要算上列偏移，改动时注意 `presetStart` 的换算。
+- **首页分区（btop 式网格盒子）**：整页是带标题的圆角盒子（`ui.TitledBox`，标题嵌在
+  上边框、聚焦时点亮），按严格网格排布：**全页唯一竖缝**（左列 = `homeRoutingW`，
+  行行相同）、**同行盒子等高**（`padZone` 把短侧内容补空行到等高再包框，边框上下
+  对齐、死区留在盒内）、盒子行间贴合无空行、盒内内容统一前导 1 格（与徽章文字
+  基线一致，`routing` 续行标签对齐 `config` 列）。宽 ≥96 列（`homeTwoColMin`）
+  两盒一行：`代理|流量` → `环境|路由`（左列=静态状态，右列=动态与操作），`各组
+  当前节点`通栏；窄终端全宽堆叠（顺序 代理→流量→路由→环境→组）。新增分区=建
+  rows 函数 + TitledBox 包一层；配对用 `pairedRow`，别手拼。
+- **首页重点提亮层级**：一眼要看的（代理状态徽章、上下行**加粗**速率、活动预设 ●、
+  组当前节点名）用色块/加粗/亮色；回头查的（方案名、连接/UDP/API、累计、环境事实）
+  一律暗色；异常（未应用改动、订阅过期、接口缺失）黄/红。徽章行不再带版本号（状态栏
+  已有）；`方案 config X · dns Y` + 续行 `routing Z` 在"代理"盒内。
+- **首页信息密度（都不新增轮询，数据来自已有消息流）**：
+  - **订阅摘要**（`subLines`，根模型在 `subsMsg` 里喂 `home.setSubs`，渲染进"环境"盒）：
+    `订阅 N · 节点 M · 最近更新 <TimeAgo>`；cron 开着但 UpdatedAt 超 24h 的订阅逐个
+    黄字 ⚠（订阅静默失效是最常见的"代理变慢"根因）。Status/Info 字段语义不稳，**不要**
+    拿它当失败信号，新鲜度才是诚实指标。网卡行同盒（`netLines`，前缀"网卡"）。
+  - **组行健康后缀**（`groupHealth`，盒内容宽 ≥68 才显示）：`存活/已测 · <TimeAgo>`，
+    **只用 `p.lat` 里已有的数据**（别的页轮询到的），必须带年龄标注，未测组显示
+    "未测速"而不是 0/0；**右对齐到盒内右缘**。
+  - **流量脚注**：`trafficMsg.Took`（trafficCmd 计时）显示 `API Nms`（SSH 隧道健康
+    线索），累计行标注"自 daed 启动"（重启清零，不是月流量）。
 - **首页组行跳转**：`Tab` 在路由选择器与组列表间切焦点（`home.groupFocus`），组行
   `Enter` 发 `gotoGroupMsg{ID}`，根模型开群组页并展开该组（`expanded/focus=1`）。
   焦点在组列表时只吞导航键，`o/P/L/g` 等仍走原路径。
@@ -287,7 +323,12 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
 ## 安全与兼容
 
 - `internal/config` 的 config.toml 含密码和长期 JWT，写死 0600；**不要把凭据/token
-  打进日志或错误信息**。
+  打进日志或错误信息**。`Config` 内嵌互斥锁（**只能按指针用**）：持久化一律走
+  `UpdateToken`/`UpdateCredentials`/`ClearSession`/`Save`，写入是同目录临时文件 +
+  fsync + rename 的**原子替换**（写一半崩溃不会截断唯一凭据副本，且每次都强制
+  0600）；后台 hook（token 刷新）与 UI logout 并发写靠锁串行化。改密后驱动先落
+  密码再落 token——崩溃窗口留下"旧 token+新密码"，静默 re-auth 能自愈，反过来
+  不行。
 - daed 默认监听 `0.0.0.0:2023` 纯 HTTP；本工具只走回环 + SSH 隧道，不要改这个前提。
 - daed 已归档、schema 冻结：这是特性不是 bug——永远不会有破坏性变更，但也不会有安全
   修复。`schema.graphql` 是固化的 SDL 副本，用于回归对照，不参与编译。

@@ -79,6 +79,11 @@ type diffState struct {
 	Text    string
 	Path    string // temp file, kept until the edit is applied or cancelled
 	Builtin bool   // produced by the in-app editor: no file, cancel returns to it
+
+	// lines is the computed diff, filled on first render: the LCS is
+	// quadratic and View re-runs on every tick and spinner frame while the
+	// confirmation is open. A fresh diffState starts nil (uncached).
+	lines []diffLine
 }
 
 type rowRef struct {
@@ -900,7 +905,10 @@ func (p configsPage) modalLines() []string {
 			ui.HelpStyle.Render(" 取消后编辑内容保留在 "+ui.TruncateHead(st.Path, max0(p.rightW-6))),
 			"")
 		lines := append([]string{}, head...)
-		for _, dl := range diffLines(st.Old, st.Text) {
+		if st.lines == nil {
+			st.lines = diffLines(st.Old, st.Text)
+		}
+		for _, dl := range st.lines {
 			var line string
 			switch dl.kind {
 			case diffAdd:

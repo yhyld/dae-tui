@@ -103,6 +103,9 @@ type latenciesMsg struct {
 type trafficMsg struct {
 	Snap driver.TrafficSnapshot
 	Err  error
+	// Took is the round-trip duration of the traffic query, shown on the
+	// home page as a tunnel/backend health hint.
+	Took time.Duration
 }
 
 type subsMsg struct {
@@ -379,8 +382,9 @@ func latenciesCmd(d driver.Driver, ids []string) tea.Cmd {
 
 func trafficCmd(d driver.Driver) tea.Cmd {
 	return withCtx(func(ctx context.Context) tea.Msg {
+		start := time.Now()
 		snap, err := d.Traffic(ctx, 10, 60)
-		return trafficMsg{Snap: snap, Err: err}
+		return trafficMsg{Snap: snap, Err: err, Took: time.Since(start)}
 	})
 }
 
