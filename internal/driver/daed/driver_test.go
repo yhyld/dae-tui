@@ -411,6 +411,47 @@ func TestListGroupsFallbackOnOldSchema(t *testing.T) {
 	}
 }
 
+// Stock daed v2.1.1 (pre-traffic-fix chains) rejects the modern Global
+// fields; ListSelections must downgrade to the legacy field set and stick
+// with it, same as the qGroupsRich → qGroups demotion.
+func TestListSelectionsFallbackOnOldSchema(t *testing.T) {
+	var m *mockGraphQL
+	m = &mockGraphQL{handler: func(op string, vars map[string]any, auth string) (any, []gqlError) {
+		switch op {
+		case "Selections":
+			// Only the modern query (it alone asks for disableThp) is
+			// rejected, like stock daed v2.1.1 lacking the newer globals.
+			if reqs := m.reqs(); len(reqs) > 0 && strings.Contains(reqs[len(reqs)-1].query, "disableThp") {
+				return nil, []gqlError{{Message: `Cannot query field "disableThp" on type "Global".`}}
+			}
+			return map[string]any{"configs": []any{
+				map[string]any{"id": "1", "name": "global", "selected": true,
+					"global": map[string]any{"tproxyPort": 1234, "soMarkFromDaeSet": true}},
+			}, "dnss": []any{}, "routings": []any{}}, nil
+		case "ConfigFlatDesc":
+			return map[string]any{"configFlatDesc": []any{}}, nil
+		}
+		return nil, []gqlError{{Message: "unexpected op " + op}}
+	}}
+	srv := httptest.NewServer(m)
+	t.Cleanup(srv.Close)
+	d := New(Options{Endpoint: srv.URL + "/graphql", Username: "alice", Password: "s3cret1"})
+
+	sel, err := d.ListSelections(ctxT(t))
+	if err != nil {
+		t.Fatalf("first ListSelections should fall back: %v", err)
+	}
+	if len(sel.Configs) != 1 || sel.Configs[0].Name != "global" {
+		t.Fatalf("configs = %+v", sel.Configs)
+	}
+	if _, err := d.ListSelections(ctxT(t)); err != nil {
+		t.Fatalf("second ListSelections: %v", err)
+	}
+	if reqs := m.reqs(); len(reqs) == 0 || strings.Contains(reqs[len(reqs)-1].query, "disableThp") {
+		t.Fatalf("fallback not sticky: modern fields still queried")
+	}
+}
+
 // tea.Batch runs commands concurrently, so ListGroups calls overlap: the
 // schema-fallback flag is written by whichever call discovers the old
 // schema while others are still reading it. Run with -race.
@@ -697,14 +738,15 @@ func TestSelectionsQueryCoversEveryGlobalKey(t *testing.T) {
 	}
 	q := m.reqs()[0].query
 	for _, k := range []string{
-		"tproxyPort", "tproxyPortProtect", "soMarkFromDae", "soMarkFromDaeSet",
+		"tproxyPort", "tproxyPortProtect", "soMarkFromDae",
 		"logLevel", "tcpCheckUrl", "tcpCheckHttpMethod", "udpCheckDns",
 		"checkInterval", "checkTolerance", "lanInterface", "wanInterface",
-		"allowInsecure", "dialMode", "disableWaitingNetwork", "enableLocalTcpFastRedirect",
-		"autoConfigKernelParameter", "autoConfigFirewallRule", "sniffingTimeout",
+		"allowInsecure", "dialMode", "disableWaitingNetwork", "disableThp",
+		"enableLocalTcpFastRedirect", "autoConfigKernelParameter", "autoConfigFirewallRule",
+		"sniffingTimeout", "autoSniffPunt",
 		"tlsImplementation", "utlsImitate", "tlsFragment", "tlsFragmentLength", "tlsFragmentInterval",
 		"pprofPort", "mptcp", "bootstrapResolver", "fallbackResolver",
-		"bandwidthMaxTx", "bandwidthMaxRx", "udphopInterval",
+		"bandwidthMaxTx", "bandwidthMaxRx", "udphopInterval", "bpfConnStateMapSize",
 	} {
 		if !strings.Contains(q, k) {
 			t.Errorf("qSelections does not select %s", k)

@@ -47,6 +47,11 @@ type Driver struct {
 	// because tea.Batch runs commands concurrently, so several ListGroups
 	// calls may be in flight at once.
 	groupsFallback atomic.Bool
+	// selectionsFallback is set when the backend's Global type lacks the
+	// modern field set (stock daed v2.1.1, pre-traffic-fix chains):
+	// ListSelections then permanently uses the frozen v2.1.1 field set.
+	// Atomic for the same reason as groupsFallback.
+	selectionsFallback atomic.Bool
 }
 
 var _ driver.Driver = (*Driver)(nil)
@@ -510,14 +515,33 @@ func (d *Driver) UpdateSubscriptionLink(ctx context.Context, id, link string) er
 }
 
 func (d *Driver) ListSelections(ctx context.Context) (driver.Selections, error) {
-	var out struct {
-		Configs  []rawConfig      `json:"configs"`
-		Dnss     []rawDnsItem     `json:"dnss"`
-		Routings []rawRoutingItem `json:"routings"`
+	var out rawSelections
+	// Prefer the modern Global field set (newer dae core); fall back
+	// permanently to the frozen v2.1.1 field set when the backend rejects
+	// it — stock daed's Global type lacks disableThp/autoSniffPunt/
+	// bpfConnStateMapSize and still carries soMarkFromDaeSet.
+	if !d.selectionsFallback.Load() {
+		err := d.client.Do(ctx, qSelections, nil, &out)
+		if err == nil {
+			return d.selectionsFrom(ctx, out)
+		}
+		if !strings.Contains(err.Error(), "Cannot query field") {
+			return driver.Selections{}, err
+		}
+		d.selectionsFallback.Store(true)
+		out = rawSelections{}
 	}
-	if err := d.client.Do(ctx, qSelections, nil, &out); err != nil {
+	if err := d.client.Do(ctx, qSelectionsLegacy, nil, &out); err != nil {
 		return driver.Selections{}, err
 	}
+	return d.selectionsFrom(ctx, out)
+}
+
+// selectionsFrom maps the raw profile lists into the domain model. The
+// editable field list comes from configFlatDesc ∩ the global keys the
+// backend actually returned, so the legacy field set simply hides the
+// globals an old core does not have.
+func (d *Driver) selectionsFrom(ctx context.Context, out rawSelections) (driver.Selections, error) {
 	descs := d.configFieldDescs(ctx)
 	sel := driver.Selections{}
 	for _, c := range out.Configs {

@@ -179,6 +179,49 @@ const qSelections = `query Selections {
 		name
 		selected
 		global {
+			tproxyPort tproxyPortProtect soMarkFromDae
+			logLevel tcpCheckUrl tcpCheckHttpMethod udpCheckDns
+			checkInterval checkTolerance lanInterface wanInterface
+			allowInsecure dialMode disableWaitingNetwork disableThp enableLocalTcpFastRedirect
+			autoConfigKernelParameter autoConfigFirewallRule sniffingTimeout autoSniffPunt
+			tlsImplementation utlsImitate tlsFragment tlsFragmentLength tlsFragmentInterval
+			pprofPort mptcp bootstrapResolver fallbackResolver
+			bandwidthMaxTx bandwidthMaxRx udphopInterval bpfConnStateMapSize
+		}
+	}
+	dnss {
+		id
+		name
+		selected
+		dns { string upstream { key val } }
+	}
+	routings {
+		id
+		name
+		selected
+		referenceGroups
+		routing {
+			string
+			rules {
+				conditions { and { name not params { key val } } }
+				outbound { name not params { key val } }
+			}
+			fallback { ... on Function { name not params { key val } } ... on Plaintext { val } }
+		}
+	}
+}`
+
+// qSelectionsLegacy targets the frozen v2.1.1 schema: it predates the
+// disableThp / autoSniffPunt / bpfConnStateMapSize globals and still carries
+// soMarkFromDaeSet. ListSelections downgrades to it permanently when the
+// backend rejects the modern field set — the same law that demotes
+// qGroupsRich to qGroups on daed builds lacking GroupSubscription.
+const qSelectionsLegacy = `query Selections {
+	configs {
+		id
+		name
+		selected
+		global {
 			tproxyPort tproxyPortProtect soMarkFromDae soMarkFromDaeSet
 			logLevel tcpCheckUrl tcpCheckHttpMethod udpCheckDns
 			checkInterval checkTolerance lanInterface wanInterface

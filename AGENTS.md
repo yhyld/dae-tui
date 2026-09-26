@@ -103,6 +103,13 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
 - `testNodeLatencies` 的 ID 列表超过 100 个要分块，否则 HTTP 超时。
 - 老版本 daed 没有 `GroupSubscription` 类型：`qGroupsRich` 会 schema 校验失败，驱动据此
   永久降级到 `qGroups`（`groupsFallback`）。
+- **双 schema 兼容（traffic-fix fork 链）**：修复流量统计的 fork 链（wing
+  `b089b56` + 新 dae 核心）的 `Global` 类型删了 `soMarkFromDaeSet`、新增
+  `disableThp`/`autoSniffPunt`/`bpfConnStateMapSize`。`ListSelections` 先发新字段集
+  （`qSelections`），遇 `Cannot query field` 永久降级 `qSelectionsLegacy`
+  （冻结 v2.1.1 字段集，`selectionsFallback`，同一法则如 groupsFallback）——
+  **两代 daed 都能用**；可编辑字段清单仍由 configFlatDesc ∩ 返回键交集决定，
+  老核心自然不出现新字段，无需分支硬编码。
 - **routing 按名字引用组**：`routings { referenceGroups }` 给出每个路由方案引用的名字。
   改名/删组 daed 不报错、只是规则静默失效，所以群组页 `R`/`D` 确认框（`refNote`）和配置页
   路由右栏都要点名。注意 referenceGroups **把 dae 内置 outbound（direct/must_direct/block/

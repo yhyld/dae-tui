@@ -154,6 +154,14 @@ type rawSubscription struct {
 	Nodes      rawNodesConn `json:"nodes"`
 }
 
+// rawSelections bundles the three profile lists fetched by qSelections /
+// qSelectionsLegacy in a single document.
+type rawSelections struct {
+	Configs  []rawConfig      `json:"configs"`
+	Dnss     []rawDnsItem     `json:"dnss"`
+	Routings []rawRoutingItem `json:"routings"`
+}
+
 // rawConfig keeps global untyped: the editable field set is discovered from
 // qConfigFlatDesc, so the driver must not hard-code which keys exist.
 type rawConfig struct {
