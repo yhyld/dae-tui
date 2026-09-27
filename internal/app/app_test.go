@@ -5154,3 +5154,75 @@ func TestSettingsKeysViewer(t *testing.T) {
 		t.Fatalf("esc should return to the menu, sub=%d", mm.settings.sub)
 	}
 }
+
+// In English mode every chrome string must be translated: the package-level
+// tables (field labels, section titles, policy choices) translate at lookup,
+// and the help's key column is a catalog too. Any CJK here is a string that
+// leaked past the catalog.
+func TestEnglishModeChromeHasNoCJK(t *testing.T) {
+	i18n.SetLang("en")
+	defer i18n.SetLang("zh")
+	cjk := func(s string) bool {
+		for _, r := range s {
+			if r >= 0x4E00 && r <= 0x9FFF {
+				return true
+			}
+		}
+		return false
+	}
+	for name := range configFieldLabels {
+		if cjk(fieldLabel(driver.ConfigField{Name: name})) {
+			t.Fatalf("field label %q stayed Chinese", name)
+		}
+	}
+	for _, sec := range configSections {
+		if cjk(sectionName(sec)) {
+			t.Fatalf("section title %q stayed Chinese", sec)
+		}
+	}
+	for _, c := range policyChoices {
+		if cjk(i18n.T(c.label)) {
+			t.Fatalf("policy choice %q stayed Chinese", c.label)
+		}
+	}
+	if cjk(strings.Join(helpLines(), "\n")) {
+		t.Fatalf("help still contains Chinese:\n%s", strings.Join(helpLines(), "\n"))
+	}
+	m := newTestModel(t)
+	keys, hint := m.(Model).helpKeys()
+	if cjk(keys) || cjk(hint) {
+		t.Fatalf("frame key strip stayed Chinese: %q / %q", keys, hint)
+	}
+}
+
+// Clicking a left-pane row while the right pane holds focus returns focus to
+// the left column — the click itself says "I want to operate the left side".
+func TestConfigsLeftClickReclaimsFocus(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("5"))
+	m, _ = m.Update(key("l")) // focus the right pane
+	mm := m.(Model)
+	if mm.configs.focus != 1 {
+		t.Fatalf("setup: right pane should hold focus, focus=%d", mm.configs.focus)
+	}
+	// Row 0 is the section's first (already selected) item: the click lands
+	// on a real row and must still hand focus back.
+	mm.configs.leftClick(0)
+	if mm.configs.focus != 0 {
+		t.Fatalf("a left-pane click must reclaim focus, focus=%d", mm.configs.focus)
+	}
+}
+
+func TestSubsLeftClickReclaimsFocus(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("3"))
+	m, _ = m.Update(key("l")) // focus the right pane
+	mm := m.(Model)
+	if mm.subs.focus != 1 {
+		t.Fatalf("setup: right pane should hold focus, focus=%d", mm.subs.focus)
+	}
+	m, _ = mm.Update(mouseClick(10, 6)) // a left-pane row (x < leftW)
+	if mm := m.(Model); mm.subs.focus != 0 {
+		t.Fatalf("a left-pane click must reclaim focus, focus=%d", mm.subs.focus)
+	}
+}

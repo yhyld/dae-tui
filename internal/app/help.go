@@ -114,7 +114,9 @@ var helpSections = []helpSection{
 func sectionLines(s helpSection) []string {
 	lines := []string{ui.SelectedStyle.Render(" " + i18n.T(s.title))}
 	for _, r := range s.rows {
-		key := ui.SelectedStyle.Render(ui.PadRight(r[0], 14))
+		// The key column holds CJK entries too (滚轮, 右栏聚焦, …) — they are
+		// catalog keys like the descriptions.
+		key := ui.SelectedStyle.Render(ui.PadRight(i18n.T(r[0]), 14))
 		if r[0] == "-" {
 			key = ui.HelpStyle.Render(ui.PadRight(r[0], 14))
 		}

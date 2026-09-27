@@ -109,10 +109,10 @@ func newGroupsPage(caps driver.Caps) groupsPage {
 }
 
 var policyChoices = []struct{ name, label string }{
-	{"min_moving_avg", i18n.T("自动 · 最小移动平均延迟")},
-	{"min_avg10", i18n.T("自动 · 最小平均延迟")},
-	{"min", i18n.T("自动 · 最小最新延迟")},
-	{"random", i18n.T("随机")},
+	{"min_moving_avg", "自动 · 最小移动平均延迟"},
+	{"min_avg10", "自动 · 最小平均延迟"},
+	{"min", "自动 · 最小最新延迟"},
+	{"random", "随机"},
 }
 
 func (p *groupsPage) setSize(leftW, rightW, h int) {
@@ -852,6 +852,7 @@ func (p groupsPage) bodyLines(inner int) []string {
 	if p.mode == pickPolicy {
 		lines := []string{ui.TitleStyle.Render(i18n.T(" 选择群组策略"))}
 		for i, c := range policyChoices {
+			c.label = i18n.T(c.label)
 			mark, style := "  ", ui.HelpStyle
 			if i == p.pickCursor {
 				mark, style = "❯ ", ui.CursorStyle

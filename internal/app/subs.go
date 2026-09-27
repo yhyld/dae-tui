@@ -750,6 +750,7 @@ func (p *subsPage) leftClick(row int, d driver.Driver) tea.Cmd {
 	}
 	p.sel = i
 	p.nc = 0
+	p.focus = 0
 	return p.ensureNodes(d)
 }
 

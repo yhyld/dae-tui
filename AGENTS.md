@@ -307,6 +307,11 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   测试要覆盖它必须在 New 之后赋值。
 - **i18n（`internal/i18n`）**：中文文案**本身就是 key**——zh 模式 `T()` 原样返回 key（所以断言中文字面量的测试全部照旧），en 模式查 `en` 表、缺失回退 key，en 目录可以滞后于代码。两条铁律：**渲染期文本在 View/render 路径里调 T**（设置里切语言下一帧即生效，语言选择器在 `settings.go` 的 langKey）；**禁止把 T() 结果存进长寿命结构体字段**（包级表如 helpSections/tabLabels/presetLabels 存中文 key、渲染时翻译；toast 等瞬态消息允许构造时翻译，切语言后残留几秒可接受）。`config.toml` 的 `lang = "en"` 切英文，main.go 启动 `i18n.SetLang` 一次。driver 层错误是技术诊断信息，**不翻译**。en 表 key 与 T() 调用点的一致性靠"半合法即降级"兜底，别为对齐而硬编码两份清单。
 - **i18n（`internal/i18n`）**：中文文案**本身就是 key**——zh 模式 `T()` 原样返回 key（所以断言中文字面量的测试全部照旧），en 模式查 `en` 表、缺失回退 key，en 目录可以滞后于代码。两条铁律：**渲染期文本在 View/render 路径里调 T**（设置里切语言下一帧即生效，语言选择器在 `settings.go` 的 langKey）；**禁止把 T() 结果存进长寿命结构体字段**（包级表如 helpSections/tabLabels/presetLabels 存中文 key、渲染时翻译；toast 等瞬态消息允许构造时翻译，切语言后残留几秒可接受）。`config.toml` 的 `lang = "en"` 切英文，main.go 启动 `i18n.SetLang` 一次。driver 层错误是技术诊断信息，**不翻译**。en 表 key 与 T() 调用点的一致性靠"缺失即回退中文"兜底，别为对齐而维护第二份清单。
+  已知包级表（configFieldLabels/sectionTitles/policyChoices/helpSections/tabLabels/
+  presetLabels/settingsItems）一律存 key、查表处翻译——脚本曾把 T() 包进 init 表达式
+  造成语言冻结（配置页右栏字段标签就是因此残留中文），`TestEnglishModeChromeHasNoCJK`
+  是 chrome 无中文的回归兜底。dae 核心的 configFlatDesc 说明文字是英文数据（dae 的
+  config/desc.go），f.Desc 原样展示即可，不进目录。
 - **`Model.View()` 末尾的硬钳制不能删**：body 行数超过 `height-6`（外框 2 行 + 页头盒
   3 行 + toast 1 行）就截断、不足就补齐空行，否则页签/帮助边框会被挤出屏幕（这是最早
   修的滚动 bug；钳制现在同时负责"撑满终端+页脚贴底"）。
@@ -445,7 +450,7 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   **字段表 + 字段光标**（`fieldCur`），且它是**唯一的字段编辑面**——旧的字段选择器
   （原 mode 1）已删，右栏不存在第二份字段列表：j/k/g/G 移动光标（渲染窗口跟随，
   `fieldWindowStart` 与 `rightClick` 共用同一份行映射 `fieldLineOf`——告警行占一行，
-  两边都要计），点击只钉光标不进表单（编辑浮窗由 Enter 开），`e` 在全局配置区=
+  两边都要计），点击只钉光标不进表单（编辑浮窗由 Enter 开），点击同时回收焦点到左栏（focus=0，与 nodes 的 leftClick 一致——聚焦右栏时点左栏是"我要操作左栏"的明确信号），`e` 在全局配置区=
   聚焦右栏字段表。字段编辑浮窗（mode 2）的 esc 与提交都一步回字段表、光标停在
   原字段——不要让它"返回"某个中间列表；`rebuild`（刷新）对 fieldCur 只钳制不归零，
   多字段连续编辑的节奏不被刷新打断，归零只属于显式导航（`setCursor`/

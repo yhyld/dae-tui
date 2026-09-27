@@ -248,7 +248,7 @@ func (p *configsPage) curRow() *rowRef {
 }
 
 func sectionName(section string) string {
-	return sectionTitles[section]
+	return i18n.T(sectionTitles[section])
 }
 
 func (p *configsPage) deletable(section string, it *driver.ConfigItem) error {
@@ -450,7 +450,7 @@ func (p *configsPage) bodyLines() []string {
 		}
 		return append(lines, fallbackBody(it, 0)...)
 	}
-	title := sectionTitles[r.section]
+	title := i18n.T(sectionTitles[r.section])
 	lines := []string{}
 	if r.section == "routing" && len(it.References) > 0 {
 
@@ -660,9 +660,9 @@ func (p *configsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 }
 
 var sectionTitles = map[string]string{
-	"config":  i18n.T("全局配置"),
+	"config":  "全局配置",
 	"dns":     "DNS",
-	"routing": i18n.T("路由规则"),
+	"routing": "路由规则",
 }
 
 func (p configsPage) View() string {
@@ -853,6 +853,7 @@ func (p *configsPage) leftClick(row int) {
 				}
 			}
 			p.setCursor(i)
+			p.focus = 0
 		}
 		return
 	}
@@ -881,6 +882,7 @@ func (p *configsPage) leftClick(row int) {
 				p.switchSection(si)
 			}
 			p.setCursor(p.rowAt(section, i))
+			p.focus = 0
 		}
 		return
 	}
@@ -1090,7 +1092,7 @@ func (p configsPage) leftBoxes(h int) []string {
 		for len(lines) < rowsH {
 			lines = append(lines, "")
 		}
-		title := fmt.Sprintf("%s %d", sectionTitles[section], len(items))
+		title := fmt.Sprintf("%s %d", i18n.T(sectionTitles[section]), len(items))
 		out = append(out, ui.TitledBoxFooter(title, footer, focused, p.leftW, lines)...)
 	}
 	return out

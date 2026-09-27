@@ -51,37 +51,37 @@ func configuredIfaces(value string) []string {
 }
 
 var configFieldLabels = map[string]string{
-	"logLevel":                   i18n.T("日志级别"),
-	"lanInterface":               i18n.T("LAN 接口"),
-	"wanInterface":               i18n.T("WAN 接口"),
-	"dialMode":                   i18n.T("拨号模式"),
-	"checkInterval":              i18n.T("检查间隔"),
-	"checkTolerance":             i18n.T("检查容差"),
-	"allowInsecure":              i18n.T("允许不安全 TLS"),
-	"tcpCheckUrl":                i18n.T("TCP 检查 URL"),
-	"tcpCheckHttpMethod":         i18n.T("TCP 检查方法"),
-	"udpCheckDns":                i18n.T("UDP 检查 DNS"),
-	"sniffingTimeout":            i18n.T("探测超时"),
+	"logLevel":                   "日志级别",
+	"lanInterface":               "LAN 接口",
+	"wanInterface":               "WAN 接口",
+	"dialMode":                   "拨号模式",
+	"checkInterval":              "检查间隔",
+	"checkTolerance":             "检查容差",
+	"allowInsecure":              "允许不安全 TLS",
+	"tcpCheckUrl":                "TCP 检查 URL",
+	"tcpCheckHttpMethod":         "TCP 检查方法",
+	"udpCheckDns":                "UDP 检查 DNS",
+	"sniffingTimeout":            "探测超时",
 	"mptcp":                      "MPTCP",
-	"pprofPort":                  i18n.T("pprof 端口"),
-	"autoConfigKernelParameter":  i18n.T("自动内核参数"),
-	"autoConfigFirewallRule":     i18n.T("自动防火墙规则"),
-	"tproxyPort":                 i18n.T("tproxy 端口"),
-	"tproxyPortProtect":          i18n.T("tproxy 端口保护"),
+	"pprofPort":                  "pprof 端口",
+	"autoConfigKernelParameter":  "自动内核参数",
+	"autoConfigFirewallRule":     "自动防火墙规则",
+	"tproxyPort":                 "tproxy 端口",
+	"tproxyPortProtect":          "tproxy 端口保护",
 	"soMarkFromDae":              "SO_MARK",
-	"soMarkFromDaeSet":           i18n.T("SO_MARK 已设置"),
-	"disableWaitingNetwork":      i18n.T("禁用等待网络"),
-	"enableLocalTcpFastRedirect": i18n.T("TCP 快速重定向"),
-	"tlsImplementation":          i18n.T("TLS 实现"),
-	"utlsImitate":                i18n.T("uTLS 伪装"),
-	"tlsFragment":                i18n.T("TLS 分片"),
-	"tlsFragmentLength":          i18n.T("TLS 分片长度"),
-	"tlsFragmentInterval":        i18n.T("TLS 分片间隔"),
-	"bootstrapResolver":          i18n.T("引导解析器"),
-	"fallbackResolver":           i18n.T("备用解析器"),
-	"bandwidthMaxTx":             i18n.T("最大上行带宽"),
-	"bandwidthMaxRx":             i18n.T("最大下行带宽"),
-	"udphopInterval":             i18n.T("UDP 跳变间隔"),
+	"soMarkFromDaeSet":           "SO_MARK 已设置",
+	"disableWaitingNetwork":      "禁用等待网络",
+	"enableLocalTcpFastRedirect": "TCP 快速重定向",
+	"tlsImplementation":          "TLS 实现",
+	"utlsImitate":                "uTLS 伪装",
+	"tlsFragment":                "TLS 分片",
+	"tlsFragmentLength":          "TLS 分片长度",
+	"tlsFragmentInterval":        "TLS 分片间隔",
+	"bootstrapResolver":          "引导解析器",
+	"fallbackResolver":           "备用解析器",
+	"bandwidthMaxTx":             "最大上行带宽",
+	"bandwidthMaxRx":             "最大下行带宽",
+	"udphopInterval":             "UDP 跳变间隔",
 }
 
 var preferredFieldOrder = []string{
@@ -93,7 +93,7 @@ var preferredFieldOrder = []string{
 
 func fieldLabel(f driver.ConfigField) string {
 	if l, ok := configFieldLabels[f.Name]; ok {
-		return l
+		return i18n.T(l)
 	}
 	if f.Label != "" {
 		return f.Label
