@@ -28,9 +28,11 @@ type homePage struct {
 	subs []driver.Subscription
 
 	// cfgName/dnsName are the selected config/dns profiles; with
-	// routingName they make up the "what would A apply" line.
-	cfgName string
-	dnsName string
+	// routingName they make up the "what would A apply" line. dnsSummary
+	// (the upstream list) rides along for the rules digest box.
+	cfgName    string
+	dnsName    string
+	dnsSummary []string
 
 	// apiTook is the last traffic round-trip duration: over an SSH tunnel
 	// it is the quickest hint at whether the tunnel or the backend is the
@@ -58,12 +60,15 @@ type homePage struct {
 	pwErr    string
 
 	// routing quick-switch: the selected routing profile plus the presets
-	// that can replace it.
-	routingID    string
-	routingName  string
-	routingMode  string // detected preset id ("" = custom rules)
-	routingBody  string // kept to re-derive the proxy group when groups load
-	presets      []driver.RoutingPreset
+	// that can replace it. Summary/Refs feed the rules digest box (already
+	// fetched by ListSelections — the home page adds no request of its own).
+	routingID      string
+	routingName    string
+	routingMode    string   // detected preset id ("" = custom rules)
+	routingBody    string   // kept to re-derive the proxy group when groups load
+	routingSummary []string // parsed rule lines, rendered by the rules digest
+	routingRefs    []string // group names the rules reference (builtins included)
+	presets        []driver.RoutingPreset
 	presetCursor int
 	groupIdx     int  // proxy group the presets send traffic to
 	groupChosen  bool // the user picked the group with `g`
@@ -205,6 +210,115 @@ func (p homePage) groupHealth(g driver.Group) string {
 		ui.HelpStyle.Render(" · "+ui.TimeAgo(newest))
 }
 
+// missingRefLines flags group names the selected routing references that do
+// not exist. daed accepts the dangling reference silently — the rules simply
+// stop matching — so the digest box has to say it out loud. dae's built-in
+// outbounds (direct/must_direct/…) are not groups and never flagged.
+func (p homePage) missingRefLines(cw int) []string {
+	var out []string
+	for _, ref := range p.routingRefs {
+		if isBuiltinOutbound(ref) {
+			continue
+		}
+		found := false
+		for _, g := range p.groups {
+			if g.Name == ref {
+				found = true
+				break
+			}
+		}
+		if found {
+			continue
+		}
+		out = append(out, " "+lipgloss.NewStyle().Foreground(ui.Yellow).Render(
+			ui.Truncate("⚠ 路由引用的组 "+ref+" 不存在，相关规则已失效", cw-1)))
+	}
+	return out
+}
+
+// rulesDigest is the 规则速览 box's raw content: the missing-reference
+// warnings and the selected routing's parsed rules (already normalized by
+// the driver, must_direct recomposed there). Routing only — DNS lives in
+// the 环境 box, where the NICs and the other environment facts are; mixing
+// the two made the rules read as noise and the DNS line read as a rule.
+// All of it was fetched by ListSelections — the home page adds no poll.
+func (p homePage) rulesDigest(cw int) (warn, rules []string) {
+	warn = p.missingRefLines(cw)
+	for _, l := range p.routingSummary {
+		rules = append(rules, " "+ui.HelpStyle.Render(ui.Truncate(l, cw-1)))
+	}
+	return warn, rules
+}
+
+// dnsLines is the 环境 box's DNS block: the selected profile's name, then
+// each upstream on its own hanging line. Inline it and the 40-col two-column
+// 环境 box truncates exactly the resolver address the line exists to show —
+// the same lesson as the gateway line above.
+func (p homePage) dnsLines(w int) []string {
+	if p.dnsName == "" || !p.caps.ConfigMgmt {
+		return nil
+	}
+	lines := []string{" " + ui.HelpStyle.Render("DNS  ") +
+		ui.Truncate(p.dnsName, max0(w-6))}
+	for _, u := range p.dnsSummary {
+		lines = append(lines, "     "+ui.HelpStyle.Render(ui.Truncate(u, max0(w-6))))
+	}
+	return lines
+}
+
+// latSummaryRow aggregates what p.lat already knows about every group member
+// into one dim line for the group box's tail: totals, how many were ever
+// measured, how many are alive, and the fastest name. Deliberately without
+// milliseconds (the home page's honesty rule for data it does not poll) and
+// with an age on the whole line — a stale count must not read as current.
+// Nodes shared by several groups count once.
+func (p homePage) latSummaryRow(cw int) string {
+	if len(p.groups) == 0 {
+		return ""
+	}
+	seen := map[string]bool{}
+	var total, measured, alive, best int
+	var bestName string
+	var newest time.Time
+	for _, g := range p.groups {
+		for _, n := range g.Members() {
+			if seen[n.ID] {
+				continue
+			}
+			seen[n.ID] = true
+			total++
+			l, ok := p.lat[n.ID]
+			if !ok || l.TestedAt.IsZero() {
+				continue
+			}
+			measured++
+			if l.Alive {
+				alive++
+				if l.Ms > 0 && (best == 0 || l.Ms < best) {
+					best, bestName = l.Ms, ui.SpaceAfterFlag(n.Name)
+				}
+			}
+			if l.TestedAt.After(newest) {
+				newest = l.TestedAt
+			}
+		}
+	}
+	if total == 0 {
+		return ""
+	}
+	s := fmt.Sprintf("全部 %d 节点", total)
+	if measured == 0 {
+		s += " · 未测速"
+	} else {
+		s += fmt.Sprintf(" · 已测 %d · 存活 %d", measured, alive)
+		if bestName != "" {
+			s += " · 最快 " + bestName
+		}
+		s += " · " + ui.TimeAgo(newest)
+	}
+	return " " + ui.HelpStyle.Render(ui.Truncate(s, cw-1))
+}
+
 // handleSelections tracks the selected routing profile: which preset (if
 // any) it currently is, and which proxy group the presets should target. It
 // also records the interfaces the selected config binds to, so the home page
@@ -224,7 +338,7 @@ func (p *homePage) handleSelections(sel driver.Selections, err error, d driver.D
 	}
 	for _, d := range sel.Dns {
 		if d.Selected {
-			p.dnsName = d.Name
+			p.dnsName, p.dnsSummary = d.Name, d.Summary
 			break
 		}
 	}
@@ -233,6 +347,7 @@ func (p *homePage) handleSelections(sel driver.Selections, err error, d driver.D
 			continue
 		}
 		p.routingID, p.routingName, p.routingBody = r.ID, r.Name, r.Body
+		p.routingSummary, p.routingRefs = r.Summary, r.References
 		p.routingMode = d.DetectRoutingPreset(r.Body)
 		// Aim the preset cursor at the mode actually in effect, so the
 		// highlight lands on reality on first paint instead of preset #0.
@@ -246,6 +361,7 @@ func (p *homePage) handleSelections(sel driver.Selections, err error, d driver.D
 		return
 	}
 	p.routingID, p.routingName, p.routingBody, p.routingMode = "", "", "", ""
+	p.routingSummary, p.routingRefs = nil, nil
 }
 
 func (p *homePage) setInterfaces(ifaces []driver.NetworkInterface) {
@@ -281,8 +397,11 @@ func (p homePage) netLines(w int) []string {
 		return nil
 	}
 	// One NIC per line with a hanging indent: the joined form truncated
-	// mid-IP and hid exactly the addresses this section exists to show.
-	lines := make([]string, 0, len(p.ifaces))
+	// mid-IP and hid exactly the addresses this section exists to show. The
+	// default route's gateway gets its own hanging line — inline it would be
+	// the first casualty of the 40-col two-column 环境 box, and the gateway
+	// is the address you ping when "the network works but the proxy doesn't".
+	lines := make([]string, 0, len(p.ifaces)*2)
 	for _, i := range p.ifaces {
 		s := i.Name + " "
 		if i.Up {
@@ -301,6 +420,10 @@ func (p homePage) netLines(w int) []string {
 			label = "     " // hang under the 网卡 label (4 cols + space)
 		}
 		lines = append(lines, " "+label+ui.Truncate(s, max0(w-6)))
+		if i.Default && i.Gateway != "" {
+			lines = append(lines, "       "+ui.HelpStyle.Render(
+				ui.Truncate("· 网关 "+i.Gateway, max0(w-8))))
+		}
 	}
 	lines = append(lines, netWarnLines(p)...)
 	return lines
@@ -641,6 +764,11 @@ const homeTwoColMin = 96
 // cursor + mark + a 14-cell label + a CJK description fits in 44.
 const homeRoutingW = 44
 
+// rulesDigestMinInner is the smallest content height at which the rules
+// digest box renders at all: below it the leftover strip is too cramped to
+// be worth a frame, and the group box stretches instead.
+const rulesDigestMinInner = 4
+
 var presetLabels = map[string]string{
 	"gfw":    "GFW 模式",
 	"nonCn":  "中国列表以外",
@@ -876,7 +1004,7 @@ func (p homePage) bodyLines(status driver.Status) ([]string, int, homeAnchors) {
 	if twoCol {
 		envW = homeRoutingW - 4
 	}
-	env := append(p.subLines(), p.netLines(envW)...)
+	env := append(p.subLines(), append(p.dnsLines(envW), p.netLines(envW)...)...)
 	if twoCol && len(env) > 0 {
 		addZone(pairedRow("环境", "", env, "路由", "Enter 切换 · g 换组", routingBody, !p.groupFocus))
 	} else {
@@ -913,6 +1041,12 @@ func (p homePage) bodyLines(status driver.Status) ([]string, int, homeAnchors) {
 		}
 		groupRows = append(groupRows, row)
 	}
+	// One dim aggregate under the per-group rows: totals over all members
+	// (shared nodes counted once), without milliseconds — same honesty rule
+	// as the per-group health suffix above.
+	if row := p.latSummaryRow(cw); row != "" {
+		groupRows = append(groupRows, row)
+	}
 	// The cursor row rides a full-width highlight; the interactive anchor
 	// math is untouched (highlight is decoration, not layout).
 	if p.groupFocus && p.groupCursor >= 0 && p.groupCursor < len(groupRows) {
@@ -924,7 +1058,45 @@ func (p homePage) bodyLines(status driver.Status) ([]string, int, homeAnchors) {
 	}
 	groupStart := len(lines) + 1 // under the box's top border
 	anchors.groupStart = groupStart
+
+	// The page bottom has one filler slot. First choice is the rules digest:
+	// it renders only into the height the zones above leave over — when they
+	// already overflow the page it stays hidden (the configs page holds the
+	// full picture), and content that does not fit is windowed behind a
+	// "其余 N 条" tail. When the digest has nothing to say or no room to
+	// exist, the group box stretches to the page bottom instead, so the
+	// frame always reads "waiting for content", never "unfinished".
+	digestInner := p.height - (len(lines) + len(groupRows) + 2) - 2
+	digestWarn, digestRules := p.rulesDigest(cw)
+	digestShow := p.caps.ConfigMgmt && digestInner >= rulesDigestMinInner &&
+		(len(digestWarn) > 0 || len(digestRules) > 0)
+	if !digestShow {
+		if leftover := p.height - (len(lines) + len(groupRows) + 2); leftover > 0 {
+			for i := 0; i < leftover; i++ {
+				groupRows = append(groupRows, "")
+			}
+		}
+	}
 	addZone(ui.TitledBoxFooter("各组当前节点", groupFooter, p.groupFocus, full, groupRows))
+
+	if digestShow {
+		rows := digestWarn
+		budget := digestInner - len(digestWarn)
+		if budget > 0 {
+			if len(digestRules) > budget {
+				rows = append(rows, digestRules[:budget-1]...)
+				rows = append(rows, " "+ui.HelpStyle.Render(
+					fmt.Sprintf("… 其余 %d 条", len(digestRules))))
+			} else {
+				rows = append(rows, digestRules...)
+			}
+		}
+		for len(rows) < digestInner {
+			rows = append(rows, "")
+		}
+		rows = rows[:digestInner] // hard guard: never push the border off-page
+		addZone(ui.TitledBox("规则速览", false, full, rows))
+	}
 
 	// Active-line priority: an open confirmation wins above; otherwise it
 	// is the cursor row of the focused zone.

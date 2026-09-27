@@ -374,6 +374,26 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
     （每个方向"当前 · 峰值"，图表就在其下方）：速率行按盒子实际宽度排版、不强制和
     图表共用列宽（否则多出来的峰值正好被截掉）；放不下时峰值退回脚注，脚注自身放不下
     时拆回两行——合并行被盒子截断会静默丢掉 UDP 计数。
+  - **规则速览盒是页底填充物**（`rulesDigest` + `bodyLines` 尾部的 digest 分支）：
+    通栏堆在"各组当前节点"之后，内容 = 引用组缺失 ⚠ 行（`routingRefs` ∩ 现有组名，
+    内置 outbound 跳过）+ 选中路由的 `Summary`（驱动已归一化、must_direct 已拼回），
+    **只装路由，DNS 不进这个盒**——DNS 与规则混排时 DNS 行读起来像条规则、规则读起来
+    像噪音（用户明确否决过），DNS 方案与上游归环境盒的 `dnsLines`。数据全部来自
+    `ListSelections` 已拉回的内容（`handleSelections` 保留
+    `routingSummary/routingRefs/dnsSummary`）。**只在剩余高度 ≥
+    `rulesDigestMinInner` 时渲染、内容超出就窗口化并给"… 其余 N 条"尾行、不足就
+    补空行撑到页底**——它是"底部空旷"的解决方案，空间不足时整盒让位、由组盒补空行
+    撑底（两条路径保证 bodyLines 行数恰好 `p.height`，`bodyLines` 长度 == 页高有
+    测试兜底）。看全量规则是配置页的职责，别把摘要做成第二份全文。
+  - **环境盒的 DNS 块**（`dnsLines`，订阅摘要与网卡行之间）：`DNS  <方案名>` 一行 +
+    每条上游单独一行悬挂（上游内联会被 40 列的双栏环境盒截掉——和网关行同一个教训）。
+    网卡行（`netLines`）默认路由行的网关同样自占一行悬挂（前缀多两格、嵌在网卡名下），
+    不参与行内截断。
+  - **组盒汇总行**（`latSummaryRow`，组行之后暗色一行）：`全部 N 节点 · 已测 M ·
+    存活 K · 最快 <名> · <TimeAgo>`——跨组成员按 ID 去重，**无毫秒**（与组行健康
+    后缀同一条诚实法则），已测 0 时显示"未测速"。它占一个内容行：组盒底边框从
+    `groupStart+len(groups)` 移到 `+len(groupRows)`，点击映射与边框 no-op 测试跟着
+    这个数走。
 - **首页组行跳转**：`Tab` 在路由选择器与组列表间切焦点（`home.groupFocus`），组行
   `Enter` 发 `gotoGroupMsg{ID}`，根模型开群组页、选中该组并聚焦右栏（`focus=1`）。
   焦点在组列表时只吞导航键，`o/P/L/g` 等仍走原路径。

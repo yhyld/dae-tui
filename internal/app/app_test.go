@@ -4042,18 +4042,23 @@ func TestSubsRightClickMovesNodeCursor(t *testing.T) {
 	}
 }
 
-// Box edges are not rows: a click on the group box's top or bottom border
-// must not move any cursor (borders live one row outside every interactive
-// zone — the row contract's row -1 and the window's last row).
+// Box edges are not rows: a click on the group box's top or bottom border,
+// on the trailing aggregate row, or inside the rules digest below must not
+// move any cursor (borders live one row outside every interactive zone —
+// the row contract's row -1 and the window's last row).
 func TestHomeClickBorderRowsAreNoOp(t *testing.T) {
 	m := newTestModel(t)
 	m, _ = m.Update(key("1"))
 	mm := m.(Model)
 	_, _, a := mm.home.bodyLines(mm.status)
 	// The group box's borders render at flat groupStart-1 (top) and
-	// groupStart+len(groups) (bottom); screen y = 4 + flat while the
-	// fixture fits the window.
-	for _, y := range []int{4 + a.groupStart - 1, 4 + a.groupStart + len(mm.home.groups)} {
+	// groupStart+len(groupRows) (bottom); the fixture's digest box renders,
+	// so groupRows is the two groups plus the aggregate row and nothing is
+	// padded in. Screen y = 4 + flat while the fixture fits the window.
+	borderY := []int{4 + a.groupStart - 1, 4 + a.groupStart + len(mm.home.groups) + 1}
+	// The aggregate row and the digest box's rows are display-only, too.
+	borderY = append(borderY, 4+a.groupStart+len(mm.home.groups), 4+a.groupStart+4)
+	for _, y := range borderY {
 		before := mm.home
 		m2, _ := m.Update(mouseClick(10, y))
 		mm = m2.(Model)
@@ -4066,6 +4071,123 @@ func TestHomeClickBorderRowsAreNoOp(t *testing.T) {
 				before.presetCursor, mm.home.presetCursor)
 		}
 	}
+}
+
+// The rules digest box renders the selected routing's parsed rules plus the
+// selected DNS's upstreams into the page's leftover height, stretching its
+// box to the page bottom — the body never ends in bare blank rows.
+func TestHomeRulesDigestFillsPageBottom(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("1"))
+	mm := m.(Model)
+	lines, _, _ := mm.home.bodyLines(mm.status)
+	if len(lines) != mm.home.height {
+		t.Fatalf("body filled %d rows, want %d (page height)", len(lines), mm.home.height)
+	}
+	if last := lines[len(lines)-1]; !strings.Contains(last, "╰") {
+		t.Fatalf("last body row should be the digest box's bottom border, got %q", last)
+	}
+	v := m.View()
+	for _, want := range []string{"规则速览", "a(domain: example.com) -> proxy", "fallback: direct"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("rules digest missing %q:\n%s", want, v)
+		}
+	}
+}
+
+// DNS is an environment fact, not a routing rule: the selected profile and
+// its upstreams render in the 环境 box (one upstream per hanging line),
+// never inside the rules digest — mixing them made the DNS line read as a
+// rule and the rules read as noise.
+func TestHomeDnsRendersInEnvBox(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("1"))
+	mm := m.(Model)
+	lines, _, _ := mm.home.bodyLines(mm.status)
+	digest := -1
+	for i, l := range lines {
+		if strings.Contains(l, "规则速览") {
+			digest = i
+			break
+		}
+	}
+	if digest < 0 {
+		t.Fatal("rules digest box missing")
+	}
+	head := strings.Join(lines[:digest], "\n")
+	tail := strings.Join(lines[digest:], "\n")
+	if !strings.Contains(head, "DNS") || !strings.Contains(head, "默认DNS") ||
+		!strings.Contains(head, "alidns: udp://223.5.5.5:53") {
+		t.Fatalf("DNS block missing from the 环境 box:\n%s", head)
+	}
+	if strings.Contains(tail, "alidns") || strings.Contains(tail, "默认DNS") {
+		t.Fatalf("DNS leaked into the rules digest:\n%s", tail)
+	}
+}
+
+// daed accepts a routing that references a missing group and just lets the
+// rules stop matching; the digest box has to say it out loud. The built-in
+// outbounds mixed into referenceGroups are never flagged.
+func TestHomeRulesDigestWarnsMissingRef(t *testing.T) {
+	sel := mustSel(t)
+	sel.Routings[0].References = []string{"proxy", "must_direct", "ghost"}
+	m := newTestModel(t)
+	m, _ = m.Update(selectionsMsg{Sel: sel})
+	m, _ = m.Update(key("1"))
+	v := m.View()
+	if !strings.Contains(v, "ghost 不存在") {
+		t.Fatalf("missing-ref warning missing:\n%s", v)
+	}
+	if strings.Contains(v, "proxy 不存在") || strings.Contains(v, "must_direct 不存在") {
+		t.Fatalf("an existing group or builtin outbound was flagged:\n%s", v)
+	}
+}
+
+// Rules beyond the leftover height are windowed behind a count tail — the
+// digest is a digest, the full list lives on the configs page.
+func TestHomeRulesDigestWindowsLongRules(t *testing.T) {
+	sel := mustSel(t)
+	summary := make([]string, 0, 20)
+	for i := 1; i <= 20; i++ {
+		summary = append(summary, fmt.Sprintf("dip(1.2.3.%d) -> direct", i))
+	}
+	sel.Routings[0].Summary = summary
+	m := newTestModel(t)
+	m, _ = m.Update(selectionsMsg{Sel: sel})
+	m, _ = m.Update(key("1"))
+	v := m.View()
+	if !strings.Contains(v, "… 其余 20 条") {
+		t.Fatalf("count tail missing:\n%s", v)
+	}
+	if !strings.Contains(v, "1.2.3.6") {
+		t.Fatalf("the window's first rules should render:\n%s", v)
+	}
+	if strings.Contains(v, "1.2.3.7") {
+		t.Fatalf("rules past the window leaked:\n%s", v)
+	}
+}
+
+// Without config management there is nothing to digest: the box is skipped
+// and the group box stretches instead — the page still fills to the bottom.
+func TestHomeRulesDigestSkippedWithoutConfigCaps(t *testing.T) {
+	m := newTestModelWith(t, noConfigDriver{})
+	m, _ = m.Update(key("1"))
+	mm := m.(Model)
+	lines, _, _ := mm.home.bodyLines(mm.status)
+	if len(lines) != mm.home.height {
+		t.Fatalf("body filled %d rows, want %d", len(lines), mm.home.height)
+	}
+	if v := m.View(); strings.Contains(v, "规则速览") {
+		t.Fatalf("digest box rendered without config caps:\n%s", v)
+	}
+}
+
+// noConfigDriver is a backend without config-profile management; the home
+// page's rules digest and profile rows degrade accordingly.
+type noConfigDriver struct{ stubDriver }
+
+func (noConfigDriver) Capabilities() driver.Caps {
+	return driver.Caps{SwitchNode: true, TestLatency: true, TrafficStats: true, Subscriptions: true}
 }
 
 // The follow-scroll re-opens the render window on the active line without
