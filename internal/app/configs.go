@@ -602,7 +602,7 @@ func (p *configsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	case "y": // copy the profile's DSL to the clipboard (OSC 52)
 		if r := p.curRow(); r != nil {
 			if body := p.item(*r).Body; body != "" {
-				return osc52CopyCmd(body)
+				return osc52CopyCmd(body, "方案 DSL")
 			}
 			// The config section is a field table with no DSL; say so
 			// instead of silently doing nothing.
@@ -757,7 +757,10 @@ func (p configsPage) View() string {
 
 // rightBox renders the detail pane at exactly h rows — the content clamped
 // and padded, what PaneRow did for the boxes before the left column grew
-// its own stacked composition.
+// its own stacked composition. The box is titled with the profile it
+// shows, the same language the groups/subs pages use ("proxy", the
+// subscription's tag) — a generic "内容" title names nothing and forces
+// the reader to look inside to learn what they are looking at.
 func (p configsPage) rightBox(h int, footer string) []string {
 	lines := p.rightLines()
 	if len(lines) > h-2 {
@@ -766,7 +769,13 @@ func (p configsPage) rightBox(h int, footer string) []string {
 	for len(lines) < h-2 {
 		lines = append(lines, "")
 	}
-	return ui.TitledBoxFooter("内容", footer, p.focus == 1, p.rightW, lines)
+	title := "内容"
+	if r := p.curRow(); r != nil {
+		if it := p.item(*r); it != nil && it.Name != "" {
+			title = it.Name
+		}
+	}
+	return ui.TitledBoxFooter(title, footer, p.focus == 1, p.rightW, lines)
 }
 
 // modalLines renders the active modal inside the right pane.

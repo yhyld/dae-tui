@@ -1041,6 +1041,12 @@ func (p homePage) proxyRows(status driver.Status, w int) []string {
 // cumulative totals stay dim footnotes. The emphasis hierarchy is the
 // point: what you glance at (speed) is bright and big, what you look up
 // (totals) is quiet.
+//
+// Each half carries its own window peak next to its current rate, so the
+// peak reads as a property of that direction's chart instead of a separate
+// footnote row the eye has to travel to. When a half is too narrow for
+// both, the peaks drop to the footnote rather than being truncated — the
+// number must never be silently lost.
 func (p homePage) trafficRows(w int) []string {
 	if !p.caps.TrafficStats {
 		return []string{ui.HelpStyle.Render("当前后端不支持流量统计")}
@@ -1058,31 +1064,65 @@ func (p homePage) trafficRows(w int) []string {
 	cw := (w - 3) / 2
 	up := ui.HelpStyle.Render("↑ 上行 ") + greenBold.Render(ui.Rate(s.UpRate))
 	down := ui.HelpStyle.Render("↓ 下行 ") + yellowBold.Render(ui.Rate(s.DownRate))
-	rates := " " + ui.PadRight(up, cw) + " " + down
+	peakUp := ui.HelpStyle.Render(" · 峰值 ") + green.Render(ui.Rate(maxF(s.UpSeries)))
+	peakDown := ui.HelpStyle.Render(" · 峰值 ") + yellow.Render(ui.Rate(maxF(s.DownSeries)))
+	// The peak belongs beside the rate it belongs to: "current · peak" per
+	// direction, with that direction's chart directly underneath. When the
+	// row cannot hold both numbers the peaks drop to the footnote instead —
+	// a value must never be silently truncated away.
+	peakNote := ""
+	if lipgloss.Width(up)+lipgloss.Width(peakUp)+lipgloss.Width(down)+lipgloss.Width(peakDown)+2 <= w {
+		up += peakUp
+		down += peakDown
+	} else {
+		peakNote = ui.HelpStyle.Render(fmt.Sprintf(" · 峰值 ↑%s ↓%s",
+			ui.Rate(maxF(s.UpSeries)), ui.Rate(maxF(s.DownSeries))))
+	}
+	// The rates row is composed to the box, not to the charts' column split:
+	// a rate plus its peak runs one cell past its half, and forcing the
+	// PadRight split would truncate exactly the number being added. The
+	// second cell still opens above the second chart (cw + gutter) whenever
+	// the row has room for it.
+	upW, downW := lipgloss.Width(up), lipgloss.Width(down)
+	gap := cw + 2 - 1 - upW
+	if gap < 1 || 1+upW+gap+downW > w {
+		gap = max0(w - 1 - upW - downW)
+		if gap < 1 {
+			gap = 1
+		}
+	}
+	rates := " " + up + strings.Repeat(" ", gap) + down
 	charts := lipgloss.JoinHorizontal(lipgloss.Top,
 		ui.Sparkline(s.UpSeries, cw, chartH, green, ""),
 		" ",
 		ui.Sparkline(s.DownSeries, cw, chartH, yellow, ""))
 
-	counters := ui.HelpStyle.Render(fmt.Sprintf("连接 %d · UDP %d", s.Conns, s.UDPSessions))
+	// The charts carry no axes, so name their time scale and the window the
+	// peaks belong to: the series is the backend's runtimeOverview window —
+	// Traffic(ctx, 10, 60) in msgs.go — 60 samples across 10 seconds. The
+	// window and the counters share one dim row when they both fit, and
+	// split back into two when they do not — a merged row that the box
+	// truncates would silently drop the UDP count.
+	head := ui.HelpStyle.Render("近 10s") + peakNote
+	tail := ui.HelpStyle.Render(fmt.Sprintf("连接 %d · UDP %d", s.Conns, s.UDPSessions))
 	if p.apiTook > 0 {
-		counters += ui.HelpStyle.Render(fmt.Sprintf(" · API %dms", p.apiTook.Milliseconds()))
+		tail += ui.HelpStyle.Render(fmt.Sprintf(" · API %dms", p.apiTook.Milliseconds()))
+	}
+	sep := ui.HelpStyle.Render(" · ")
+	foot := []string{" " + head + sep + tail}
+	if lipgloss.Width(head)+lipgloss.Width(sep)+lipgloss.Width(tail) > w {
+		foot = []string{" " + head, " " + tail}
 	}
 	// The cumulative counters reset with the dae core, not monthly.
 	total := ui.HelpStyle.Render("累计 ") + green.Render("↑ "+ui.Bytes(s.UpTotal)) +
 		ui.HelpStyle.Render(" · ") + yellow.Render("↓ "+ui.Bytes(s.DownTotal)) +
 		ui.HelpStyle.Render(" · 自 daed 启动")
-	// The charts carry no axes, so name their time scale and peak: the
-	// series is the backend's runtimeOverview window — Traffic(ctx, 10, 60)
-	// in msgs.go — 60 samples across 10 seconds.
-	scale := ui.HelpStyle.Render(fmt.Sprintf("近 10s · 峰值 ↑%s ↓%s",
-		ui.Rate(maxF(s.UpSeries)), ui.Rate(maxF(s.DownSeries))))
 
 	rows := []string{rates}
 	for _, l := range strings.Split(charts, "\n") {
 		rows = append(rows, " "+l)
 	}
-	return append(rows, " "+scale, " "+counters, " "+total)
+	return append(append(rows, foot...), " "+total)
 }
 
 // maxF is the largest sample (0 for an empty series).

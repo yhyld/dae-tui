@@ -149,7 +149,8 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
 - **整个应用包在一个圆角外框里，恰好填满终端**：外框由 `ui.AppFrame` 手工构造（lipgloss
   的 Border 嵌不进文字），**帮助键位嵌在外框底边框**（键位先截断、`? 帮助` 固定右端
   不参与截断）。外框内第一层是**页头盒**（`ui.TitledBoxRight`，通栏 cw-2 宽）：页签嵌
-  上边框（活动页签 = `TabActive` 色块）、测速指示右对齐在同一条上边框（放不下自动省略）、
+  上边框（活动页签 = `TabActive`：加粗+主题色+下划线，非活动页签用 `TabDim` 压暗——
+  强调走"线上的文字"这条通道，不用实心底色块，那会打破全应用的线稿语言）、测速指示右对齐在同一条上边框（放不下自动省略）、
   状态行是盒内容；然后是页面本体、toast 裸行（**瞬态消息不进容器**）。`layout()` 的
   chrome 数学 = 外框 2 行 + 页头盒 3 行 + toast 1 行，页面内容高度仍是 `height-6`、
   宽度 `width-2`——改 chrome 行数要同步改这两处与 `View` 里的钳制。终端小于 60×12
@@ -203,11 +204,15 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   （j/k/G）在盒内滚动，`clampHelpScroll` 的窗口数来自 `helpWinBody`；帮助内容是
   `helpSections` 表驱动（渲染与 `helpSectionStart` 同源），`?` 打开即定位到当前页的
   小节（测试断言的是新行为，别改回"从顶开"）。
-- **强调色只有一处入口**：`config.toml` 的 `accent`（ANSI-256 序号或 `#rrggbb`）经
-  `ui.ApplyTheme` 在启动时应用——它会重建 `TitleStyle`/`TabActive`/`SelectedStyle`/
-  `CursorStyle` 这四个 init 时从 `Accent` 派生的包级样式，并重推 `SelBG`
-  （`selBGFromAccent`：主题色按 `selAccentMix` 掺进暗灰底，选中条因此跟着 accent 走）；**新增样式要么 init 后可被
-  ApplyTheme 重建，要么在调用时读 `ui.Accent` 变量**，禁止把颜色烤进 init 字符串。
+- **主题色只有一处入口**：`config.toml` 的 `accent` / `border` / `dim`（均为 ANSI-256
+  序号或 `#rrggbb`）经 `ui.ApplyTheme(accent, border, dim)` 在启动时应用——每个值独立
+  解析（`parseColor`，空/非法保持默认，半合法的配置照样主题化能解析的部分）。它会重建
+  `TitleStyle`/`TabStyle`/`TabActive`/`HelpStyle`/`SelectedStyle`/`CursorStyle`/`BorderDim`
+  这些 init 时从三者派生的包级样式，并重推 `SelBG`
+  （`selBGFromAccent`：主题色按 `selAccentMix` 掺进暗灰底，选中条因此跟着 accent 走）。
+  `border`/`dim` 是为浅色终端准备的：默认 238/245 按深色终端调，白底下几乎看不见；
+  新增样式要么 init 后可被 ApplyTheme 重建，要么在调用时读 `ui.*` 变量，禁止把颜色烤进
+  init 字符串。
 - **鼠标已启用**（`tea.WithMouseCellMotion`）：滚轮 = 3×j/k（帮助浮窗/首页直接滚偏移），
   点页签切页（页签嵌在页头盒上边框：`y=1`、列从 `x-5` 起——页头盒与页面盒子共享同一
   1 格左边距；`tabClick` 按渲染宽度算
@@ -240,6 +245,13 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   "展开后才显示"的门控（旧的 `expanded` 字段已删），订阅页节点**选中即拉取**。信息行
   标签列统一 6 格（`SelectedStyle` 标签 + 两空格），三页一致。配置页左栏是例外（见
   下面"三个等分竖排分区盒"条目）。
+  **订阅页的信息盒跟焦点换主题**（`showNodeInfo`）：右栏聚焦时上盒改显选中节点的
+  名称/协议/地址/链接/延迟（标题用节点名），Tab 回左栏恢复订阅卡——选中节点因此从
+  "视觉状态"变成"我看懂了它、我能操作它"（`T` 单测、右栏 `y` 复制该节点分享链接，
+  左栏 `y` 仍是订阅链接；toast 会点名复制的是什么）。盒高必须用 `infoBoxLen()`
+  （两种状态行数的较大值）钉死：按当前内容 sizing 会让节点列表在每次 j/k 时重排，
+  `View` 与 `rightClick` 用的是同一个值。`selectedNode()` 不跟 focus（光标高亮跟、
+  选中不跟），所以 `T` 在左栏也能用；`y` 必须显式判 `focus == 1`。
 - **节点列表的过滤/排序统一走 `internal/app/nodelist.go` 的 `nodeView`**（`/` 开过滤框，
   `enter` 保留、`esc` 清空，`o` 循环排序，未测/死亡节点排序时殿后）。群组页右栏、`n`
   选择器、订阅页右栏、手动节点页四处都内嵌它；新增节点列表必须复用，不要另写一套。
@@ -267,7 +279,11 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   跑 `journalctl -u daed -n 200 --no-pager -f`，只读、仅本机有效），退出即回到 TUI。
 - 全局 `r` 是**全量刷新**：所有列表 + status + traffic + 当前页延迟轮询一次性重拉，
   不是只刷当前页——各页共享组/订阅/方案数据（首页显示组、群组页显示订阅标签、首页
-  路由区来自 selections），只刷当前页会让切过去后的视图是旧的。
+  路由区来自 selections），只刷当前页会让切过去后的视图是旧的。每个请求都用
+  `countRefreshCmd` 包了一层 `refreshDoneMsg`（**消息必须是 `tea.BatchMsg{c, done}`，
+  不能写 `tea.Batch(...)`——那返回的是 Cmd 不是消息**），最后一个回复清零
+  `refreshing`，顶栏 `spinSuffix` 期间显示"刷新中"；回复丢了的兜底是 tickMsg 里的
+  `refreshStale()`（15s），没有独立定时器。
 - **`Model.View()` 末尾的硬钳制不能删**：body 行数超过 `height-6`（外框 2 行 + 页头盒
   3 行 + toast 1 行）就截断、不足就补齐空行，否则页签/帮助边框会被挤出屏幕（这是最早
   修的滚动 bug；钳制现在同时负责"撑满终端+页脚贴底"）。
@@ -354,7 +370,10 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
     **只用 `p.lat` 里已有的数据**（别的页轮询到的），必须带年龄标注，未测组显示
     "未测速"而不是 0/0；**右对齐到盒内右缘**。
   - **流量脚注**：`trafficMsg.Took`（trafficCmd 计时）显示 `API Nms`（SSH 隧道健康
-    线索），累计行标注"自 daed 启动"（重启清零，不是月流量）。
+    线索），累计行标注"自 daed 启动"（重启清零，不是月流量）。**峰值贴在速率行里**
+    （每个方向"当前 · 峰值"，图表就在其下方）：速率行按盒子实际宽度排版、不强制和
+    图表共用列宽（否则多出来的峰值正好被截掉）；放不下时峰值退回脚注，脚注自身放不下
+    时拆回两行——合并行被盒子截断会静默丢掉 UDP 计数。
 - **首页组行跳转**：`Tab` 在路由选择器与组列表间切焦点（`home.groupFocus`），组行
   `Enter` 发 `gotoGroupMsg{ID}`，根模型开群组页、选中该组并聚焦右栏（`focus=1`）。
   焦点在组列表时只吞导航键，`o/P/L/g` 等仍走原路径。

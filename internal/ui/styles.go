@@ -22,6 +22,11 @@ var (
 
 	// BorderCol is the unfocused box/frame edge; BorderDim renders it.
 	BorderCol = lipgloss.Color("238")
+	// TabDim is the inactive tab's gray — darker than DimText on purpose:
+	// the active tab stays text-on-a-line (bold + accent + underline), so
+	// the active/inactive contrast has to come from brightness, not from a
+	// filled chip.
+	TabDim = lipgloss.Color("240")
 	// SelBG is the selected-row background bar: the accent blended into a
 	// dark neutral base — a faint theme-colored bar, not a flat gray (too
 	// lifeless) and not a solid accent block (too loud). ApplyTheme
@@ -29,10 +34,14 @@ var (
 	SelBG = selBGFromAccent(Accent)
 
 	TitleStyle = lipgloss.NewStyle().Bold(true).Foreground(Accent)
-	TabStyle   = lipgloss.NewStyle().Foreground(DimText).Padding(0, 1)
+	TabStyle   = lipgloss.NewStyle().Foreground(TabDim).Padding(0, 1)
 	// TabActive recolors only — same padding/width as TabStyle so tabs never
-	// shift and the click-span math in the app stays trivial.
-	TabActive     = lipgloss.NewStyle().Bold(true).Foreground(Accent).Padding(0, 1)
+	// shift and the click-span math in the app stays trivial. The underline
+	// is the emphasis: it rides the border line the same way the label does,
+	// where a filled chip would break the line-art language every other box
+	// speaks. It also degrades to plain bold accent text on terminals that
+	// ignore SGR 4.
+	TabActive     = lipgloss.NewStyle().Bold(true).Underline(true).Foreground(Accent).Padding(0, 1)
 	HelpStyle     = lipgloss.NewStyle().Foreground(DimText)
 	ErrorStyle    = lipgloss.NewStyle().Foreground(Red)
 	OKStyle       = lipgloss.NewStyle().Foreground(Green)
@@ -147,37 +156,60 @@ func HiRow(row string, w int, on bool) string {
 	return reassertBG(row, selBGOpen())
 }
 
-// ApplyTheme overrides the accent color from config at startup: accent is
-// an ANSI-256 index ("0"-"255"), a "#rrggbb" hex string, or anything else
-// (including "") to keep the default. Styles built from Accent at package
-// init are rebuilt here; call sites that read the var at render time pick
-// the new color up on their own. Startup-only — there is no live re-theming.
-func ApplyTheme(accent string) {
-	accent = strings.TrimSpace(accent)
-	if accent == "" {
-		return
+// ApplyTheme overrides the theme colors from config at startup: accent
+// (titles, cursor, active tab), border (every box/frame edge) and dim
+// (secondary text). Each value is an ANSI-256 index ("0"-"255"), a
+// "#rrggbb" hex string, or anything else (including "") to keep the
+// default — a half-valid config still themes what it could parse. Styles
+// built from these at package init are rebuilt here; call sites that read
+// the vars at render time pick the new colors up on their own.
+// Startup-only — there is no live re-theming.
+//
+// The border/dim pair exists for light-terminal users: the defaults
+// (238/245) are tuned for a dark background, where a 245 gray is a quiet
+// footnote. On a white background the same values are nearly invisible, so
+// those users want border ≈ "250" and dim ≈ "240".
+func ApplyTheme(accent, border, dim string) {
+	if c, ok := parseColor(accent); ok {
+		Accent = c
 	}
-	var c lipgloss.Color
-	if n, err := strconv.Atoi(accent); err == nil {
-		if n < 0 || n > 255 {
-			return
-		}
-		c = lipgloss.Color(strconv.Itoa(n))
-	} else {
-		if len(accent) != 7 || accent[0] != '#' {
-			return
-		}
-		if _, err := strconv.ParseUint(accent[1:], 16, 24); err != nil {
-			return
-		}
-		c = lipgloss.Color(strings.ToLower(accent))
+	if c, ok := parseColor(border); ok {
+		BorderCol = c
 	}
-	Accent = c
+	if c, ok := parseColor(dim); ok {
+		DimText = c
+	}
 	TitleStyle = lipgloss.NewStyle().Bold(true).Foreground(Accent)
-	TabActive = lipgloss.NewStyle().Bold(true).Foreground(Accent).Padding(0, 1)
+	TabStyle = lipgloss.NewStyle().Foreground(TabDim).Padding(0, 1)
+	TabActive = lipgloss.NewStyle().Bold(true).Underline(true).Foreground(Accent).Padding(0, 1)
+	HelpStyle = lipgloss.NewStyle().Foreground(DimText)
 	SelectedStyle = lipgloss.NewStyle().Bold(true).Foreground(Accent)
 	CursorStyle = lipgloss.NewStyle().Bold(true).Foreground(Accent)
+	BorderDim = lipgloss.NewStyle().Foreground(BorderCol)
 	SelBG = selBGFromAccent(Accent)
+}
+
+// parseColor accepts an ANSI-256 index ("0"-"255") or a "#rrggbb" hex
+// string (case-insensitive). Anything else reports false, so the caller
+// keeps its current value instead of blanking a color.
+func parseColor(s string) (lipgloss.Color, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", false
+	}
+	if n, err := strconv.Atoi(s); err == nil {
+		if n < 0 || n > 255 {
+			return "", false
+		}
+		return lipgloss.Color(strconv.Itoa(n)), true
+	}
+	if len(s) != 7 || s[0] != '#' {
+		return "", false
+	}
+	if _, err := strconv.ParseUint(s[1:], 16, 24); err != nil {
+		return "", false
+	}
+	return lipgloss.Color(strings.ToLower(s)), true
 }
 
 // PadRight pads s with spaces to display width w (CJK-aware).

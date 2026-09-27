@@ -54,12 +54,16 @@ func TestReassertBG(t *testing.T) {
 }
 
 func TestApplyTheme(t *testing.T) {
-	origAccent, origTitle, origTab, origSel, origCur, origBG := Accent, TitleStyle, TabActive, SelectedStyle, CursorStyle, SelBG
+	origAccent, origBorder, origDim := Accent, BorderCol, DimText
+	origTitle, origTab, origTabDim, origHelp := TitleStyle, TabActive, TabStyle, HelpStyle
+	origBorderDim, origSel, origCur, origBG := BorderDim, SelectedStyle, CursorStyle, SelBG
 	t.Cleanup(func() {
-		Accent, TitleStyle, TabActive, SelectedStyle, CursorStyle, SelBG = origAccent, origTitle, origTab, origSel, origCur, origBG
+		Accent, BorderCol, DimText = origAccent, origBorder, origDim
+		TitleStyle, TabActive, TabStyle, HelpStyle = origTitle, origTab, origTabDim, origHelp
+		BorderDim, SelectedStyle, CursorStyle, SelBG = origBorderDim, origSel, origCur, origBG
 	})
 
-	ApplyTheme("203")
+	ApplyTheme("203", "", "")
 	if Accent != lipgloss.Color("203") {
 		t.Fatalf("Accent = %v, want 203", Accent)
 	}
@@ -70,21 +74,59 @@ func TestApplyTheme(t *testing.T) {
 	if SelBG != selBGFromAccent(Accent) {
 		t.Fatalf("SelBG = %v, want the accent-derived %v", SelBG, selBGFromAccent(Accent))
 	}
+	// The active tab stays text-on-a-line: underline, not a filled chip.
+	// Assert on the style itself — the test profile strips SGR at render.
+	if !TabActive.GetUnderline() {
+		t.Fatalf("TabActive carries no underline")
+	}
+	if TabActive.GetForeground() != Accent {
+		t.Fatalf("TabActive foreground = %v, want the accent %v", TabActive.GetForeground(), Accent)
+	}
+	// An empty border/dim keeps the defaults.
+	if BorderCol != lipgloss.Color("238") || DimText != lipgloss.Color("245") {
+		t.Fatalf("border/dim = %v/%v, want the defaults 238/245", BorderCol, DimText)
+	}
 
-	ApplyTheme("#FF00AA")
+	ApplyTheme("#FF00AA", "250", "240")
 	if Accent != lipgloss.Color("#ff00aa") {
 		t.Fatalf("Accent = %v, want #ff00aa", Accent)
+	}
+	if BorderCol != lipgloss.Color("250") || DimText != lipgloss.Color("240") {
+		t.Fatalf("border/dim = %v/%v, want 250/240", BorderCol, DimText)
+	}
+	// Border-derived styles follow the new border color.
+	if BorderDim.GetForeground() != BorderCol {
+		t.Fatalf("BorderDim foreground = %v, want %v", BorderDim.GetForeground(), BorderCol)
+	}
+	// Help text follows the new dim color.
+	if HelpStyle.GetForeground() != DimText {
+		t.Fatalf("HelpStyle foreground = %v, want %v", HelpStyle.GetForeground(), DimText)
 	}
 	if SelBG != selBGFromAccent(Accent) {
 		t.Fatalf("SelBG = %v after hex accent, want %v", SelBG, selBGFromAccent(Accent))
 	}
 
-	// Invalid values keep the previous accent.
-	for _, bad := range []string{"", "  ", "999", "-1", "xyz", "#12345", "#gggggg"} {
-		ApplyTheme(bad)
+	// Invalid values keep the previous theme, per color.
+	for _, bad := range []string{"", "   ", "999", "-1", "xyz", "#12345", "#gggggg"} {
+		ApplyTheme(bad, bad, bad)
 	}
-	if Accent != lipgloss.Color("#ff00aa") {
-		t.Fatalf("Accent = %v after invalid input, want #ff00aa", Accent)
+	if Accent != lipgloss.Color("#ff00aa") || BorderCol != lipgloss.Color("250") || DimText != lipgloss.Color("240") {
+		t.Fatalf("theme = %v/%v/%v after invalid input, want #ff00aa/250/240",
+			Accent, BorderCol, DimText)
+	}
+}
+
+// parseColor accepts ANSI-256 indexes and hex, rejects everything else.
+func TestParseColor(t *testing.T) {
+	for _, ok := range []string{"0", "62", "255", "#ff00aa", "#AABBCC"} {
+		if _, valid := parseColor(ok); !valid {
+			t.Errorf("parseColor(%q) rejected a valid color", ok)
+		}
+	}
+	for _, bad := range []string{"", " ", "256", "-1", "62x", "#fff", "#gggggg"} {
+		if c, valid := parseColor(bad); valid {
+			t.Errorf("parseColor(%q) = %v, want rejected", bad, c)
+		}
 	}
 }
 

@@ -188,6 +188,42 @@ func (p *subsPage) ensureNodes(d driver.Driver) tea.Cmd {
 	return loadSubNodesCmd(d, s.ID)
 }
 
+// testIDLimit caps one probe request: the driver chunks longer lists into
+// several requests, and a runaway subscription should not become one.
+const testIDLimit = 500
+
+// startTest probes ids and watches for their results — the shared tail of
+// `t` (the visible list) and `T` (the selected node).
+func (p *subsPage) startTest(d driver.Driver, ids []string) tea.Cmd {
+	if len(ids) == 0 {
+		return nil
+	}
+	p.testing = true
+	p.testStart = time.Now()
+	p.testIDs = ids
+	for _, id := range ids {
+		if l, ok := p.lat[id]; ok {
+			p.baseline[id] = l.TestedAt
+		} else {
+			p.baseline[id] = time.Time{}
+		}
+	}
+	return testLatencyCmd(d, ids)
+}
+
+// visibleNodeIDs lists the ids the right pane shows, in display order.
+func (p *subsPage) visibleNodeIDs(limit int) []string {
+	nodes := p.visibleNodes()
+	ids := make([]string, 0, len(nodes))
+	for i, n := range nodes {
+		if i >= limit {
+			break
+		}
+		ids = append(ids, n.ID)
+	}
+	return ids
+}
+
 func (p *subsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	if p.mode == 1 {
 		return p.addFormKey(msg, d)
@@ -258,8 +294,17 @@ func (p *subsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		p.tag.Blur()
 		return textinput.Blink
 	case "y":
+		// `y` copies whatever the info box describes: the node under the
+		// right pane's cursor while that pane has focus, the subscription
+		// otherwise. The toast names which, so the context switch is never
+		// a guess.
+		if p.focus == 1 {
+			if n := p.selectedNode(); n != nil && n.Link != "" {
+				return osc52CopyCmd(n.Link, "节点链接")
+			}
+		}
 		if s := p.cur(); s != nil && s.Link != "" {
-			return osc52CopyCmd(s.Link)
+			return osc52CopyCmd(s.Link, "订阅链接")
 		}
 	case "t":
 		// The node list is always on screen, so `t` probes exactly what it
@@ -267,28 +312,15 @@ func (p *subsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		if !p.caps.TestLatency {
 			return unsupportedCmd("测速")
 		}
-		nodes := p.visibleNodes()
-		ids := make([]string, 0, len(nodes))
-		for i, n := range nodes {
-			if i >= 500 {
-				break
-			}
-			ids = append(ids, n.ID)
+		return p.startTest(d, p.visibleNodeIDs(testIDLimit))
+	case "T":
+		// Only the selected node — the same t/T pair the groups page uses.
+		if !p.caps.TestLatency {
+			return unsupportedCmd("测速")
 		}
-		if len(ids) == 0 {
-			return nil
+		if n := p.selectedNode(); n != nil {
+			return p.startTest(d, []string{n.ID})
 		}
-		p.testing = true
-		p.testStart = time.Now()
-		p.testIDs = ids
-		for _, id := range ids {
-			if l, ok := p.lat[id]; ok {
-				p.baseline[id] = l.TestedAt
-			} else {
-				p.baseline[id] = time.Time{}
-			}
-		}
-		return testLatencyCmd(d, ids)
 	}
 
 	if p.focus == 0 {
@@ -423,6 +455,66 @@ func (p *subsPage) curNodes() []driver.Node {
 	return nil
 }
 
+// selectedNode is the node the right pane's cursor sits on, or nil when the
+// pane holds no node list (a modal is open, nothing fetched, no match). The
+// cursor's highlight follows focus but the selection does not: Tab away and
+// back and the same row is still the selected one.
+func (p subsPage) selectedNode() *driver.Node {
+	if p.mode != 0 {
+		return nil
+	}
+	nodes := p.visibleNodes()
+	if p.nc < 0 || p.nc >= len(nodes) {
+		return nil
+	}
+	n := nodes[p.nc]
+	return &n
+}
+
+// showNodeInfo reports whether the info box describes the selected node
+// instead of the subscription. Focus is the switch, so Tab back to the left
+// list restores the card — the node view is where the cursor is, not a mode
+// the user has to undo.
+func (p subsPage) showNodeInfo() bool {
+	return p.focus == 1 && p.selectedNode() != nil
+}
+
+// nodeInfoLines is the info box's node state: what the selected node is, in
+// the same 6-cell label column as every other detail pane. Latency comes
+// from the poll this page already runs over its visible nodes — the node
+// view adds no request of its own. The node's tag is deliberately absent:
+// a subscription node carries its subscription's tag, which is the one fact
+// this page already states in three other places.
+func (p subsPage) nodeInfoLines(n *driver.Node) []string {
+	lines := []string{
+		ui.SelectedStyle.Render("名称  ") + ui.SpaceAfterFlag(n.Name),
+		ui.SelectedStyle.Render("协议  ") + n.Protocol,
+		ui.SelectedStyle.Render("地址  ") + ui.Truncate(n.Address, max0(p.rightW-10)),
+	}
+	if n.Link != "" {
+		lines = append(lines, ui.SelectedStyle.Render("链接  ")+ui.Truncate(n.Link, max0(p.rightW-10)))
+	}
+	if row, ok := latencyDetail(p.lat, n.ID); ok {
+		lines = append(lines, ui.SelectedStyle.Render("延迟  ")+row)
+	}
+	return lines
+}
+
+// infoBoxLen is the info box's row count, pinned to the taller of the two
+// states it can show (subscription card / selected node). A box that resized
+// with the cursor would reflow the node list under the user's eyes on every
+// j/k; the shorter state pads inside its box instead, the same dead-space
+// rule the paired home zones follow.
+func (p subsPage) infoBoxLen() int {
+	n := len(p.infoLines())
+	if sel := p.selectedNode(); sel != nil {
+		if m := len(p.nodeInfoLines(sel)); m > n {
+			n = m
+		}
+	}
+	return n
+}
+
 // visibleNodes is the subscription's node list as the filter and sort
 // currently present it.
 func (p *subsPage) visibleNodes() []driver.Node {
@@ -544,14 +636,23 @@ func (p subsPage) View() string {
 	// PaneRowColumn; the in-pane modal (the delete confirmation) renders in
 	// the bottom box — the boxes always fill the page height, so anything
 	// appended below them would be pushed off screen.
+	//
+	// The info box follows the focus: the subscription card while the left
+	// list owns the keyboard, the selected node's details once the node list
+	// does. Its height is pinned (infoBoxLen), so switching states — and
+	// moving the cursor inside the node state — never resizes the node list.
 	info := p.infoLines()
-	topH, bottomInner := stackedDetail(len(info), p.height)
+	topTitle := "订阅"
+	if s := p.cur(); s != nil && s.Tag != "" {
+		topTitle = s.Tag
+	}
+	if sel := p.selectedNode(); p.showNodeInfo() {
+		info, topTitle = p.nodeInfoLines(sel), ui.SpaceAfterFlag(sel.Name)
+	}
+	topH, bottomInner := stackedDetail(p.infoBoxLen(), p.height)
 	body := p.bodyLines(bottomInner)
-	topTitle, bottomTitle := "订阅", "节点"
+	bottomTitle := "节点"
 	if s := p.cur(); s != nil {
-		if s.Tag != "" {
-			topTitle = s.Tag
-		}
 		if p.mode == 2 {
 			bottomTitle = "删除确认"
 		} else if all := p.subNodes[s.ID]; all != nil {
@@ -562,8 +663,9 @@ func (p subsPage) View() string {
 	// Key hints ride the edges of the boxes they belong to: the left box
 	// carries the left-focused actions, the bottom box the node-list keys
 	// (and the delete confirmation's y/n while it is open); page-wide keys
-	// stay on the app frame.
-	rightFooter := "t 测速 · / 过滤 · o 排序"
+	// stay on the app frame, where `y 复制链接` covers the left pane's
+	// subject — the subscription — while this edge covers the node's.
+	rightFooter := "t/T 测速 · y 复制 · / 过滤 · o 排序"
 	if p.mode == 2 {
 		rightFooter = "y 确认 · n/esc 取消"
 	}
@@ -748,7 +850,7 @@ func (p *subsPage) rightClick(row int) {
 	if p.mode != 0 {
 		return
 	}
-	topH, inner := stackedDetail(len(p.infoLines()), p.height)
+	topH, inner := stackedDetail(p.infoBoxLen(), p.height)
 	head := 0
 	if p.nodeView.prompt() != "" {
 		head = 1

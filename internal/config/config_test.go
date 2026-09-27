@@ -73,3 +73,30 @@ func TestConcurrentMutationsAndSaves(t *testing.T) {
 		t.Fatalf("config corrupted by concurrent saves: %v", err)
 	}
 }
+
+// The theme knobs are plain config fields: they survive a save/load
+// round-trip like everything else, and an absent file leaves them empty
+// (which ui.ApplyTheme reads as "keep the default").
+func TestThemeFieldsRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	c := &Config{Endpoint: "http://127.0.0.1:2023/graphql", Accent: "62", Border: "250", Dim: "#d0d0d0"}
+	if err := c.Save(path); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got.Accent != "62" || got.Border != "250" || got.Dim != "#d0d0d0" {
+		t.Fatalf("theme fields = %q/%q/%q, want 62/250/#d0d0d0", got.Accent, got.Border, got.Dim)
+	}
+	empty, err := Load(filepath.Join(dir, "missing.toml"))
+	if err != nil {
+		t.Fatalf("missing file: %v", err)
+	}
+	if empty.Accent != "" || empty.Border != "" || empty.Dim != "" {
+		t.Fatalf("missing file should leave the theme empty, got %q/%q/%q",
+			empty.Accent, empty.Border, empty.Dim)
+	}
+}

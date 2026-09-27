@@ -879,8 +879,18 @@ func (p groupsPage) infoLines() []string {
 		ui.SelectedStyle.Render("成员  ") + fmt.Sprintf("%d（订阅挂载 %d 个，直接挂载 %d 个）",
 			len(g.Members()), len(g.Subscriptions), len(g.Nodes)),
 	}
-	if note := p.refNote(g.Name); note != "" {
-		lines = append(lines, ui.SelectedStyle.Render("引用  ")+ui.HelpStyle.Render(note))
+	// The card states the facts — which profiles reference this group. The
+	// consequence (their rules stop matching) is spelled out where the user
+	// can still back out: the R/D confirmations. A one-glance warning rides
+	// along only while the row has room for it; the names must never be the
+	// part that gets truncated away.
+	if profiles := p.refs[g.Name]; len(profiles) > 0 {
+		row := ui.SelectedStyle.Render("引用  ") + ui.HelpStyle.Render(strings.Join(quoteAll(profiles), "、"))
+		warn := ui.HelpStyle.Render(" · 改名/删除将静默失效")
+		if lipgloss.Width(row)+lipgloss.Width(warn) <= p.rightW-4 {
+			row += warn
+		}
+		lines = append(lines, row)
 	}
 	return lines
 }

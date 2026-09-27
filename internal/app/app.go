@@ -81,6 +81,14 @@ type Model struct {
 	spin          int  // spinner frame counter for the latency-test indicator
 	spinning      bool // a spinnerMsg chain is alive (guards against stacking chains)
 	confirmApply  bool // global `A` apply confirmation
+
+	// refreshing is the `r` full reload in flight: every request it fired
+	// reports back through refreshDoneMsg, and the last one clears the
+	// flag. Without it a slow reload looked like nothing had happened —
+	// the page simply kept showing the old data.
+	refreshing  bool
+	refreshLeft int
+	refreshAt   time.Time
 }
 
 // Terminal floors: below them the two-pane math no longer fits and the
@@ -151,7 +159,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case spinnerMsg:
 		m.spin++
-		if m.anyTesting() || m.anyBusy() {
+		if m.anyTesting() || m.anyBusy() || m.refreshing {
 			return m, spinnerTickCmd()
 		}
 		m.spinning = false
@@ -162,10 +170,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.toastAt.IsZero() && time.Since(m.toastAt) > m.toastDur {
 			m.toast, m.toastAt = "", time.Time{}
 		}
+		// A reload whose replies never arrive must not spin the header
+		// forever; the 1s tick is already running, so it retires the flag.
+		if m.refreshStale() {
+			m.refreshing, m.refreshLeft = false, 0
+		}
 		var cmds []tea.Cmd
 		cmds = append(cmds, tickCmd(msg.n))
 		if m.phase == phaseMain {
-			if (m.anyTesting() || m.anyBusy()) && !m.spinning {
+			if (m.anyTesting() || m.anyBusy() || m.refreshing) && !m.spinning {
 				m.spinning = true
 				cmds = append(cmds, spinnerTickCmd())
 			}
@@ -274,6 +287,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case refreshDoneMsg:
+		// One of the `r` reload's requests reported back. The last one
+		// clears the indicator; the tick's staleness check covers a reply
+		// that never arrives at all.
+		if m.refreshing {
+			m.refreshLeft--
+			if m.refreshLeft <= 0 {
+				m.refreshing, m.refreshLeft = false, 0
+			}
+		}
+		return m, nil
+
 	case trafficMsg:
 		m.home.apiTook = msg.Took
 		if msg.Err == nil {
@@ -379,7 +404,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case clipboardMsg:
 		if msg.OK {
-			m.showToast("✓ 已复制到剪贴板 (OSC 52)")
+			m.showToast("✓ 已复制" + msg.What + " (OSC 52)")
 		} else {
 			m.showErrToast("✗ 复制失败：当前输出不是终端")
 		}
@@ -681,6 +706,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.helpScroll = clampHelpScroll(helpSectionStart(m.page), helpWinBody(m.height-6))
 			return m, nil
 		case "r":
+			// One reload at a time: a second `r` mid-flight would start a
+			// second batch whose replies cross-count with the first's and
+			// clear the indicator early. The in-flight one already covers
+			// everything this one would ask for.
+			if m.refreshing {
+				return m, nil
+			}
 			return m, m.forceRefresh()
 		}
 	}
@@ -889,6 +921,13 @@ func (m Model) tabClick(cx int) (tea.Model, tea.Cmd) {
 // page's: the pages share data (the home page shows groups, the groups page
 // shows subscription tags, the home routing section comes from selections),
 // so a per-page refresh left the views you were not looking at stale.
+//
+// Every request is wrapped so it also reports a refreshDoneMsg: the header
+// shows 刷新中 until the last reply lands, which is what makes a slow
+// reload distinguishable from a dead `r`. A reply that never arrives is
+// bounded by the 1s tick's staleness check rather than a timer of its own —
+// an expired request still answers with an error message, so the timeout
+// only covers a truly lost one.
 func (m *Model) forceRefresh() tea.Cmd {
 	cmds := []tea.Cmd{
 		statusCmd(m.drv),
@@ -906,7 +945,33 @@ func (m *Model) forceRefresh() tea.Cmd {
 	if cmd := m.latencyPollCmd(); cmd != nil {
 		cmds = append(cmds, cmd)
 	}
-	return tea.Batch(cmds...)
+	m.refreshing, m.refreshLeft, m.refreshAt = true, len(cmds), time.Now()
+	wrapped := make([]tea.Cmd, 0, len(cmds))
+	for _, c := range cmds {
+		wrapped = append(wrapped, countRefreshCmd(c))
+	}
+	return tea.Batch(wrapped...)
+}
+
+// refreshTimeout bounds the 刷新中 indicator: a reload whose replies never
+// arrive must not spin the header forever. Generously above the requests'
+// own 12s context timeout.
+const refreshTimeout = 15 * time.Second
+
+// refreshStale reports whether the in-flight reload has outlived
+// refreshTimeout, so the tick can retire its indicator.
+func (m Model) refreshStale() bool {
+	return m.refreshing && time.Since(m.refreshAt) > refreshTimeout
+}
+
+// countRefreshCmd runs c and reports its completion alongside whatever c
+// produced, so the original message still reaches its handler. The pair
+// travels as a BatchMsg — tea.Batch() would wrap it in another Cmd and
+// bubbletea would dispatch the function itself, not the two messages.
+func countRefreshCmd(c tea.Cmd) tea.Cmd {
+	return func() tea.Msg {
+		return tea.BatchMsg{c, func() tea.Msg { return refreshDoneMsg{} }}
+	}
 }
 
 func (m Model) View() string {
@@ -1071,11 +1136,14 @@ func (m Model) tabsBar() string {
 }
 
 // spinSuffix is the indicator right-aligned in the header box's top edge:
-// the same braille spinner covers in-flight mutations ("处理中") and latency
-// tests ("测速中 x/y"), both cross-page facts, so both survive a page
-// switch and share one chain.
+// the same braille spinner covers in-flight mutations ("处理中"), full
+// refreshes ("刷新中") and latency tests ("测速中 x/y"), all cross-page
+// facts, so all survive a page switch and share one chain.
 func (m Model) spinSuffix() string {
 	var parts []string
+	if m.refreshing {
+		parts = append(parts, "刷新中")
+	}
 	if m.anyBusy() {
 		parts = append(parts, "处理中")
 	}

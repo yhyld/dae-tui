@@ -2854,36 +2854,65 @@ func TestHomeUntestedGroupsAreMarked(t *testing.T) {
 // r reloads every list, not just the current page's: the pages share data
 // (home shows groups, the groups page shows subscription tags, the home
 // routing section comes from selections), so a per-page refresh left the
-// views you were not looking at stale.
+// views you were not looking at stale. Each request also reports back, so
+// the header can show 刷新中 until the last reply lands.
 func TestForceRefreshReloadsEverything(t *testing.T) {
 	m := newTestModel(t)
 	m, _ = m.Update(key("3")) // the subs page — the old behavior reloaded only this
+	mm := m.(Model)
+	if mm.refreshing {
+		t.Fatal("no refresh should be in flight before r")
+	}
 	m, cmd := m.Update(key("r"))
 	if cmd == nil {
 		t.Fatal("r should fire a refresh")
+	}
+	mm = m.(Model)
+	if !mm.refreshing {
+		t.Fatal("r should mark the reload in flight")
+	}
+	if v := mm.View(); !strings.Contains(v, "刷新中") {
+		t.Fatalf("header should show 刷新中 during the reload:\n%s", v)
 	}
 	batch, ok := cmd().(tea.BatchMsg)
 	if !ok {
 		t.Fatalf("cmd = %T, want tea.BatchMsg", cmd())
 	}
 	var sawGroups, sawSubs, sawSel, sawStatus, sawManual bool
+	var done int
 	for _, c := range batch {
-		switch c().(type) {
-		case groupsMsg:
-			sawGroups = true
-		case subsMsg:
-			sawSubs = true
-		case selectionsMsg:
-			sawSel = true
-		case statusMsg:
-			sawStatus = true
-		case manualNodesMsg:
-			sawManual = true
+		// Every element is a request wrapped with its own refreshDoneMsg,
+		// so one more level of batch to unwrap.
+		for _, msg := range execCmds(c) {
+			switch msg.(type) {
+			case groupsMsg:
+				sawGroups = true
+			case subsMsg:
+				sawSubs = true
+			case selectionsMsg:
+				sawSel = true
+			case statusMsg:
+				sawStatus = true
+			case manualNodesMsg:
+				sawManual = true
+			case refreshDoneMsg:
+				done++
+			}
 		}
 	}
 	if !sawGroups || !sawSubs || !sawSel || !sawStatus || !sawManual {
 		t.Fatalf("refresh should reload every list: groups=%v subs=%v selections=%v status=%v manual=%v",
 			sawGroups, sawSubs, sawSel, sawStatus, sawManual)
+	}
+	if done != len(batch) {
+		t.Fatalf("every request should report refreshDoneMsg: %d of %d", done, len(batch))
+	}
+	// The last reply clears the indicator.
+	for i := 0; i < done; i++ {
+		m, _ = m.Update(refreshDoneMsg{})
+	}
+	if mm = m.(Model); mm.refreshing {
+		t.Fatal("刷新中 should clear once every reply landed")
 	}
 }
 
@@ -3879,6 +3908,58 @@ func TestHomeTrafficFootnotes(t *testing.T) {
 	if v2 := m2.View(); !strings.Contains(v2, "API 4ms") {
 		t.Fatalf("API latency missing:\n%s", v2)
 	}
+	// The window peaks ride each direction's rate row, directly above that
+	// direction's chart — not a footnote row of their own.
+	v2 := m2.View()
+	rateRow := ""
+	for _, l := range strings.Split(v2, "\n") {
+		if strings.Contains(l, "上行") {
+			rateRow = l
+			break
+		}
+	}
+	if !strings.Contains(rateRow, "峰值") {
+		t.Fatalf("peaks should ride the rate row, above their chart:\n%s", rateRow)
+	}
+	for _, l := range strings.Split(v2, "\n") {
+		if strings.Contains(l, "近 10s") && strings.Contains(l, "峰值") {
+			t.Fatalf("peaks should not also sit in the footnote:\n%s", l)
+		}
+	}
+}
+
+// The group info card names the routing profiles that reference the group.
+// The names are the point of the row, so they must never be the part a
+// narrow box truncates away — the consequence warning is what gives way.
+func TestGroupInfoCardReferenceRow(t *testing.T) {
+	for _, w := range []int{120, 100, 90} {
+		m := newTestModel(t)
+		mm, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: 36})
+		mm2, _ := mm.Update(key("2"))
+		row := ""
+		for _, l := range strings.Split(mm2.View(), "\n") {
+			if strings.Contains(l, "引用") {
+				row = l
+				break
+			}
+		}
+		if !strings.Contains(row, "「默认路由」") {
+			t.Fatalf("w=%d: reference row lost the profile name:\n%s", w, row)
+		}
+		if i := strings.Index(row, "失效"); i >= 0 && i < strings.Index(row, "」") {
+			t.Fatalf("w=%d: consequence warning precedes the names:\n%s", w, row)
+		}
+	}
+}
+
+// The configs detail box is titled with the profile it shows — the same
+// language the groups/subs pages use — instead of a generic 内容.
+func TestConfigsRightBoxTitlesItsProfile(t *testing.T) {
+	m := newTestModel(t)
+	mm, _ := m.Update(key("5"))
+	if v := mm.View(); !strings.Contains(v, "╭─ 默认 ─") {
+		t.Fatalf("detail box should be titled with the selected profile:\n%s", v)
+	}
 }
 
 // Clicking a home-page group row positions the group cursor and focuses the
@@ -4489,5 +4570,131 @@ func TestHelpSectionStart(t *testing.T) {
 		} else {
 			last = off
 		}
+	}
+}
+
+// A second `r` mid-flight is a no-op: two batches would cross-count their
+// replies and clear the 刷新中 indicator before the second one finished.
+func TestRefreshWhileRefreshingIsIgnored(t *testing.T) {
+	m := newTestModel(t)
+	m, cmd := m.Update(key("r"))
+	if cmd == nil {
+		t.Fatal("r should fire a refresh")
+	}
+	// Consume the first batch so the second `r` sees a fresh call.
+	_ = cmd
+	m2, cmd2 := m.Update(key("r"))
+	if cmd2 != nil {
+		t.Fatal("a second r during a refresh should not start another batch")
+	}
+	if !m2.(Model).refreshing {
+		t.Fatal("the in-flight refresh should survive the ignored second r")
+	}
+}
+
+// The subs info box follows the focus: the subscription card while the left
+// list owns the keyboard, the selected node's details once the node list
+// does — and the card again on Tab. Its height is pinned to the taller of
+// the two states, so the node list below never moves when the box changes
+// subject or the cursor advances.
+func TestSubsInfoBoxFollowsFocus(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("3"))
+	rowOf := func(sub string) int {
+		for i, l := range strings.Split(m.View(), "\n") {
+			if strings.Contains(l, sub) {
+				return i
+			}
+		}
+		return -1
+	}
+	if rowOf("标签  机场A") < 0 {
+		t.Fatalf("left focus should show the subscription card:\n%s", m.View())
+	}
+	if rowOf("╭─ 机场A-01") >= 0 {
+		t.Fatal("left focus should not describe a node")
+	}
+	nodeListAt := rowOf("╭─ 节点")
+
+	m, _ = m.Update(key("tab")) // focus the node list
+	v := m.View()
+	if !strings.Contains(v, "名称  机场A-01") || !strings.Contains(v, "协议  vmess") {
+		t.Fatalf("right focus should describe the selected node:\n%s", v)
+	}
+	if strings.Contains(v, "定时  ") {
+		t.Fatalf("the subscription card should yield while a node is described:\n%s", v)
+	}
+	if got := rowOf("╭─ 节点"); got != nodeListAt {
+		t.Fatalf("node list moved from row %d to %d — the info box height must be pinned",
+			nodeListAt, got)
+	}
+
+	m, _ = m.Update(key("j")) // cursor onto the second node
+	if v := m.View(); !strings.Contains(v, "名称  机场A-02") {
+		t.Fatalf("the box should follow the cursor:\n%s", v)
+	}
+	if got := rowOf("╭─ 节点"); got != nodeListAt {
+		t.Fatalf("node list moved to row %d on a cursor move", got)
+	}
+
+	m, _ = m.Update(key("tab")) // back to the left list
+	if v := m.View(); !strings.Contains(v, "标签  机场A") || strings.Contains(v, "名称  ") {
+		t.Fatalf("Tab back should restore the subscription card:\n%s", v)
+	}
+}
+
+// T probes only the selected node — the same t/T pair the groups page uses,
+// where t covers the whole visible list.
+func TestSubsTestSelectedNodeOnly(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("3"))
+	m, _ = m.Update(key("tab")) // right pane: the first node is selected
+	lastTestIDs = nil
+	m, cmd := m.Update(key("T"))
+	if cmd == nil {
+		t.Fatal("T should probe the selected node")
+	}
+	cmd()
+	if len(lastTestIDs) != 1 || lastTestIDs[0] != "x1" {
+		t.Fatalf("tested %v, want only x1", lastTestIDs)
+	}
+	lastTestIDs = nil
+	m, cmd = m.Update(key("t"))
+	if cmd == nil {
+		t.Fatal("t should still fire a test")
+	}
+	cmd()
+	if len(lastTestIDs) != 2 {
+		t.Fatalf("t tested %v, want both visible nodes", lastTestIDs)
+	}
+}
+
+// y copies whatever the info box describes: the selected node's share link
+// while the node list has focus, the subscription's link otherwise.
+func TestSubsCopyFollowsTheInfoBox(t *testing.T) {
+	if stdoutIsTerminal() {
+		t.Skip("stdout is a terminal; OSC 52 would be written for real")
+	}
+	m := newTestModel(t)
+	m, _ = m.Update(key("3"))
+	mm := m.(Model)
+	// The fixture's subscription nodes carry no share link; append one so
+	// the two subjects are distinguishable.
+	mm.subs.subNodes["s1"] = append(mm.subs.subNodes["s1"],
+		driver.Node{ID: "x9", Name: "带链接", Protocol: "vmess",
+			Link: "vmess://linked", SubscriptionID: "s1"})
+	mm.subs.nc = 2
+	_, cmd := mm.Update(key("y"))
+	msg, ok := cmd().(clipboardMsg)
+	if !ok {
+		t.Fatalf("cmd = %T, want clipboardMsg", cmd())
+	}
+	if msg.What != "订阅链接" {
+		t.Fatalf("left-pane y copied %q, want 订阅链接", msg.What)
+	}
+	mm.subs.focus = 1
+	_, cmd = mm.Update(key("y"))
+	if msg, ok = cmd().(clipboardMsg); !ok || msg.What != "节点链接" {
+		t.Fatalf("right-pane y copied %q, want 节点链接", msg.What)
 	}
 }

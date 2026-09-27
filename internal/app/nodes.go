@@ -314,7 +314,7 @@ func (p *nodesPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		return p.startTest(d, true)
 	case "y":
 		if n := p.cur(); n != nil && n.Link != "" {
-			return osc52CopyCmd(n.Link)
+			return osc52CopyCmd(n.Link, "节点链接")
 		}
 	}
 
@@ -650,6 +650,12 @@ func (p *nodesPage) leftClick(row int) {
 	p.focus = 0
 }
 
+// trendChartH is the trend chart's height in cells. The detail box is the
+// one place on this page with room for the chart — the list rows carry a
+// single figure — and four cells (16 braille dot rows) resolve a 60-sample
+// window without crowding the facts above it.
+const trendChartH = 4
+
 func (p nodesPage) rightLines() []string {
 	if p.mode == 2 || p.mode == 3 {
 		return p.modalLines()
@@ -669,27 +675,20 @@ func (p nodesPage) rightLines() []string {
 	if n.Link != "" {
 		lines = append(lines, ui.SelectedStyle.Render("链接  ")+ui.Truncate(n.Link, max0(p.rightW-10)))
 	}
-	if l, ok := p.lat[n.ID]; ok && !l.TestedAt.IsZero() {
-		v := "超时"
-		bar := ""
-		if l.Alive && l.Ms > 0 {
-			v = strconv.Itoa(l.Ms) + "ms"
-			bar = ui.LatencyStyle(l.Ms, l.Alive, true).Render(ui.LatencyBar(l.Ms))
+	// Group membership: importing a node and forgetting to attach it is the
+	// classic dead end — the import succeeds, the node sits in this list, and
+	// nothing routes through it. Nothing else on the page says so.
+	lines = append(lines, ui.SelectedStyle.Render("群组  ")+p.groupMembership(n.ID))
+	if row, ok := latencyDetail(p.lat, n.ID); ok {
+		line := ui.SelectedStyle.Render("延迟  ") + row
+		// A dead node's backend message is the reason it is dead ("i/o
+		// timeout", "connection refused"), which is what the user came for.
+		if l := p.lat[n.ID]; !l.Alive && l.Message != "" {
+			line += ui.HelpStyle.Render("  " + ui.Truncate(firstLine(l.Message), max0(p.rightW-26)))
 		}
-		lines = append(lines, ui.SelectedStyle.Render("延迟  ")+v+"  "+bar)
+		lines = append(lines, line+ui.HelpStyle.Render("  · "+ui.TimeAgo(p.lat[n.ID].TestedAt)))
 	}
-	// Trend: the accumulated samples tell "slowing down" from "one bad
-	// probe", which a single number cannot.
-	if p.hist != nil {
-		if series := p.hist.series(n.ID); len(series) >= 2 {
-			w := max0(p.rightW - 14)
-			if w > 48 {
-				w = 48
-			}
-			lines = append(lines, ui.SelectedStyle.Render("趋势  ")+
-				ui.Sparkline(series, w, 1, lipgloss.NewStyle().Foreground(ui.Green), ""))
-		}
-	}
+	lines = append(lines, p.trendLines(n.ID)...)
 	// The batch-import report trails the node's own details (a toast line
 	// cannot name the failed links): the pane's subject stays anchored at
 	// the top, the report is the appendix below it.
@@ -708,4 +707,58 @@ func (p nodesPage) rightLines() []string {
 		}
 	}
 	return lines
+}
+
+// groupMembership names the groups this node is attached to, or says it is in
+// none — with the key that fixes it, since that is what the reader wants next.
+func (p nodesPage) groupMembership(id string) string {
+	var names []string
+	for _, g := range p.groups {
+		for _, n := range g.Nodes {
+			if n.ID == id {
+				names = append(names, g.Name)
+				break
+			}
+		}
+	}
+	if len(names) == 0 {
+		return lipgloss.NewStyle().Foreground(ui.Yellow).Render("未加入任何群组（G 加入）")
+	}
+	return strings.Join(names, "、")
+}
+
+// trendLines is the detail box's trend block: a header naming the window the
+// samples cover and the range across it, above a full-content-width braille
+// chart. The accumulated samples tell "slowing down" from "one bad probe",
+// which a single number cannot — and the chart's color is the latest
+// measurement's ramp color, so a node that just died trends gray. Without
+// samples it says how to get them: an untested node's box must read as
+// "press t", not as a rendering gap.
+func (p nodesPage) trendLines(id string) []string {
+	w := max0(p.rightW - 4)
+	empty := []string{ui.SelectedStyle.Render("趋势  ") +
+		ui.HelpStyle.Render("（暂无数据：按 t 测速后这里显示约 3 分钟的曲线）")}
+	if p.hist == nil || w < 12 {
+		return empty
+	}
+	series := p.hist.series(id)
+	if len(series) < 2 {
+		return empty
+	}
+	lo, hi := series[0], series[0]
+	for _, v := range series {
+		if v < lo {
+			lo = v
+		}
+		if v > hi {
+			hi = v
+		}
+	}
+	head := ui.SelectedStyle.Render("趋势  ") + ui.HelpStyle.Render(fmt.Sprintf(
+		"近 %s · %d 次采样 · 最低 %dms · 最高 %dms",
+		ui.Span(p.hist.span(id)), len(series), int(lo), int(hi)))
+	l := p.lat[id]
+	st := ui.LatencyStyle(l.Ms, l.Alive, !l.TestedAt.IsZero())
+	return append([]string{head},
+		strings.Split(ui.Sparkline(series, w, trendChartH, st, ""), "\n")...)
 }

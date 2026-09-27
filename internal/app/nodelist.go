@@ -51,6 +51,26 @@ func latencyCell(lat map[string]driver.Latency, id string, cellW int) string {
 	return st.Render(ui.PadLeft(latStr, 9))
 }
 
+// latencyDetail renders a node's measured latency for a detail pane: the
+// value with its micro-bar when a figure exists, in the ramp's color. The
+// second return is false when the node has never been measured — a detail
+// pane then omits the row rather than asserting a state it does not know
+// ("alive but no figure" is a probe in flight, not a timeout).
+func latencyDetail(lat map[string]driver.Latency, id string) (string, bool) {
+	l, ok := lat[id]
+	if !ok || l.TestedAt.IsZero() {
+		return "", false
+	}
+	st := ui.LatencyStyle(l.Ms, l.Alive, true)
+	switch {
+	case !l.Alive:
+		return st.Render("超时"), true
+	case l.Ms <= 0:
+		return st.Render("…"), true
+	}
+	return st.Render(strconv.Itoa(l.Ms)+"ms") + "  " + st.Render(ui.LatencyBar(l.Ms)), true
+}
+
 // Node lists are the one place where the volume of data hurts: a single
 // airport subscription routinely carries hundreds of nodes, and scrolling
 // to find one — or eyeballing which of them is fastest — is the difference

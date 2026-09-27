@@ -27,8 +27,8 @@ type latSample struct {
 
 func newLatHistory() *latHistory {
 	return &latHistory{
-		window:   60,  // ~3 minutes at the 3s poll cadence
-		maxNodes: 256, // the background poll covers every node; keep the recent ones
+	window:   60,  // ~3 minutes at the 3s poll cadence
+	maxNodes: 256, // polled nodes plus on-demand tests; keep the recent ones
 		byNode:   map[string][]latSample{},
 	}
 }
@@ -64,6 +64,17 @@ func (h *latHistory) touch(id string) {
 			return
 		}
 	}
+}
+
+// span is the time between a node's oldest and newest kept sample — the
+// window the trend chart actually covers. It reads the raw window rather
+// than the alive-only series, which is shorter whenever probes timed out.
+func (h *latHistory) span(nodeID string) time.Duration {
+	s := h.byNode[nodeID]
+	if len(s) < 2 {
+		return 0
+	}
+	return s[len(s)-1].at.Sub(s[0].at)
 }
 
 // series renders a node's successful probes as a sparkline series. Dead

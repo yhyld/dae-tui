@@ -46,9 +46,9 @@ func main() {
 	if err != nil {
 		fatal("加载配置失败: %v", err)
 	}
-	// The accent must be in place before anything renders — including the
+	// The theme must be in place before anything renders — including the
 	// probe path, whose output is plain text anyway.
-	ui.ApplyTheme(cfg.Accent)
+	ui.ApplyTheme(cfg.Accent, cfg.Border, cfg.Dim)
 
 	// Credential persistence goes through Config's locked mutators: these
 	// hooks fire on background request goroutines (silent re-auth) while

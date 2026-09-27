@@ -18,6 +18,10 @@ type tickMsg struct{ n int }
 // when the next test starts), so an idle UI renders nothing extra.
 type spinnerMsg struct{}
 
+// refreshDoneMsg is reported by each request a full refresh (`r`) fired;
+// the last one clears the header's 刷新中 indicator.
+type refreshDoneMsg struct{}
+
 // bootMsg is the result of the initial connectivity/authentication probe.
 type bootMsg struct {
 	Users   int

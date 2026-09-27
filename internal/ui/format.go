@@ -34,7 +34,9 @@ func Bytes(n int64) string {
 	}
 }
 
-// TimeAgo renders a coarse relative age like "3m ago".
+// TimeAgo renders a coarse relative age like "3分钟前". The whole UI is
+// Chinese, so the relative times are too — an English "3m ago" next to
+// Chinese labels reads like a rendering bug.
 func TimeAgo(t time.Time) string {
 	if t.IsZero() {
 		return "-"
@@ -42,13 +44,26 @@ func TimeAgo(t time.Time) string {
 	d := time.Since(t)
 	switch {
 	case d < 30*time.Second:
-		return "just now"
+		return "刚刚"
 	case d < time.Hour:
-		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+		return fmt.Sprintf("%d分钟前", int(d.Minutes()))
 	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh ago", int(d.Hours()))
+		return fmt.Sprintf("%d小时前", int(d.Hours()))
 	default:
-		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+		return fmt.Sprintf("%d天前", int(d.Hours()/24))
+	}
+}
+
+// Span renders a duration as Chinese text for a window label ("近 3 分钟").
+// TimeAgo answers "how long ago"; this answers "how wide is the window".
+func Span(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%d 秒", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%d 分钟", int(d.Minutes()))
+	default:
+		return fmt.Sprintf("%.1f 小时", d.Hours())
 	}
 }
 

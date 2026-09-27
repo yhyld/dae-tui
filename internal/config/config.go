@@ -30,6 +30,14 @@ type Config struct {
 	// invalid keeps the default. Read once at startup.
 	Accent string `toml:"accent"`
 
+	// Border and Dim retune the neutral colors for the terminal's
+	// background. The defaults (238 / 245) are tuned for dark backgrounds;
+	// on a light one they nearly vanish, so a light-terminal user wants
+	// something like border = "250", dim = "240". Same format as Accent;
+	// empty or invalid keeps the default. Read once at startup.
+	Border string `toml:"border"`
+	Dim    string `toml:"dim"`
+
 	// mu serializes mutations + saves: driver hooks persist new tokens and
 	// credentials from background request goroutines while the UI's logout
 	// clears the session on the tea goroutine. Unexported, so the struct
