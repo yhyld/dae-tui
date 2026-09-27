@@ -38,6 +38,9 @@ type settings struct {
 	themeNotes []string
 	themeCur   int
 	themeActive string
+
+	// version rides in from main (ldflags / build info) for the about window.
+	version string
 }
 
 // Settings menu entries.
@@ -56,7 +59,22 @@ const (
 	subPwForm
 	subLogoutConfirm
 	subTheme
+	subAbout
 )
+
+// aboutLogo is the placeholder dot-matrix emblem (a diamond, braille)
+// rendered in the accent color. Deliberately easy to swap once a real logo
+// is designed: it is one string slice in one place.
+var aboutLogo = []string{
+	"⠀⠀⠀⣀⣴⣦⣀⠀⠀⠀",
+	"⠀⣴⣾⣿⣿⣿⣿⣷⣦⠀",
+	"⠀⠈⠙⠿⣿⣿⠿⠋⠁⠀",
+	"⠀⠀⠀⠀⠈⠁⠀⠀⠀⠀",
+}
+
+// Version is stamped by main from the build (ldflags -X / build info) and
+// shown in the about window.
+var Version = "dev"
 
 // settingsItem is one settings menu row; disabled rows render dim and are
 // skipped by the cursor.
@@ -70,11 +88,11 @@ var settingsItems = []settingsItem{
 	{"主题", true},
 	{"语言", false},
 	{"快捷键", false},
-	{"关于", false},
+	{"关于", true},
 }
 
 func newSettings() settings {
-	s := settings{}
+	s := settings{version: Version}
 	s.pwCur = newPasswordInput("当前密码")
 	s.pwNew = newPasswordInput("新密码 (至少6位, 含字母和数字)")
 	s.pwRepeat = newPasswordInput("确认新密码")
@@ -99,6 +117,11 @@ func (s *settings) key(m *Model, msg tea.KeyMsg) tea.Cmd {
 		return s.acctKey(msg, m.drv)
 	case subTheme:
 		return m.themeKey(msg)
+	case subAbout:
+		if msg.String() == "esc" || msg.String() == "enter" {
+			s.sub = subMenu
+		}
+		return nil
 	}
 	switch msg.String() {
 	case "esc":
@@ -125,6 +148,8 @@ func (s *settings) key(m *Model, msg tea.KeyMsg) tea.Cmd {
 				s.acctCur = 0
 			case itemTheme:
 				m.openThemePicker()
+			case itemAbout:
+				s.sub = subAbout
 			}
 		}
 	}
@@ -351,6 +376,8 @@ func (s settings) overlay() *overlaySpec {
 			"", ui.HelpStyle.Render(" j/k 选择  Enter 确认  esc 关闭"))}
 	case subTheme:
 		return s.themeOverlay()
+	case subAbout:
+		return s.aboutOverlay()
 	case subAcctMenu:
 		lines := []string{ui.TitleStyle.Render(" 账户"), "",
 			ui.HelpStyle.Render(" 当前用户  " + s.user), ""}
@@ -392,6 +419,25 @@ func (s settings) overlay() *overlaySpec {
 		}}
 	}
 	return nil
+}
+
+// aboutOverlay is the about window: the emblem, version and a short
+// orientation of what the tool is and where its config lives.
+func (s settings) aboutOverlay() *overlaySpec {
+	lines := []string{""}
+	for _, l := range aboutLogo {
+		lines = append(lines, "    "+ui.TitleStyle.Render(l))
+	}
+	lines = append(lines, "",
+		"    "+ui.SelectedStyle.Render("dae-tui "+s.version),
+		"    "+ui.HelpStyle.Render("dae 网络代理的终端管理界面"),
+		"",
+		"    "+ui.HelpStyle.Render("后端  daed GraphQL API（schema 冻结）"),
+		"    "+ui.HelpStyle.Render("配置  ~/.config/dae-tui/config.toml"),
+		"    "+ui.HelpStyle.Render("架构  可插拔 driver，可扩展其他后端"),
+	)
+	return &overlaySpec{lines: append(lines, "",
+		ui.HelpStyle.Render(" esc 返回"))}
 }
 
 // themeOverlay is the theme picker: one row per theme with the ● marker on

@@ -4986,9 +4986,8 @@ func TestSettingsThemePicker(t *testing.T) {
 	if ui.BorderCol != border0 {
 		t.Fatal("esc should restore the previous theme")
 	}
-	// Reopen, preview 浅色, enter: saved to config.toml and kept active.
-	m, _ = m.Update(key("P"))
-	m, _ = m.Update(key("j"))
+	// Reopen the picker straight from the menu (it is still open after the
+	// esc above), preview 浅色, enter: saved to config.toml and kept active.
 	m, _ = m.Update(key("enter"))
 	m, _ = m.Update(key("j"))
 	m, cmd := m.Update(key("enter"))
@@ -5002,13 +5001,31 @@ func TestSettingsThemePicker(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "config.toml")); err != nil {
 		t.Fatalf("theme choice should be saved: %v", err)
 	}
-	// esc after a save must not un-save it: the picker's esc restores the
-	// theme active when the picker opened — which is now 浅色.
-	m, _ = mm.Update(key("P"))
-	m, _ = mm.Update(key("j"))
+	// Reopen once more: the cursor must park on the theme config.toml now
+	// names — a save must not be un-saved by the picker.
+	m, _ = mm.Update(key("enter"))
 	mm = m.(Model)
 	if got := mm.settings.themes[mm.settings.themeCur].Name; got != "浅色" {
 		t.Fatalf("reopened picker should park on the saved theme, got %q", got)
 	}
 	restore()
+}
+
+// The about window shows the stamped version; esc walks back to the menu.
+func TestSettingsAbout(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("P"))
+	m, _ = m.Update(key("j")) // 主题
+	m, _ = m.Update(key("j")) // 关于 (语言/快捷键 are skipped while pending)
+	m, _ = m.Update(key("enter"))
+	v := m.(Model).View()
+	for _, want := range []string{"dae-tui", "终端管理界面", "schema 冻结"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("about window missing %q:\n%s", want, v)
+		}
+	}
+	m, _ = m.Update(key("esc"))
+	if mm := m.(Model); mm.settings.sub != subMenu {
+		t.Fatalf("esc should return to the settings menu, sub=%d", mm.settings.sub)
+	}
 }

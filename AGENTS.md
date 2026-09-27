@@ -280,9 +280,12 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
 - 批量导入框（手动节点页 `a`）是 bubbles 的 **textarea**（每行一条链接；ctrl+s 或切到
   标签框后 enter 提交，框内 enter 是换行）。导入结果走 `importDoneMsg`：成功数进 toast，
   失败明细渲染在右栏（`importFail`）——一行 toast 说不完逐条报错。
-- `P` 是设置浮窗（`settings.go`：sub 0 菜单 / 1 账户菜单 / 2 改密码 / 3 退出确认，
-  之后是主题选择器等子窗口），已计入 `anyModal()`；esc 在子窗口逐级返回、在菜单关闭。
-  账户状态机已从 homePage 迁入根模型；退出登录由根模型处理（`logoutMsg`：清 cfg + 存盘 + `drv.Logout` +
+- `P` 是设置浮窗（`settings.go`：sub 0 菜单 / 1 账户菜单 / 2 改密码 / 3 退出确认 /
+  4 主题选择器 / 5 关于），已计入 `anyModal()`；esc 在子窗口逐级返回、在菜单关闭。
+  账户状态机已从 homePage 迁入根模型；未实现的菜单项 enabled=false（光标跳过、置灰
+  加「即将支持」，实现一项开一项）。版本来源：main.go 的 `version` 变量吃 ldflags
+  `-X main.version=`，缺省回退 `debug.ReadBuildInfo` 的 vcs 修订号；`app.Version`
+  只读展示。盲文徽标是 `settings.go` 的 `aboutLogo` 占位，待正式设计后替换；退出登录由根模型处理（`logoutMsg`：清 cfg + 存盘 + `drv.Logout` +
   回 `phaseLogin`），页面自己不能改 phase。首页 `L` 是 daed 日志视图（`tea.ExecProcess`
   跑 `journalctl -u daed -n 200 --no-pager -f`，只读、仅本机有效），退出即回到 TUI。
 - 全局 `r` 是**全量刷新**：所有列表 + status + traffic + 当前页延迟轮询一次性重拉，

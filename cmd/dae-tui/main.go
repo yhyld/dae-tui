@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -19,6 +20,49 @@ import (
 	"dae-tui/internal/ui"
 )
 
+// version is stamped at build time (-ldflags "-X main.version=v0.2.0").
+// Unstamped builds fall back to the VCS revision from the build info, so a
+// plain `go build` still identifies itself.
+var version = "dev"
+
+// versionString resolves the display version: the ldflags stamp, else
+// dev-<short revision> (+dirty) from debug.ReadBuildInfo, else "dev".
+func versionString() string {
+	if version != "dev" {
+		return version
+	}
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return version
+	}
+	var rev, t string
+	dirty := false
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.time":
+			t = s.Value
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+	if rev == "" {
+		return version
+	}
+	if len(rev) > 10 {
+		rev = rev[:10]
+	}
+	v := "dev-" + rev
+	if dirty {
+		v += "+dirty"
+	}
+	if t != "" && len(t) >= 10 {
+		v += " " + t[:10]
+	}
+	return v
+}
+
 func main() {
 	cfgPathFlag := flag.String("config", "", "配置文件路径 (默认 ~/.config/dae-tui/config.toml)")
 	endpointFlag := flag.String("endpoint", "", "daed GraphQL 端点 (默认 http://127.0.0.1:2023/graphql)")
@@ -30,7 +74,7 @@ func main() {
 	flag.Parse()
 
 	if *version {
-		fmt.Println("dae-tui 0.1.0")
+		fmt.Println("dae-tui " + versionString())
 		return
 	}
 
@@ -97,6 +141,7 @@ func main() {
 		fatal("未知 -cmd %q（可用: status, test）", *cmdFlag)
 	}
 
+	app.Version = versionString() // the about window shows it
 	p := tea.NewProgram(app.New(drv, cfg, cfgPath), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fatal("启动 TUI 失败: %v", err)
