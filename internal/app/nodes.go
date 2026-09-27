@@ -83,30 +83,37 @@ func (p *nodesPage) setSize(leftW, rightW, h int) {
 }
 
 func (p *nodesPage) handleNodes(nodes []driver.Node, err error) {
+	// Any arrival — a plain refresh or a mutation's follow-up — ends the
+	// in-flight mutation this page last started.
+	p.busy = false
 	if err != nil {
 		p.err = err
 		return
 	}
 	p.err = nil
-	p.busy = false
 	p.nodes = nodes
-	if p.sel >= len(nodes) {
-		p.sel = max0(len(nodes) - 1)
+	// The cursor indexes the filtered view, so it must be clamped against
+	// that, not the raw list: a filter that dropped the row under the
+	// cursor would otherwise leave sel pointing past the end (cur() nil,
+	// j a dead key) until the filter is cleared.
+	if n := len(p.visibleNodes()); p.sel >= n {
+		p.sel = max0(n - 1)
 	}
 }
 
 // handleImport stores a batch import's per-link outcomes: the failures stay
-// visible in the detail pane, because a toast line cannot name them.
+// visible in the detail pane, because a toast line cannot name them. A
+// follow-up list failure (msg.Err) still carries the batch's outcomes — the
+// import itself landed — so the report is recorded either way; only the
+// refreshed node list is missing on that path.
 func (p *nodesPage) handleImport(msg importDoneMsg) {
 	p.busy = false
-	if msg.Err != nil {
-		p.err = msg.Err
-		return
-	}
-	p.err = nil
-	p.nodes = msg.Nodes
-	if p.sel >= len(p.nodes) {
-		p.sel = max0(len(p.nodes) - 1)
+	p.err = msg.Err
+	if len(msg.Nodes) > 0 {
+		p.nodes = msg.Nodes
+		if n := len(p.visibleNodes()); p.sel >= n {
+			p.sel = max0(n - 1)
+		}
 	}
 	p.importOK, p.importFail = 0, nil
 	for _, r := range msg.Results {
@@ -688,8 +695,14 @@ func (p nodesPage) rightLines() []string {
 		lines = append(lines, "", ui.SelectedStyle.Render("上次导入 ")+
 			ui.HelpStyle.Render(fmt.Sprintf("%d 成功 / %d 失败", p.importOK, len(p.importFail))))
 		for _, r := range p.importFail {
-			lines = append(lines, ui.ErrorStyle.Render(" ✗ "+
-				ui.Truncate(r.Link, max0(p.rightW-26))+" — "+ui.Truncate(r.Error, 12)))
+			// Link and error each get a full line: a share link fills any
+			// inline quota it is given (they are hundreds of cells long),
+			// and the error is the reason the user is reading this appendix
+			// — an inline remainder left it at "unsupported protoco…".
+			// Same continuation-line shape the subscription pane uses for
+			// its info lines.
+			lines = append(lines, ui.ErrorStyle.Render(" ✗ "+ui.Truncate(r.Link, max0(p.rightW-7))))
+			lines = append(lines, ui.ErrorStyle.Render("    "+ui.Truncate(r.Error, max0(p.rightW-8))))
 		}
 	}
 	return lines

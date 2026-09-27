@@ -1380,3 +1380,137 @@ func TestTypedValueArray(t *testing.T) {
 		t.Fatalf("blank value = %#v, want an empty non-nil slice", v)
 	}
 }
+
+func TestCreateProfileConfigCloneUsesReturnedID(t *testing.T) {
+	d, m := newTestDriver(t, func(op string, vars map[string]any, auth string) (any, []gqlError) {
+		switch op {
+		case "CreateConfig":
+			return map[string]any{"createConfig": map[string]any{"id": "cfg-new"}}, nil
+		case "UpdateConfig":
+			return map[string]any{"updateConfig": map[string]any{"id": "cfg-new"}}, nil
+		default:
+			return nil, []gqlError{{Message: "unexpected op " + op}}
+		}
+	})
+
+	fields := []driver.ConfigField{
+		{Name: "tproxyPort", Value: "12345", Type: "int"},
+		{Name: "logLevel", Value: "info", Type: "string"},
+	}
+	if err := d.CreateProfile(ctxT(t), "config", "克隆配置", &driver.ConfigItem{Fields: fields}); err != nil {
+		t.Fatalf("CreateProfile: %v", err)
+	}
+	// Exactly two requests: the create and one field update bound to the id
+	// createConfig returned. The old implementation re-listed every
+	// selection and looked the new profile up by name, which mis-bound when
+	// several unselected profiles shared the name.
+	reqs := m.reqs()
+	if len(reqs) != 2 {
+		t.Fatalf("got %d requests, want 2 (create + update): %+v", len(reqs), reqs)
+	}
+	upd := reqs[1]
+	if upd.op != "UpdateConfig" {
+		t.Fatalf("second op = %s, want UpdateConfig", upd.op)
+	}
+	if upd.vars["id"] != "cfg-new" {
+		t.Fatalf("update id = %v, want the returned cfg-new", upd.vars["id"])
+	}
+	global, ok := upd.vars["global"].(map[string]any)
+	if !ok || global["tproxyPort"] != float64(12345) || global["logLevel"] != "info" {
+		t.Fatalf("global = %#v", upd.vars["global"])
+	}
+
+	// Without source fields (plain create) only the create request fires.
+	if err := d.CreateProfile(ctxT(t), "config", "空配置", nil); err != nil {
+		t.Fatalf("CreateProfile plain: %v", err)
+	}
+	if n := len(m.reqs()); n != 3 {
+		t.Fatalf("plain create fired %d extra requests, want 1", n-2)
+	}
+}
+
+func TestUnknownFieldSentinelMatchesThroughWrapping(t *testing.T) {
+	// The version-skew fallbacks must key off errors.Is(err, errUnknown-
+	// Field), not message text: the sentinel has to survive roundTrip's
+	// wrapping (and any future fmt.Errorf %w chain).
+	d, _ := newTestDriver(t, func(op string, vars map[string]any, auth string) (any, []gqlError) {
+		return nil, []gqlError{{Message: `Cannot query field "matchedNodes" on type "GroupSubscription".`}}
+	})
+	var out struct {
+		Groups []rawGroup `json:"groups"`
+	}
+	err := d.client.Do(context.Background(), qGroupsRich, nil, &out)
+	if !errors.Is(err, errUnknownField) {
+		t.Fatalf("errors.Is(err, errUnknownField) = false for %v", err)
+	}
+	if !strings.Contains(err.Error(), "Cannot query field") ||
+		!strings.Contains(err.Error(), "提示") {
+		t.Fatalf("user-facing text lost: %v", err)
+	}
+}
+
+func TestLatenciesChunksLargeIDLists(t *testing.T) {
+	calls := 0
+	seen := map[string]bool{}
+	d, _ := newTestDriver(t, func(op string, vars map[string]any, auth string) (any, []gqlError) {
+		if op != "NodeLatencies" {
+			return nil, []gqlError{{Message: "unexpected op " + op}}
+		}
+		calls++
+		ids, _ := vars["ids"].([]any)
+		if len(ids) > 100 {
+			t.Errorf("batch too large: %d", len(ids))
+		}
+		for _, id := range ids {
+			s, _ := id.(string)
+			if seen[s] {
+				t.Errorf("node %s probed twice across batches", s)
+			}
+			seen[s] = true
+		}
+		var out []any
+		for _, id := range ids {
+			s, _ := id.(string)
+			out = append(out, map[string]any{
+				"id": s, "alive": true, "latencyMs": 42, "testedAt": "2026-09-27T10:00:00Z",
+			})
+		}
+		return map[string]any{"nodeLatencies": out}, nil
+	})
+
+	ids := make([]string, 250)
+	for i := range ids {
+		ids[i] = fmt.Sprint("n", i)
+	}
+	lats, err := d.Latencies(ctxT(t), ids)
+	if err != nil {
+		t.Fatalf("Latencies: %v", err)
+	}
+	if calls != 3 {
+		t.Fatalf("calls = %d, want 3 (100+100+50)", calls)
+	}
+	if len(lats) != 250 {
+		t.Fatalf("latencies = %d, want 250 (chunks concatenated, order kept)", len(lats))
+	}
+	if lats[0].NodeID != "n0" || lats[249].NodeID != "n249" {
+		t.Fatalf("order not preserved: first=%s last=%s", lats[0].NodeID, lats[249].NodeID)
+	}
+
+	// A short list stays a single request (and an empty one keeps the
+	// documented "every node" semantics rather than becoming a no-op).
+	calls = 0
+	seen = map[string]bool{}
+	if _, err := d.Latencies(ctxT(t), []string{"n1"}); err != nil {
+		t.Fatalf("Latencies(short): %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("short list calls = %d, want 1", calls)
+	}
+	calls = 0
+	if _, err := d.Latencies(ctxT(t), nil); err != nil {
+		t.Fatalf("Latencies(nil): %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("nil list calls = %d, want 1", calls)
+	}
+}

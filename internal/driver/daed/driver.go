@@ -166,7 +166,7 @@ func (d *Driver) ListGroups(ctx context.Context) ([]driver.Group, error) {
 		if err == nil {
 			return mapGroups(out.Groups), nil
 		}
-		if !strings.Contains(err.Error(), "Cannot query field") {
+		if !errors.Is(err, errUnknownField) {
 			return nil, err
 		}
 		d.groupsFallback.Store(true)
@@ -413,7 +413,27 @@ func (d *Driver) SubscriptionNodes(ctx context.Context, subscriptionID string) (
 	}
 }
 
+// Latencies reads the latest probe results. An empty ID list means "every
+// node"; a long list is chunked exactly like TestLatency, so a poll over a
+// big picker (or a whole instance) cannot blow the HTTP timeout.
 func (d *Driver) Latencies(ctx context.Context, nodeIDs []string) ([]driver.Latency, error) {
+	const batch = 100
+	if len(nodeIDs) <= batch {
+		return d.latencies(ctx, nodeIDs)
+	}
+	all := make([]driver.Latency, 0, len(nodeIDs))
+	for start := 0; start < len(nodeIDs); start += batch {
+		end := min(start+batch, len(nodeIDs))
+		lats, err := d.latencies(ctx, nodeIDs[start:end])
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, lats...)
+	}
+	return all, nil
+}
+
+func (d *Driver) latencies(ctx context.Context, nodeIDs []string) ([]driver.Latency, error) {
 	vars := map[string]any{}
 	if len(nodeIDs) > 0 {
 		vars["ids"] = nodeIDs
@@ -525,7 +545,7 @@ func (d *Driver) ListSelections(ctx context.Context) (driver.Selections, error) 
 		if err == nil {
 			return d.selectionsFrom(ctx, out)
 		}
-		if !strings.Contains(err.Error(), "Cannot query field") {
+		if !errors.Is(err, errUnknownField) {
 			return driver.Selections{}, err
 		}
 		d.selectionsFallback.Store(true)
@@ -803,27 +823,26 @@ routing {
 func (d *Driver) CreateProfile(ctx context.Context, section, name string, src *driver.ConfigItem) error {
 	switch section {
 	case "config":
-		if err := d.client.Do(ctx, mCreateConfig, map[string]any{"name": name}, nil); err != nil {
+		// createConfig answers with the new profile's id (the mutation
+		// already selects it): cloning binds to that id instead of looking
+		// the profile up by name afterwards, which mis-bound when several
+		// unselected profiles shared the name.
+		var out struct {
+			CreateConfig struct {
+				ID string `json:"id"`
+			} `json:"createConfig"`
+		}
+		if err := d.client.Do(ctx, mCreateConfig, map[string]any{"name": name}, &out); err != nil {
 			return err
 		}
 		if src == nil || len(src.Fields) == 0 {
 			return nil
 		}
-		// Clone: fetch the new id, then copy all fields in one update.
-		sel, err := d.ListSelections(ctx)
-		if err != nil {
-			return err
+		if out.CreateConfig.ID == "" {
+			return fmt.Errorf("新建配置 %q 未返回 id", name)
 		}
-		var id string
-		for _, c := range sel.Configs {
-			if c.Name == name && !c.Selected {
-				id = c.ID
-			}
-		}
-		if id == "" {
-			return fmt.Errorf("新建后未找到配置 %q", name)
-		}
-		return d.UpdateConfigFields(ctx, id, src.Fields)
+		// Clone: copy all fields onto the new profile in one update.
+		return d.UpdateConfigFields(ctx, out.CreateConfig.ID, src.Fields)
 	case "dns":
 		content := defaultDnsTemplate
 		if src != nil && src.Body != "" {
@@ -944,7 +963,7 @@ func (d *Driver) Interfaces(ctx context.Context) ([]driver.NetworkInterface, err
 		General rawGeneralWithInterfaces `json:"general"`
 	}
 	if err := d.client.Do(ctx, qInterfaces, nil, &out); err != nil {
-		if strings.Contains(err.Error(), "Cannot query field") {
+		if errors.Is(err, errUnknownField) {
 			return nil, nil
 		}
 		return nil, err

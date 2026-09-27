@@ -17,8 +17,8 @@ var (
 	Gray    = lipgloss.Color("241") // dead / unknown
 	DimText = lipgloss.Color("245")
 
-	TitleStyle    = lipgloss.NewStyle().Bold(true).Foreground(Accent)
-	TabStyle      = lipgloss.NewStyle().Foreground(DimText).Padding(0, 1)
+	TitleStyle = lipgloss.NewStyle().Bold(true).Foreground(Accent)
+	TabStyle   = lipgloss.NewStyle().Foreground(DimText).Padding(0, 1)
 	// TabActive recolors only — same padding/width as TabStyle so tabs never
 	// shift and the click-span math in the app stays trivial.
 	TabActive     = lipgloss.NewStyle().Bold(true).Foreground(Accent).Padding(0, 1)

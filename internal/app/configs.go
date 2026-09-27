@@ -193,8 +193,20 @@ func (p *configsPage) handleSelections(sel driver.Selections, err error) {
 	}
 	p.err = nil
 	p.sel = sel
+	for _, rej := range p.validateErr {
+		// The reload retires the rejection banners; their temp files are
+		// the only copy of those edits and nothing references them anymore,
+		// so leaving them behind leaks one /tmp/dae-tui-* per retry.
+		os.Remove(rej.Path)
+	}
 	p.validateErr = map[string]editRejection{} // a reload retires stale edit errors
 	p.diff = nil                               // …and any pending diff confirmation
+	if p.mode == 6 {
+		// A refresh can land after the diff was armed (the field submit and
+		// its refresh are independent requests with no ordering), which
+		// would otherwise leave an empty diff modal waiting for a keypress.
+		p.mode = 0
+	}
 	p.rebuild()
 }
 
@@ -298,204 +310,8 @@ func (p *configsPage) deletable(section string, it *driver.ConfigItem) error {
 	return nil
 }
 
-// modalKey drives the field picker / inputs / confirm modals.
-func (p *configsPage) modalKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
-	switch p.mode {
-	case 5: // delete confirm
-		switch msg.String() {
-		case "y":
-			r := p.curRow()
-			p.mode = 0
-			if r == nil {
-				return nil
-			}
-			it := p.item(*r)
-			return profileMutateCmd(d, profileMutation{kind: 2, section: r.section, id: it.ID},
-				"删除"+sectionName(r.section)+" "+it.Name)
-		case "n", "esc", "enter":
-			p.mode = 0
-		}
-		return nil
-
-	case 7: // builtin DSL editor
-		switch msg.String() {
-		case "esc":
-			if !p.edEscArm {
-				if text := strings.TrimSpace(p.ed.Value()); text != "" && text != strings.TrimSpace(p.edOld) {
-					// The editor holds the only copy of the edit until
-					// ctrl+s; a reflexive esc must not drop a big paste
-					// without one explicit confirmation.
-					p.edEscArm = true
-					return nil
-				}
-			}
-			p.edEscArm = false
-			p.mode = 0
-			p.ed.Blur()
-			return nil
-		case "ctrl+s":
-			p.edEscArm = false
-			text := strings.TrimSpace(p.ed.Value())
-			if text == "" || text == strings.TrimSpace(p.edOld) {
-				p.mode = 0
-				p.ed.Blur()
-				return nil
-			}
-			p.edErr = ""
-			return validateTextCmd(d, p.edSection, p.edID, text, p.edOld, "")
-		}
-		// Any other key means the user kept editing; the guard disarms.
-		p.edEscArm = false
-		var cmd tea.Cmd
-		p.ed, cmd = p.ed.Update(msg)
-		return cmd
-
-	case 6: // DSL diff confirm
-		switch msg.String() {
-		case "y":
-			st := p.diff
-			p.diff, p.mode = nil, 0
-			if st == nil {
-				return nil
-			}
-			if !st.Builtin {
-				os.Remove(st.Path)
-			}
-			delete(p.validateErr, st.ID)
-			return configTextCmd(d, st.Section, st.ID, st.Text, "更新"+sectionName(st.Section)+" 内容")
-		case "n", "esc":
-			st := p.diff
-			p.diff, p.mode = nil, 0
-			if st == nil {
-				return nil
-			}
-			if st.Builtin {
-				// Back into the floating editor with the edited text: the
-				// in-app editor IS the copy that survives a decline.
-				return p.reopenBuiltinEditor(st)
-			}
-			// The edit is declined, but the temp file is the only copy of
-			// it — keep it and say where.
-			return func() tea.Msg {
-				return opDoneMsg{Op: "编辑", Err: fmt.Errorf("已取消，编辑内容保留在 %s", st.Path)}
-			}
-		case "j", "down":
-			p.scroll++
-		case "k", "up":
-			if p.scroll > 0 {
-				p.scroll--
-			}
-		}
-		return nil
-
-	case 1: // field picker (config global fields)
-		r := p.curRow()
-		if r == nil {
-			p.mode = 0
-			return nil
-		}
-		it := p.item(*r)
-		fields := orderedFields(it.Fields)
-		// The field list can change while the picker is open (the refreshed
-		// selection after a submit); keep the cursor on a real row.
-		if p.pickCursor >= len(fields) {
-			p.pickCursor = max0(len(fields) - 1)
-		}
-		switch msg.String() {
-		case "esc":
-			p.mode = 0
-		case "j", "down":
-			if p.pickCursor < len(fields)-1 {
-				p.pickCursor++
-			}
-		case "k", "up":
-			if p.pickCursor > 0 {
-				p.pickCursor--
-			}
-		case "enter":
-			if p.pickCursor < len(fields) {
-				p.editField = fields[p.pickCursor]
-				p.fieldErr = ""
-				p.mode = 2
-				return p.openInput("新值 ("+p.editField.Type+")", p.editField.Value)
-			}
-		}
-		return nil
-
-	case 2: // field input
-		switch msg.String() {
-		case "esc":
-			p.mode = 1
-			p.input.Blur()
-			return nil
-		case "enter":
-			val := strings.TrimSpace(p.input.Value())
-			f := p.editField
-			r := p.curRow()
-			if r == nil {
-				p.mode = 0
-				p.input.Blur()
-				return nil
-			}
-			if val == "" || val == f.Value {
-				// Nothing to submit: back to the picker, which stays open
-				// for the next field.
-				p.mode = 1
-				p.input.Blur()
-				return nil
-			}
-			// Catch a type mismatch here: the backend would reject it too,
-			// but only after a round trip and with a less pointed message.
-			if err := validateFieldValue(f, val); err != nil {
-				p.fieldErr = err.Error()
-				return nil
-			}
-			// Stay in the picker once the edit lands: multi-field sessions
-			// (checkInterval + checkTolerance + …) are the common case, the
-			// refreshed value shows up on the picker row itself, and esc is
-			// the explicit way out.
-			p.mode = 1
-			p.input.Blur()
-			it := p.item(*r)
-			return configFieldCmd(d, it.ID, f, val, "修改 "+fieldLabel(f))
-		}
-		var cmd tea.Cmd
-		p.input, cmd = p.input.Update(msg)
-		return cmd
-
-	case 3, 4: // create / rename input
-		switch msg.String() {
-		case "esc":
-			p.mode = 0
-			p.input.Blur()
-			return nil
-		case "enter":
-			name := strings.TrimSpace(p.input.Value())
-			kind := p.mode
-			r := p.curRow()
-			p.mode = 0
-			p.input.Blur()
-			if name == "" || r == nil {
-				return nil
-			}
-			if kind == 3 {
-				// Clone the profile under the cursor (a section header means
-				// its selected one) — the same item e/R/D act on, not always
-				// the section's selected profile.
-				return profileMutateCmd(d, profileMutation{kind: 0, section: r.section, name: name,
-					src: p.item(*r)},
-					"创建"+sectionName(r.section)+" "+name)
-			}
-			it := p.item(*r)
-			return profileMutateCmd(d, profileMutation{kind: 1, section: r.section, id: it.ID, name: name},
-				"重命名为 "+name)
-		}
-		var cmd tea.Cmd
-		p.input, cmd = p.input.Update(msg)
-		return cmd
-	}
-	return nil
-}
+// modalKey drives the field picker / inputs / confirm modals; the per-mode
+// handlers live in configs_modal.go.
 
 // editorArgv resolves which editor to launch for DSL editing. POSIX
 // precedence is VISUAL over EDITOR; when neither is set we fall back to the
@@ -529,12 +345,22 @@ func editorCmd(path string) (*exec.Cmd, string, error) {
 	return exec.Command(argv[0], args...), strings.Join(argv, " "), nil
 }
 
+// retireRejection drops a stored $EDITOR rejection together with its temp
+// file: the banner is the only thing that referenced the path, so deleting
+// the record alone would orphan the file (one leak per edit-retry cycle).
+func (p *configsPage) retireRejection(id string) {
+	if rej, ok := p.validateErr[id]; ok {
+		os.Remove(rej.Path)
+		delete(p.validateErr, id)
+	}
+}
+
 // openBuiltinEditor starts the in-app floating editor with the profile's
 // current DSL. Same contract as editInEditor minus the file: ctrl+s
 // validates, a rejection keeps the editor open with the error, and a
 // cancelled diff returns here instead of to a temp file.
 func (p *configsPage) openBuiltinEditor(r rowRef, it driver.ConfigItem) tea.Cmd {
-	delete(p.validateErr, it.ID)
+	p.retireRejection(it.ID)
 	ta := textarea.New()
 	ta.Placeholder = "dae DSL"
 	ta.SetWidth(min(76, max(40, p.rightW)))
@@ -551,7 +377,7 @@ func (p *configsPage) openBuiltinEditor(r rowRef, it driver.ConfigItem) tea.Cmd 
 
 // editInEditor hands the raw DSL to $VISUAL/$EDITOR via tea.ExecProcess.
 func (p *configsPage) editInEditor(d driver.Driver, r rowRef, it driver.ConfigItem) tea.Cmd {
-	delete(p.validateErr, it.ID) // a new session supersedes the last rejection
+	p.retireRejection(it.ID) // a new session supersedes the last rejection
 	ext := ".conf"
 	if r.section == "dns" {
 		ext = ".dns"
@@ -1233,8 +1059,14 @@ func (p *configsPage) rightClick(row int) tea.Cmd {
 	}
 	// bodyLines renders the title line, then one line per field with an
 	// optional interface-warning line after some of them; rightLines windows
-	// those lines by p.scroll. Walk the same layout to find the field.
-	line := p.scroll + row - 1 // -1: the title line
+	// those lines by p.scroll — but it also prepends the 4-line rejection
+	// banner when the last $EDITOR session was refused, and the walk below
+	// must start after it or every field row maps to the wrong field.
+	head := 0
+	if rej := p.validateErr[p.item(*r).ID]; rej.Err != "" {
+		head = 4
+	}
+	line := p.scroll + row - 1 - head // -1: the title line
 	if line < 0 {
 		return nil
 	}

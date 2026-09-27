@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -166,11 +167,13 @@ func (c *Client) roundTrip(ctx context.Context, query string, vars map[string]an
 		// A schema field unknown to the server almost always means the
 		// running daemon is older than the installed package (upgrade
 		// without restart). Surface that directly instead of a cryptic
-		// validation error.
+		// validation error, and mark the error so the version-skew
+		// fallbacks can detect it without message matching.
 		if strings.Contains(msg, "Cannot query field") {
-			return fmt.Errorf("%s\n提示: 运行中的 daed 版本过旧 (升级后未重启?) — sudo systemctl restart daed", msg)
+			return &unknownFieldError{msg: msg +
+				"\n提示: 运行中的 daed 版本过旧 (升级后未重启?) — sudo systemctl restart daed"}
 		}
-		return fmt.Errorf("%s", msg)
+		return errors.New(msg)
 	}
 	if out != nil && len(gr.Data) > 0 {
 		if err := json.Unmarshal(gr.Data, out); err != nil {
@@ -183,6 +186,22 @@ func (c *Client) roundTrip(ctx context.Context, query string, vars map[string]an
 func isAccessDenied(err error) bool {
 	return err != nil && strings.Contains(strings.ToLower(err.Error()), "access denied")
 }
+
+// errUnknownField is the sentinel for GraphQL schema-validation failures:
+// the running daemon does not know a field the query asked for (the installed
+// package is newer than the daemon, or a fork chain dropped a field). The
+// version-skew fallbacks in driver.go detect it with errors.Is instead of
+// matching message text — daed rewording its validator output must not
+// silently break the degradation paths.
+var errUnknownField = errors.New("unknown graphql field")
+
+// unknownFieldError carries the raw GraphQL error message (plus the restart
+// hint) while still matching errUnknownField through errors.Is, so the
+// user-visible text stays exactly what roundTrip assembled.
+type unknownFieldError struct{ msg string }
+
+func (e *unknownFieldError) Error() string   { return e.msg }
+func (e *unknownFieldError) Is(t error) bool { return t == errUnknownField }
 
 // --- public (unauthenticated) operations ---
 

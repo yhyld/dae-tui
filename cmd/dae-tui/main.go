@@ -41,12 +41,9 @@ func main() {
 		}
 		cfgPath = p
 	}
-	cfg, err := config.Load(cfgPath)
+	cfg, err := loadCfg(cfgPath, *endpointFlag)
 	if err != nil {
 		fatal("加载配置失败: %v", err)
-	}
-	if *endpointFlag != "" {
-		cfg.Endpoint = *endpointFlag
 	}
 
 	// Credential persistence goes through Config's locked mutators: these
@@ -97,6 +94,19 @@ func main() {
 	}
 }
 
+// loadCfg loads the config file (a missing one means defaults) and applies
+// the -endpoint override.
+func loadCfg(path, endpoint string) (*config.Config, error) {
+	cfg, err := config.Load(path)
+	if err != nil {
+		return nil, err
+	}
+	if endpoint != "" {
+		cfg.Endpoint = endpoint
+	}
+	return cfg, nil
+}
+
 // splitCSV splits a comma-separated flag value, dropping blanks.
 func splitCSV(s string) []string {
 	var out []string
@@ -106,6 +116,34 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
+}
+
+// testTargets expands the -g flag into member node IDs (deduped: a node can
+// sit in several named groups) and reports requested names that matched no
+// group. -n handling stays in runTest: an explicit ID list must not require
+// listing groups at all.
+func testTargets(all []driver.Group, groups string) (ids, missing []string) {
+	want := map[string]bool{}
+	for _, name := range splitCSV(groups) {
+		want[name] = true
+	}
+	seen := map[string]bool{}
+	for _, g := range all {
+		if !want[g.Name] {
+			continue
+		}
+		delete(want, g.Name)
+		for _, n := range g.Members() {
+			if !seen[n.ID] {
+				seen[n.ID] = true
+				ids = append(ids, n.ID)
+			}
+		}
+	}
+	for name := range want {
+		missing = append(missing, name)
+	}
+	return ids, missing
 }
 
 // runStatus prints a compact, read-only summary of the backend — what a
@@ -185,24 +223,8 @@ func runTest(d *daeddrv.Driver, groups, nodes string) {
 		if err != nil {
 			fatal("ListGroups: %v", err)
 		}
-		want := map[string]bool{}
-		for _, name := range splitCSV(groups) {
-			want[name] = true
-		}
-		seen := map[string]bool{}
-		for _, g := range all {
-			if !want[g.Name] {
-				continue
-			}
-			delete(want, g.Name)
-			for _, n := range g.Members() {
-				if !seen[n.ID] {
-					seen[n.ID] = true
-					ids = append(ids, n.ID)
-				}
-			}
-		}
-		for name := range want {
+		ids, missing := testTargets(all, groups)
+		for _, name := range missing {
 			fmt.Fprintf(os.Stderr, "dae-tui: 警告: 组 %q 不存在\n", name)
 		}
 		if len(ids) == 0 {

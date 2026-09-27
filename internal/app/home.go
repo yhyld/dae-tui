@@ -787,6 +787,14 @@ func (p *homePage) scrollBy(d int) {
 	p.follow = false
 }
 
+// homeAnchors are the absolute line indexes (into bodyLines' flat list) of
+// the interactive zones, so the click mapper reuses the renderer's own math
+// instead of re-deriving the zone-row heights it must stay in sync with.
+type homeAnchors struct {
+	presetStart int // first preset row, -1 when the picker is absent
+	groupStart  int // first per-group row (under the group box's top border)
+}
+
 // bodyLines renders the home page as a flat line list plus the index of the
 // active line — an open confirmation, the account menu, or the cursor row of
 // whichever section holds focus. View windows the list so the active line
@@ -799,9 +807,10 @@ func (p *homePage) scrollBy(d int) {
 // right column the live panels (流量, then 路由); the group list spans the
 // full width below. Narrow terminals stack the boxes full-width instead.
 // The returned active line drives the follow-scroll.
-func (p homePage) bodyLines(status driver.Status) ([]string, int) {
+func (p homePage) bodyLines(status driver.Status) ([]string, int, homeAnchors) {
 	var lines []string
 	active := -1
+	var anchors homeAnchors
 	twoCol := p.width >= homeTwoColMin
 	const margin = 1 // keep the boxes off the app frame's border
 	full := p.width - margin*2
@@ -862,6 +871,7 @@ func (p homePage) bodyLines(status driver.Status) ([]string, int) {
 	if presetOff >= 0 {
 		presetStart = row2Start + 1 + presetOff
 	}
+	anchors.presetStart = presetStart
 	envW := full - 4
 	if twoCol {
 		envW = homeRoutingW - 4
@@ -908,6 +918,7 @@ func (p homePage) bodyLines(status driver.Status) ([]string, int) {
 		groupFooter = "Enter 跳群组页 · Tab 返回路由切换"
 	}
 	groupStart := len(lines) + 1 // under the box's top border
+	anchors.groupStart = groupStart
 	addZone(ui.TitledBoxFooter("各组当前节点", groupFooter, p.groupFocus, full, groupRows))
 
 	// Active-line priority: an open confirmation wins above; otherwise it
@@ -918,7 +929,73 @@ func (p homePage) bodyLines(status driver.Status) ([]string, int) {
 	if active < 0 && p.groupFocus && groupStart+p.groupCursor < len(lines) {
 		active = groupStart + p.groupCursor
 	}
-	return lines, active
+	return lines, active, anchors
+}
+
+// click maps a clicked body row onto the home page's two interactive zones:
+// the routing preset list and the per-group node list. Clicking only moves
+// the cursor and focus — activation stays on the keyboard (Enter opens the
+// preset's DSL preview, Enter on a group jumps to the groups page), like
+// every other page; the preset switch replaces a whole routing profile, so
+// a stray click must not arm it. In the two-column layout the preset rows
+// render right of the page seam, so a click in the 环境 box that shares the
+// row (cx left of the seam, the gutter cell included) must not land on them.
+//
+// row follows the same contract as every page's mapper: row 0 is the first
+// line inside the boxes, so the flat bodyLines index is the visible row
+// plus the renderer's window start plus one — windowStart, not p.scroll,
+// because the follow-scroll re-opens the window on the active line without
+// persisting it (View is a value receiver). The anchors come from the same
+// bodyLines pass the renderer makes, so the mapping cannot drift from it.
+func (p *homePage) click(row, cx int, status driver.Status) {
+	if row < 0 {
+		return
+	}
+	lines, active, a := p.bodyLines(status)
+	h := p.height
+	if h < 1 {
+		h = 1
+	}
+	abs := row + p.windowStart(len(lines), active, h) + 1
+	if abs >= a.groupStart && abs < a.groupStart+len(p.groups) {
+		p.groupFocus = true
+		p.groupCursor = abs - a.groupStart
+		return
+	}
+	if a.presetStart < 0 || abs < a.presetStart || abs >= a.presetStart+len(p.presets) {
+		return
+	}
+	if p.width >= homeTwoColMin && cx <= homeRoutingW {
+		return
+	}
+	p.groupFocus = false
+	p.presetCursor = abs - a.presetStart
+}
+
+// windowStart is the flat bodyLines index the renderer's window opens on:
+// p.scroll, pulled to keep the active line visible while follow is armed,
+// then clamped to the content. View renders lines[start:start+h] and click
+// maps screen rows back through the same value. View is a value receiver,
+// so the follow adjustment never persists — deriving the window in one
+// place is what keeps the click mapper mirrored on the renderer instead of
+// assuming the window equals p.scroll.
+func (p homePage) windowStart(lineCount, active, h int) int {
+	start := p.scroll
+	if p.follow && active >= 0 {
+		if active < start {
+			start = active
+		}
+		if active >= start+h {
+			start = active - h + 1
+		}
+	}
+	if start > lineCount-h {
+		start = lineCount - h
+	}
+	if start < 0 {
+		start = 0
+	}
+	return start
 }
 
 // proxyRows is the 代理 zone's content: the on/off badge (its `o` key rides
@@ -1047,28 +1124,15 @@ func (p homePage) routingLines(w int) (body []string, presetStart int) {
 }
 
 func (p homePage) View(status driver.Status) string {
-	lines, active := p.bodyLines(status)
+	lines, active, _ := p.bodyLines(status)
 	h := p.height
 	if h < 1 {
 		h = 1
 	}
-	if p.follow && active >= 0 {
-		if active < p.scroll {
-			p.scroll = active
-		}
-		if active >= p.scroll+h {
-			p.scroll = active - h + 1
-		}
-	}
-	if p.scroll > len(lines)-h {
-		p.scroll = len(lines) - h
-	}
-	if p.scroll < 0 {
-		p.scroll = 0
-	}
-	end := p.scroll + h
+	start := p.windowStart(len(lines), active, h)
+	end := start + h
 	if end > len(lines) {
 		end = len(lines)
 	}
-	return strings.Join(lines[p.scroll:end], "\n")
+	return strings.Join(lines[start:end], "\n")
 }

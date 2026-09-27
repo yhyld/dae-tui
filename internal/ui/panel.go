@@ -79,8 +79,9 @@ func titledBox(title, right, footer string, focused bool, w int, lines []string)
 
 // PaneSpec describes one pane of a master/detail page for PaneRow: a box
 // W cells wide (borders included) whose content the page has already
-// windowed; H is the box's outer height (0 sizes the box to its content,
-// pairing it only with the other side's height).
+// windowed; H is the box's outer height (0 pairs with the other side's
+// height; when neither side pins one, the taller side's content sizes the
+// row, so both boxes share their borders).
 type PaneSpec struct {
 	Title   string
 	Lines   []string
@@ -101,8 +102,17 @@ type PaneSpec struct {
 // content.
 func renderPane(s PaneSpec, h int) []string {
 	lines := s.Lines
-	if h > 0 && len(lines) > h-2 {
-		lines = lines[:h-2]
+	if h > 0 {
+		if h < 2 {
+			// A box is borders plus content; h==1 would slice lines[:-1]
+			// and panic. Today every caller passes h >= 2 (minTermH keeps
+			// pages well above it), but titledBox already guards w < 12 —
+			// keep the two axes symmetric.
+			h = 2
+		}
+		if len(lines) > h-2 {
+			lines = lines[:h-2]
+		}
 	}
 	n := len(lines)
 	if h > 0 && h-2 > n {
@@ -114,11 +124,19 @@ func renderPane(s PaneSpec, h int) []string {
 }
 
 // PaneRow builds a page's master/detail pair: both sides padded to the
-// same content height, wrapped in TitledBoxes and joined with a one-space
-// gutter — the same grid language as the home page's paired zones, so the
-// two boxes always share their top and bottom borders.
+// same height so their borders align, wrapped in TitledBoxes and joined
+// with a one-space gutter — the same grid language as the home page's
+// paired zones, so the two boxes always share their top and bottom
+// borders. When neither side pins H the taller side's content sizes the
+// row: padding the short side afterwards (JoinBoxes' blank rows) would
+// leave its bottom edge floating above its partner's, and a zone grid
+// whose boxes don't close on the same line reads as broken layout — the
+// dead space belongs inside the box.
 func PaneRow(left, right PaneSpec) []string {
 	h := max(left.H, right.H)
+	if h <= 0 {
+		h = max(len(left.Lines), len(right.Lines)) + 2 // borders included
+	}
 	return JoinBoxes(renderPane(left, h), renderPane(right, h))
 }
 

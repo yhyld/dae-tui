@@ -132,6 +132,10 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
 - **账户**：`updatePassword(currentPassword, newPassword)` 返回新 token 且旧 token 随即
   失效；驱动必须把新 token 和新密码都落盘（静默续期重放的是保存的密码）。daed 没有 logout
   mutation，`Logout` 只清本地会话（opts + client token）。
+- **克隆配置**：`CreateProfile` 的 config 分支用 `createConfig(name)` **返回的 id**
+  绑定随后的字段更新（mCreateConfig 本来就选了 `{ id }`）——总共两次请求（create + 一次
+  `updateConfigGlobal`）。别改回"创建后 ListSelections 按名字反查 id"：同名未选中配置存在
+  时会静默绑错对象，且多一次全量拉取。返回 id 为空时驱动直接报错，不要猜。
 
 ## TUI 约定
 
@@ -192,7 +196,17 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   1 格左边距；`tabClick` 按渲染宽度算
   span），点左栏行选中（外框 1 行 + 页头盒 3 行 + 盒子上边框 1 行，`row = y-5`；各页
   `leftClick` 复算 `leftLines` 的窗口偏移），点外框底边框任意位置打开帮助浮窗（呼出键
-  `? 帮助` 固定在该边框右端且**不参与截断**，页签不要放帮助标识）。`anyModal()` 时鼠标全部忽略——弹窗期间误点比不点更糟。
+  `? 帮助` 固定在该边框右端且**不参与截断**，页签不要放帮助标识）。右栏行点击只有
+  群组页与订阅页有（`rightClick` 同构：扣信息卡 topH 与过滤提示行再映射窗口，
+  **且必须带 `d >= rowsH` 上界守卫**——盒底边框行和盒外行（toast 行）是 no-op，
+  长列表下少了它会把光标移到窗口外的隐藏行；节点页右栏是静态详情无光标，本来就不需要）。
+  首页 `click` 映射两个交互区——组行与路由预设行，锚点由 `bodyLines` 随渲染返回
+  （`homeAnchors`），click 复用同一份数学不重推；首页扁平行 f 渲染在 `y=4+f-窗口起点`，
+  而 row 0 是盒内第一行，所以 **flat = row + 窗口起点 + 1，窗口起点必须走
+  `homePage.windowStart`（View 与 click 共用的那个）**——`View` 是值接收者，follow
+  调整从不持久化，直接拿 `p.scroll` 会在首页放不下、键盘导航滚过视图后整体错行；
+  预设行**只移光标不触发确认**（切换会整替路由 DSL，误点不能直接武装），twoCol 时
+  预设行右于页缝、缝左（环境盒）与缝本身的点击不算。`anyModal()` 时鼠标全部忽略——弹窗期间误点比不点更糟。
   鼠标 handler 是**值接收者**（与 `handleKey` 一致），别改成指针接收者，否则
   `tea.Model` 的动态类型在键盘/鼠标两条路径上不一致。
 - 每个内容页都是**左列表 + 右详情**：左栏 `j/k` 移动，`Tab/l/Enter` 把焦点切到右栏，
@@ -213,6 +227,11 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
 - 所有 IO 走 `tea.Cmd`（`msgs.go` 的 `withCtx`/`withCtxT`，默认 12s 超时），
   **`Update` 永不阻塞**。mutation 成功后由同一个 cmd 顺带重新拉列表，返回
   `groupsMsg`/`subsMsg`/`selectionsMsg` 等。
+- **mutation 失败路径必须让页面的 `busy` 有着落**：成功走列表消息（handler 清零
+  `busy`），失败走 `opDoneMsg`（只有 toast，没有页面收尾）——所以会置 `busy` 的
+  mutation cmd（subs/nodes 页）失败返回时必须带 `opDoneMsg.Idle`（`busySubs`/
+  `busyNodes`），根模型按它清标志。漏一个字段，页头"处理中"就转到重启（没有周期性
+  重拉能救它）。新增 mutation 时照此办理；`groups` 页没有 busy 字段，不受此约束。
 - 改节点/订阅用**原地编辑**（`e`，`tagNode`/`updateNode`、`tagSubscription`/
   `updateSubscriptionLink`）：ID 不变，群组挂载才不丢。删除 + 重新导入看起来等价，
   实际会静默断掉 `groupAddNodes`/`groupAddSubscriptions` 的 ID 绑定——别为省一个表单
@@ -280,15 +299,20 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
 - **OSC 52 剪贴板**（`clip.go`）：`osc52CopyCmd` 只在 stdout 是字符设备时写转义序列
   （测试/管道环境下返回 `clipboardMsg{OK:false}`，根模型转 toast）。订阅/手动节点/配置页
   的 `y` 键。没有引入任何剪贴板依赖。
-- **群组页多选**：`space` 按**节点 ID**标记（`marked map[string]bool`），`t` 只测已标记、
-  `x` 批量移除已标记的**直接挂载**节点（订阅贡献的只能随订阅移除，会给 toast 说明）、
-  选择器内 `Enter` 批量添加。`markedIDs()/markedDirectNodes()` 必须去重——同一节点可以
-  同时出现在订阅区和直接区两行。换组清空标记（`collapseSections`，只在换组时调用——
-  右栏常驻后 esc 离开右栏不再收起分区/清标记，否则等于当着用户的面丢数据）。
+- **群组页多选**：`space` 按**节点 ID**标记——**两张 map 各管一种语义**：详情区
+  `marked`（`t` 只测已标记、`x` 批量移除已标记的**直接挂载**节点，订阅贡献的只能随订阅
+  移除并给 toast 说明）与 `n` 选择器 `pickMarked`（`Enter` 批量添加）。曾经共用一张
+  map：详情区勾的要移除节点会被选择器当添加目标发去 `groupAddNodes`，且选择器 esc 会把
+  待移除标记一并清掉——**新增"待选集合"一律新建 map，不要复用这两者**。
+  `markedIDs()/markedDirectNodes()` 必须去重——同一节点可以同时出现在订阅区和直接区两行。
+  换组清空详情标记（`collapseSections`，只在换组时调用——右栏常驻后 esc 离开右栏不再收起
+  分区/清标记，否则等于当着用户的面丢数据）。
 - **首页分区（btop 式网格盒子）**：整页是带标题的圆角盒子（`ui.TitledBox`，标题嵌在
   上边框、聚焦时点亮标题+边框），按严格网格排布：**全页唯一竖缝**（左列 = `homeRoutingW`，
   行行相同）、**同行盒子等高**（`ui.PaneRow` 把短侧内容补空行到等高再包框，边框上下
-  对齐、死区留在盒内）、盒子行间贴合无空行、盒内内容统一前导 1 格（与徽章文字
+  对齐、死区留在盒内——两侧 `PaneSpec.H` 都不钉时它按对侧内容高度配对，**包框后补白行
+  不算等高**，那会让短盒底边浮在对侧边框上方；`TestPaneRowContentSized` 与
+  `TestHomePairedBoxesShareBorders` 兜底）、盒子行间贴合无空行、盒内内容统一前导 1 格（与徽章文字
   基线一致，`routing` 续行标签对齐 `config` 列）。宽 ≥96 列（`homeTwoColMin`）
   两盒一行：`代理|流量` → `环境|路由`（左列=静态状态，右列=动态与操作），`各组
   当前节点`通栏；窄终端全宽堆叠（顺序 代理→流量→路由→环境→组）。新增分区=建
@@ -349,6 +373,9 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
 
 ## 测试约定
 
+- **CI**（`.github/workflows/ci.yml`）：push/PR 跑 `go build ./...` + `go vet ./...` +
+  `go test ./...`（Go 版本取 go.mod）。改任何东西前先本地过这三样；bubbletea v1.3
+  `ReleaseTerminal` 关鼠标上报那类回归就是靠 CI 里的无头渲染冒烟兜底的。
 - driver 层用 `httptest.Server` mock GraphQL，覆盖 auth 流程、access-denied 自动重试、
   分页拉全、mutation 请求体构造、String 型 totals 解析。
 - app 层用 `stubDriver`（内嵌 `driver.Driver` 接口以便只覆盖需要的方法）喂罐头数据，

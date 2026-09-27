@@ -127,7 +127,23 @@ type ifacesMsg struct {
 type opDoneMsg struct {
 	Op  string // human label for the toast
 	Err error
+	// Idle names the page whose busy flag this completion clears. A
+	// mutation's failure path ends here instead of in the refreshed list
+	// message its success path returns, and no periodic re-poll exists to
+	// rescue the flag — without this the page would spin 处理中 until its
+	// next successful mutation. Success paths leave it busyNone: their list
+	// message clears the flag through the page's own handler.
+	Idle busyOwner
 }
+
+// busyOwner names the page a completed mutation was running on.
+type busyOwner int
+
+const (
+	busyNone busyOwner = iota
+	busySubs
+	busyNodes
+)
 
 // --- commands ---
 
@@ -217,11 +233,14 @@ func nodeMutateCmd(d driver.Driver, nm nodeMutation, label string) tea.Cmd {
 		if nm.kind == 0 {
 			report, err := d.ImportNodes(ctx, nm.links, nm.tag)
 			if err != nil {
-				return opDoneMsg{Op: label, Err: err}
+				return opDoneMsg{Op: label, Err: err, Idle: busyNodes}
 			}
 			nodes, lerr := d.ListManualNodes(ctx)
 			if lerr != nil {
-				return opDoneMsg{Op: label, Err: lerr}
+				// The import itself landed; only the follow-up list failed.
+				// Report it through the import message so the per-link
+				// outcomes still reach the detail pane.
+				return importDoneMsg{Results: report, Err: lerr}
 			}
 			return importDoneMsg{Results: report, Nodes: nodes}
 		}
@@ -237,15 +256,15 @@ func nodeMutateCmd(d driver.Driver, nm nodeMutation, label string) tea.Cmd {
 			}
 		}
 		if err != nil {
-			return opDoneMsg{Op: label, Err: err}
+			return opDoneMsg{Op: label, Err: err, Idle: busyNodes}
 		}
 		nodes, lerr := d.ListManualNodes(ctx)
 		if lerr != nil {
-			return opDoneMsg{Op: label, Err: lerr}
+			return opDoneMsg{Op: label, Err: lerr, Idle: busyNodes}
 		}
 		groups, gerr := d.ListGroups(ctx)
 		if gerr != nil {
-			return opDoneMsg{Op: label, Err: gerr}
+			return opDoneMsg{Op: label, Err: gerr, Idle: busyNodes}
 		}
 		return nodesChangedMsg{Nodes: nodes, Groups: groups}
 	})
@@ -426,11 +445,11 @@ func subMutateCmd(d driver.Driver, m subMutation, label string) tea.Cmd {
 			}
 		}
 		if err != nil {
-			return opDoneMsg{Op: label, Err: err}
+			return opDoneMsg{Op: label, Err: err, Idle: busySubs}
 		}
 		subs, lerr := d.ListSubscriptions(ctx)
 		if lerr != nil {
-			return opDoneMsg{Op: label, Err: lerr}
+			return opDoneMsg{Op: label, Err: lerr, Idle: busySubs}
 		}
 		return subsMsg{Subs: subs}
 	})

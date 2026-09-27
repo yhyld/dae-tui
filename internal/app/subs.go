@@ -85,12 +85,14 @@ func (p *subsPage) setSize(leftW, rightW, h int) {
 }
 
 func (p *subsPage) handleSubs(subs []driver.Subscription, err error) {
+	// Any arrival — a plain refresh or a mutation's follow-up — ends the
+	// in-flight mutation this page last started.
+	p.busy = false
 	if err != nil {
 		p.err = err
 		return
 	}
 	p.err = nil
-	p.busy = false
 	p.subs = subs
 	// Keep the per-subscription node caches: editing a tag or a cron
 	// expression reloads this list too, and dropping every entry would force
@@ -379,7 +381,11 @@ func (p *subsPage) cronKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			return textinput.Blink
 		}
 		return nil
-	case " ", "j", "k": // bubbletea reports the space key as " ", not "space"
+	case " ": // bubbletea reports the space key as " ", not "space"
+		// Only space toggles: j/k are navigation muscle memory, and letting
+		// them flip the switch silently rewrote the cron's enable state on
+		// the way to another row. On the toggle row they are a no-op; on the
+		// expression row they fall through to the text input below.
 		if p.ifld == 1 {
 			p.cronOn = !p.cronOn
 			return nil
@@ -725,6 +731,41 @@ func (p *subsPage) leftClick(row int, d driver.Driver) tea.Cmd {
 	p.sel = i
 	p.nc = 0
 	return p.ensureNodes(d)
+}
+
+// rightClick puts the node cursor on the clicked row of the bottom box.
+// Same contract as groupsPage.rightClick: row counts the column's content
+// rows from the info box's first line, so the info box including both
+// borders (topH), the bottom box's top border and the filter prompt must be
+// subtracted before mapping through the window bodyLines renders with. The
+// click must also land inside that window: the bottom border and the rows
+// below the box are no-ops, or a list longer than the box would move the
+// cursor onto a node the window never rendered. The info box is
+// display-only: clicks there do nothing.
+func (p *subsPage) rightClick(row int) {
+	if p.mode != 0 {
+		return
+	}
+	topH, inner := stackedDetail(len(p.infoLines()), p.height)
+	head := 0
+	if p.nodeView.prompt() != "" {
+		head = 1
+	}
+	d := row - topH - head // node row within the bottom box's window
+	rowsH := max0(inner - head)
+	if d < 0 || d >= rowsH {
+		return // info box, box edges, prompt line or dead space below
+	}
+	nodes := p.visibleNodes()
+	start := 0
+	if p.nc >= rowsH {
+		start = p.nc - rowsH + 1
+	}
+	i := start + d
+	if i >= 0 && i < len(nodes) {
+		p.focus = 1
+		p.nc = i
+	}
 }
 
 // infoLines is the right column's top box: the subscription's metadata,

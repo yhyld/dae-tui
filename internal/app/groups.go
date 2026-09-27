@@ -41,10 +41,15 @@ type groupsPage struct {
 	rows []trow
 	rc   int // right cursor
 
-	// marked holds the node IDs ticked with space, for batch test / remove /
-	// attach. Marks live across filtering and scrolling but are dropped when
-	// the group changes or the detail collapses.
+	// marked holds the node IDs ticked with space in the detail pane, for
+	// batch test / remove. Marks live across filtering and scrolling but are
+	// dropped when the group changes or the detail collapses.
 	marked map[string]bool
+	// pickMarked is the same idea for the `n` add-node picker's candidates.
+	// It is deliberately a separate map: sharing one made detail-pane ticks
+	// (meant for removal) ride into the picker and get attached as
+	// additions, and closing the picker with esc wiped the pending removals.
+	pickMarked map[string]bool
 
 	lat map[string]driver.Latency
 
@@ -109,14 +114,15 @@ func newGroupsPage(caps driver.Caps) groupsPage {
 	ti.CharLimit = 64
 	ti.Width = 32
 	return groupsPage{
-		lat:      map[string]driver.Latency{},
-		baseline: map[string]time.Time{},
-		subOpen:  map[string]bool{},
-		marked:   map[string]bool{},
-		refs:     map[string][]string{},
-		input:    ti,
-		nodeView: newNodeView(),
-		caps:     caps,
+		lat:        map[string]driver.Latency{},
+		baseline:   map[string]time.Time{},
+		subOpen:    map[string]bool{},
+		marked:     map[string]bool{},
+		pickMarked: map[string]bool{},
+		refs:       map[string][]string{},
+		input:      ti,
+		nodeView:   newNodeView(),
+		caps:       caps,
 	}
 }
 
@@ -634,6 +640,10 @@ func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 				p.candManual = nil
 				p.candSubs = nil
 				p.candBusy = true
+				// The picker's ticks are its own: opening it must neither
+				// inherit the detail pane's pending removals nor disturb
+				// them (esc used to wipe both).
+				p.pickMarked = map[string]bool{}
 				return loadAttachCandidatesCmd(d)
 			}
 		case "c": // create group
@@ -740,185 +750,14 @@ func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	return nil
 }
 
-func (p *groupsPage) pickerKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
-	if p.mode == pickDetach {
-		switch msg.String() {
-		case "y":
-			r := p.cur()
-			p.mode = pickNone
-			if r == nil || r.gi >= len(p.groups) || r.si >= len(p.groups[r.gi].Subscriptions) {
-				return nil
-			}
-			sub := p.groups[r.gi].Subscriptions[r.si]
-			return groupMutateCmd(d, groupMutation{kind: 1, groupID: p.groups[r.gi].ID,
-				ids: []string{sub.SubscriptionID}}, "移除组内订阅 "+sub.Tag)
-		case "n", "esc", "enter":
-			p.mode = pickNone
-		}
-		return nil
-	}
-
-	if p.mode == pickDeleteGroup {
-		switch msg.String() {
-		case "y":
-			g := p.curGroup()
-			p.mode = pickNone
-			if g == nil {
-				return nil
-			}
-			return groupMutateCmd(d, groupMutation{kind: 4, groupID: g.ID}, "删除群组 "+g.Name)
-		case "n", "esc", "enter":
-			p.mode = pickNone
-		}
-		return nil
-	}
-
-	if p.mode == pickRemoveNode {
-		switch msg.String() {
-		case "y":
-			r := p.cur()
-			p.mode = pickNone
-			if r == nil || r.kind != rowNode {
-				return nil
-			}
-			return groupMutateCmd(d, groupMutation{kind: 7, groupID: p.groups[r.gi].ID,
-				ids: []string{r.node.ID}}, "移除组内节点 "+ui.SpaceAfterFlag(r.node.Name))
-		case "n", "esc", "enter":
-			p.mode = pickNone
-		}
-		return nil
-	}
-
-	if p.mode == pickRemoveNodes {
-		switch msg.String() {
-		case "y":
-			nodes := p.markedDirectNodes()
-			p.mode = pickNone
-			p.marked = map[string]bool{}
-			if len(nodes) == 0 {
-				return nil
-			}
-			ids := make([]string, len(nodes))
-			for i, n := range nodes {
-				ids[i] = n.ID
-			}
-			return groupMutateCmd(d, groupMutation{kind: 7, groupID: p.groups[p.gi].ID, ids: ids},
-				"移除组内 "+strconv.Itoa(len(ids))+" 个节点")
-		case "n", "esc", "enter":
-			p.mode = pickNone
-		}
-		return nil
-	}
-
-	if p.mode == inputCreate || p.mode == inputRename {
-		switch msg.String() {
-		case "esc":
-			p.mode = pickNone
-			p.input.Blur()
-			return nil
-		case "enter":
-			name := strings.TrimSpace(p.input.Value())
-			isCreate := p.mode == inputCreate
-			p.mode = pickNone
-			p.input.Blur()
-			if name == "" {
-				return nil
-			}
-			if isCreate {
-				return groupMutateCmd(d, groupMutation{kind: 3, name: name, policy: "min_moving_avg"},
-					"创建群组 "+name)
-			}
-			g := p.curGroup()
-			if g == nil {
-				return nil
-			}
-			return groupMutateCmd(d, groupMutation{kind: 5, groupID: g.ID, name: name},
-				"重命名群组 "+g.Name+" → "+name)
-		}
-		var cmd tea.Cmd
-		p.input, cmd = p.input.Update(msg)
-		return cmd
-	}
-
-	var n int
-	switch p.mode {
-	case pickSub:
-		if g := p.curGroup(); g != nil {
-			n = len(p.pickableSubs(g))
-		}
-	case pickNode:
-		n = len(p.visibleCandidates())
-	case pickPolicy:
-		n = len(policyChoices)
-	}
-	switch msg.String() {
-	case "esc":
-		p.mode = pickNone
-		p.candBusy = false
-		p.marked = map[string]bool{}
-	case " ":
-		// Space ticks a picker candidate for a batch attach.
-		if p.mode == pickNode {
-			rows := p.visibleCandidates()
-			if p.pickCursor < len(rows) {
-				id := rows[p.pickCursor].node.ID
-				if p.marked[id] {
-					delete(p.marked, id)
-				} else {
-					p.marked[id] = true
-				}
-			}
-		}
-	case "j", "down":
-		if p.pickCursor < n-1 {
-			p.pickCursor++
-		}
-	case "k", "up":
-		if p.pickCursor > 0 {
-			p.pickCursor--
-		}
-	case "enter":
-		g := p.curGroup()
-		if g == nil || p.pickCursor >= n {
-			return nil
-		}
-		switch p.mode {
-		case pickSub:
-			sub := p.pickableSubs(g)[p.pickCursor]
-			p.mode = pickNone
-			return groupMutateCmd(d, groupMutation{kind: 0, groupID: g.ID, ids: []string{sub.ID}},
-				"添加订阅 "+sub.Tag+" 到组 "+g.Name)
-		case pickNode:
-			rows := p.visibleCandidates()
-			if p.pickCursor >= len(rows) {
-				p.mode = pickNone
-				return nil
-			}
-			// Ticked candidates are attached in one mutation; with no ticks
-			// Enter adds the row under the cursor, as before.
-			ids := p.markedCandidateIDs(rows)
-			if len(ids) == 0 {
-				ids = []string{rows[p.pickCursor].node.ID}
-			}
-			p.mode = pickNone
-			p.marked = map[string]bool{}
-			return groupMutateCmd(d, groupMutation{kind: 2, groupID: g.ID, ids: ids},
-				"添加 "+strconv.Itoa(len(ids))+" 个节点到组 "+g.Name)
-		case pickPolicy:
-			choice := policyChoices[p.pickCursor]
-			p.mode = pickNone
-			return groupMutateCmd(d, groupMutation{kind: 6, groupID: g.ID, policy: choice.name},
-				g.Name+" 策略改为 "+choice.label)
-		}
-	}
-	return nil
-}
+// pickerKey routes the current picker/modal's keys; the per-mode handlers
+// live in groups_picker.go.
 
 // markedCandidateIDs lists the ticked picker candidates in display order.
 func (p *groupsPage) markedCandidateIDs(rows []candidateRow) []string {
 	var out []string
 	for _, r := range rows {
-		if p.marked[r.node.ID] {
+		if p.pickMarked[r.node.ID] {
 			out = append(out, r.node.ID)
 		}
 	}
@@ -1243,7 +1082,7 @@ func (p groupsPage) candidateLines(inner int) []string {
 	}
 	lines[0] += p.nodeView.countTitle(len(rows), len(p.candidateRows())) +
 		p.nodeView.sortTitle()
-	if n := len(p.marked); n > 0 {
+	if n := len(p.pickMarked); n > 0 {
 		lines[0] += ui.OKStyle.Render(fmt.Sprintf("  已选 %d（Enter 全部添加）", n))
 	}
 	rowsH := max0(inner - len(lines))
@@ -1258,7 +1097,7 @@ func (p groupsPage) candidateLines(inner int) []string {
 			mark, style = "❯ ", ui.CursorStyle
 		}
 		tick := ""
-		if p.marked[r.node.ID] {
+		if p.pickMarked[r.node.ID] {
 			tick = ui.OKStyle.Render(" ✓")
 		}
 		src := ""

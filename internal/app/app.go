@@ -227,7 +227,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if err := m.cfg.ClearSession(m.cfgPath); err != nil {
 			m.showToast("✗ 清除本机凭据失败: " + shortErr(err))
 		}
-		m.drv.Logout(context.Background())
+		if err := m.drv.Logout(context.Background()); err != nil {
+			m.showToast("✗ 退出登录: " + shortErr(err))
+		}
 		m.home.user = ""
 		m.phase = phaseLogin
 		m.login = newLoginForm(false)
@@ -281,7 +283,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case importDoneMsg:
 		m.nodes.handleImport(msg)
-		m.showToast(m.nodes.importToast())
+		// A follow-up list failure arrives here too (the import itself
+		// landed); its error goes to the pane, not the toast line, which
+		// would otherwise summarize a batch that never completed.
+		if msg.Err == nil {
+			m.showToast(m.nodes.importToast())
+		}
 		return m, nil
 
 	case nodesChangedMsg:
@@ -344,6 +351,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showToast("✗ " + msg.Op + ": " + shortErr(msg.Err))
 		} else {
 			m.showToast("✓ " + msg.Op)
+		}
+		// A failed mutation terminates here instead of in the refreshed
+		// list message its success path returns; the page's busy flag (and
+		// the 处理中 indicator riding on it) has no other clearing point.
+		switch msg.Idle {
+		case busySubs:
+			m.subs.busy = false
+		case busyNodes:
+			m.nodes.busy = false
 		}
 		return m, nil
 
@@ -613,8 +629,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// are full of digits) must reach the modal, not the global router.
 	if !m.anyModal() {
 		switch msg.String() {
-		case "ctrl+c":
-			return m, tea.Quit
 		case "q":
 			return m, tea.Quit
 		case "A":
@@ -647,8 +661,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "r":
 			return m, m.forceRefresh()
 		}
-	} else if msg.String() == "ctrl+c" {
-		return m, tea.Quit
 	}
 
 	var cmd tea.Cmd
@@ -789,6 +801,8 @@ func (m Model) click(x, y int) (tea.Model, tea.Cmd) {
 	}
 	row := y - 5
 	switch m.page {
+	case pageHome:
+		m.home.click(row, cx, m.status)
 	case pageTree:
 		if cx <= m.groups.leftW {
 			m.groups.leftClick(row)
@@ -801,6 +815,7 @@ func (m Model) click(x, y int) (tea.Model, tea.Cmd) {
 			// right column shows the nodes without a separate expand step.
 			return m, m.subs.leftClick(row, m.drv)
 		}
+		m.subs.rightClick(row)
 	case pageNodes:
 		if cx <= m.nodes.leftW {
 			m.nodes.leftClick(row)

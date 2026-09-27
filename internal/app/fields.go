@@ -117,18 +117,26 @@ func fieldLabel(f driver.ConfigField) string {
 	return f.Name
 }
 
-// orderedFields returns the config's editable fields with the commonly used
-// ones first, preserving backend order inside each group.
-func orderedFields(fields []driver.ConfigField) []driver.ConfigField {
-	rank := map[string]int{}
+// fieldRank maps preferredFieldOrder to positions, built once at init:
+// orderedFields runs on every render frame (the config detail pane and the
+// field picker both call it), and rebuilding a 14-entry map each time is
+// pure waste on the hottest path in the page.
+var fieldRank = func() map[string]int {
+	rank := make(map[string]int, len(preferredFieldOrder))
 	for i, k := range preferredFieldOrder {
 		rank[k] = i
 	}
+	return rank
+}()
+
+// orderedFields returns the config's editable fields with the commonly used
+// ones first, preserving backend order inside each group.
+func orderedFields(fields []driver.ConfigField) []driver.ConfigField {
 	out := append([]driver.ConfigField(nil), fields...)
 	sort.SliceStable(out, func(i, j int) bool {
 		a, b := out[i], out[j]
-		ra, oka := rank[a.Name]
-		rb, okb := rank[b.Name]
+		ra, oka := fieldRank[a.Name]
+		rb, okb := fieldRank[b.Name]
 		switch {
 		case oka && okb:
 			return ra < rb

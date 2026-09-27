@@ -3869,3 +3869,520 @@ func TestHomeTrafficFootnotes(t *testing.T) {
 		t.Fatalf("API latency missing:\n%s", v2)
 	}
 }
+
+// Clicking a home-page group row positions the group cursor and focuses the
+// list; clicking a preset row (right of the two-column seam) moves the
+// preset cursor and returns focus to the routing picker. Activation stays on
+// the keyboard, and a click left of the seam must not land on a preset row
+// even though the 环境 box shares the line.
+func TestHomeClickSelectsGroupAndPreset(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("1"))
+	mm := m.(Model)
+	if mm.page != pageHome {
+		t.Fatalf("page = %d", mm.page)
+	}
+	if len(mm.home.groups) < 2 {
+		t.Fatalf("fixture expects 2 groups, got %d", len(mm.home.groups))
+	}
+	_, _, a := mm.home.bodyLines(mm.status)
+	// The second group row: flat groupStart+1 renders at screen
+	// y = 4 + flat - windowStart; the fixture fits, so the window opens on
+	// p.scroll.
+	y := 4 + a.groupStart + 1 - mm.home.scroll
+	m2, _ := m.Update(mouseClick(10, y))
+	mm = m2.(Model)
+	if !mm.home.groupFocus || mm.home.groupCursor != 1 {
+		t.Fatalf("group click: focus=%v cursor=%d, want true/1", mm.home.groupFocus, mm.home.groupCursor)
+	}
+	// The third preset row, right of the two-column seam.
+	_, _, a = mm.home.bodyLines(mm.status)
+	if a.presetStart < 0 {
+		t.Fatal("fixture expects the preset picker to render")
+	}
+	py := 4 + a.presetStart + 2 - mm.home.scroll
+	m3, _ := m2.Update(mouseClick(homeRoutingW+4, py))
+	mm = m3.(Model)
+	if mm.home.groupFocus {
+		t.Fatal("preset click should return focus to the routing picker")
+	}
+	if mm.home.presetCursor != 2 {
+		t.Fatalf("presetCursor = %d, want 2", mm.home.presetCursor)
+	}
+	// A click in the 环境 box (left of the seam) on the same line must not
+	// reach the preset list.
+	m4, _ := m3.Update(mouseClick(10, py))
+	mm = m4.(Model)
+	if mm.home.presetCursor != 2 {
+		t.Fatalf("env-box click moved the preset cursor to %d", mm.home.presetCursor)
+	}
+}
+
+// The subs page's right column gains a click mapping like the groups page:
+// a click on a node row moves the node cursor and focuses the pane, clicks
+// on the info box do nothing.
+func TestSubsRightClickMovesNodeCursor(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("3"))
+	mm := m.(Model)
+	if _, ok := mm.subs.subNodes["s1"]; !ok {
+		t.Fatal("fixture expects s1's nodes cached")
+	}
+	topH, _ := stackedDetail(len(mm.subs.infoLines()), mm.subs.height)
+	// The second node row of the bottom box.
+	y := 5 + topH + 1
+	m2, _ := m.Update(mouseClick(mm.subs.leftW+4, y))
+	mm = m2.(Model)
+	if mm.subs.focus != 1 || mm.subs.nc != 1 {
+		t.Fatalf("right click: focus=%d nc=%d, want 1/1", mm.subs.focus, mm.subs.nc)
+	}
+	// A click on the info box (display-only) must not move the cursor.
+	m3, _ := m2.Update(mouseClick(mm.subs.leftW+4, 5+1))
+	mm = m3.(Model)
+	if mm.subs.nc != 1 {
+		t.Fatalf("info-box click moved the node cursor to %d", mm.subs.nc)
+	}
+	// Dead space below the node list must not move it either.
+	m4, _ := m3.Update(mouseClick(mm.subs.leftW+4, 5+mm.subs.height-1))
+	mm = m4.(Model)
+	if mm.subs.nc != 1 {
+		t.Fatalf("below-list click moved the node cursor to %d", mm.subs.nc)
+	}
+}
+
+// Box edges are not rows: a click on the group box's top or bottom border
+// must not move any cursor (borders live one row outside every interactive
+// zone — the row contract's row -1 and the window's last row).
+func TestHomeClickBorderRowsAreNoOp(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("1"))
+	mm := m.(Model)
+	_, _, a := mm.home.bodyLines(mm.status)
+	// The group box's borders render at flat groupStart-1 (top) and
+	// groupStart+len(groups) (bottom); screen y = 4 + flat while the
+	// fixture fits the window.
+	for _, y := range []int{4 + a.groupStart - 1, 4 + a.groupStart + len(mm.home.groups)} {
+		before := mm.home
+		m2, _ := m.Update(mouseClick(10, y))
+		mm = m2.(Model)
+		if mm.home.groupFocus != before.groupFocus ||
+			mm.home.groupCursor != before.groupCursor ||
+			mm.home.presetCursor != before.presetCursor {
+			t.Fatalf("border click at y=%d moved a cursor: focus %v→%v group %d→%d preset %d→%d",
+				y, before.groupFocus, mm.home.groupFocus,
+				before.groupCursor, mm.home.groupCursor,
+				before.presetCursor, mm.home.presetCursor)
+		}
+	}
+}
+
+// The follow-scroll re-opens the render window on the active line without
+// persisting it (View is a value receiver), so the click mapper must derive
+// the window the same way View does: on a terminal too short for the whole
+// page, keyboard navigation scrolls the view and a click on a rendered group
+// row must still land on that row — not on the row p.scroll would name.
+func TestHomeClickUnderFollowScroll(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 22})
+	m, _ = m.Update(key("1"))
+	// Tab focuses the group list; j moves to the second group, which pulls
+	// the window down (p.scroll itself stays 0).
+	m, _ = m.Update(key("tab"))
+	m, _ = m.Update(key("j"))
+	mm := m.(Model)
+	if !mm.home.groupFocus || mm.home.groupCursor != 1 {
+		t.Fatalf("setup: focus=%v cursor=%d, want true/1", mm.home.groupFocus, mm.home.groupCursor)
+	}
+	if mm.home.scroll != 0 {
+		t.Fatalf("setup: p.scroll = %d, want 0 (the wheel never moved)", mm.home.scroll)
+	}
+	// Locate the group rows by their rendered text — the rows the user
+	// actually sees — instead of re-deriving the window math. The rows sit
+	// in fixture order under the group box's title border, and the window
+	// follows the cursor, so re-render before every click.
+	groupRowY := func(i int) int {
+		want := []string{"proxy", "direct"}[i]
+		lines := strings.Split(mm.home.View(mm.status), "\n")
+		for k, l := range lines {
+			if !strings.Contains(l, "各组当前节点") {
+				continue
+			}
+			if k+1+i >= len(lines) {
+				t.Fatalf("group row %d not rendered:\n%s", i, strings.Join(lines, "\n"))
+			}
+			if row := lines[k+1+i]; !strings.Contains(row, want) {
+				t.Fatalf("group row %d = %q, want it to name %q", i, row, want)
+			}
+			return 4 + k + 1 + i
+		}
+		t.Fatalf("group box not rendered:\n%s", strings.Join(lines, "\n"))
+		return -1
+	}
+	// Clicking the rendered first group row must select the first group.
+	// Mapping through p.scroll instead of the followed window would land on
+	// a preset row (or nowhere) and drop the focus.
+	m2, _ := m.Update(mouseClick(10, groupRowY(0)))
+	mm = m2.(Model)
+	if !mm.home.groupFocus || mm.home.groupCursor != 0 {
+		t.Fatalf("click on the rendered first group row: focus=%v cursor=%d, want true/0",
+			mm.home.groupFocus, mm.home.groupCursor)
+	}
+	// The mapping is stable while the window follows the cursor: j moves
+	// back to the second group (the window re-opens on it) and the same
+	// rendered row still selects the first group.
+	m3, _ := m2.Update(key("j"))
+	mm = m3.(Model)
+	if mm.home.groupCursor != 1 {
+		t.Fatalf("j should move back to the second group, cursor=%d", mm.home.groupCursor)
+	}
+	m4, _ := m3.Update(mouseClick(10, groupRowY(0)))
+	mm = m4.(Model)
+	if !mm.home.groupFocus || mm.home.groupCursor != 0 {
+		t.Fatalf("second click on the rendered first group row: focus=%v cursor=%d, want true/0",
+			mm.home.groupFocus, mm.home.groupCursor)
+	}
+}
+
+// A node list longer than the bottom box: clicks on the box's bottom border
+// and on the toast line below the page body must not move the cursor onto a
+// node outside the rendered window — the upper guard groups.rightClick has
+// and this mapper must share.
+func TestSubsRightClickLongListBordersAreNoOp(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("3"))
+	mm := m.(Model)
+	nodes := make([]driver.Node, 0, 30)
+	for i := range 30 {
+		nodes = append(nodes, driver.Node{ID: fmt.Sprintf("n%02d", i), Name: fmt.Sprintf("node-%02d", i)})
+	}
+	mm.subs.subNodes["s1"] = nodes
+	mm.subs.loading = ""
+	_, inner := stackedDetail(len(mm.subs.infoLines()), mm.subs.height)
+	if inner >= len(nodes) {
+		t.Fatalf("fixture too small to exercise the window: inner=%d nodes=%d", inner, len(nodes))
+	}
+	// The bottom box's bottom border and the toast line one row below it.
+	for _, y := range []int{5 + mm.subs.height - 2, 5 + mm.subs.height - 1} {
+		m2, _ := m.Update(mouseClick(mm.subs.leftW+4, y))
+		mm = m2.(Model)
+		if mm.subs.nc != 0 || mm.subs.focus != 0 {
+			t.Fatalf("click at y=%d moved the cursor onto a hidden node: nc=%d focus=%d",
+				y, mm.subs.nc, mm.subs.focus)
+		}
+	}
+}
+
+// The home page's zone grid pairs boxes row-wise: 代理|流量 and 环境|路由
+// must close on the same line. A pair whose boxes close on different lines
+// — the short one floating over blank rows below it — reads as broken
+// layout; the short side's dead space belongs inside its box (PaneRow
+// pairs at the taller side's content height when neither side pins H).
+func TestHomePairedBoxesShareBorders(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	m, _ = m.Update(key("1"))
+	mm := m.(Model)
+	if mm.home.width < homeTwoColMin {
+		t.Fatalf("fixture too narrow for the two-column grid: width=%d", mm.home.width)
+	}
+	body := mm.home.View(mm.status)
+	paired := 0
+	for _, l := range strings.Split(body, "\n") {
+		if strings.Count(l, "╰") == 2 {
+			paired++
+		}
+	}
+	if paired != 2 {
+		t.Fatalf("paired rows closing on one line = %d, want 2 (代理|流量 and 环境|路由):\n%s",
+			paired, body)
+	}
+}
+
+// --- regressions for state that outlived its modal or error path ---
+
+// failSubsDriver fails every subscription mutation. The stock stub makes all
+// mutations succeed, which left the failure path — and the busy flag it must
+// clear — with no test at all.
+type failSubsDriver struct{ stubDriver }
+
+func (failSubsDriver) UpdateSubscription(context.Context, string) error {
+	return errors.New("backend said no")
+}
+
+// A failed mutation used to leave the page's busy flag set: its cmd reports
+// through opDoneMsg, never the refreshed-list message whose handler clears
+// the flag, and nothing re-polls the list — so 处理中 spun until restart.
+func TestSubsMutationFailureClearsBusy(t *testing.T) {
+	m := newTestModelWith(t, failSubsDriver{})
+	m, _ = m.Update(key("3"))
+	m, cmd := m.Update(key("u"))
+	if cmd == nil {
+		t.Fatal("u should fire the subscription update")
+	}
+	if !m.(Model).subs.busy {
+		t.Fatal("u should mark the page busy while the mutation runs")
+	}
+	if v := m.View(); !strings.Contains(v, "处理中") {
+		t.Fatalf("busy page should show the indicator:\n%s", v)
+	}
+	msg, ok := firstMsgOf[opDoneMsg](execCmds(cmd))
+	if !ok {
+		t.Fatal("the failed mutation should report through opDoneMsg")
+	}
+	if msg.Err == nil {
+		t.Fatal("the driver override should have failed the mutation")
+	}
+	if msg.Idle != busySubs {
+		t.Fatalf("Idle = %v, want busySubs (the subs page owns this mutation)", msg.Idle)
+	}
+	m, _ = m.Update(msg)
+	if m.(Model).subs.busy {
+		t.Fatal("a failed mutation must clear busy")
+	}
+	if v := m.View(); strings.Contains(v, "处理中") {
+		t.Fatalf("indicator should be gone after the failure:\n%s", v)
+	}
+	if v := m.View(); !strings.Contains(v, "✗ 更新订阅") {
+		t.Fatalf("the failure should still toast:\n%s", v)
+	}
+}
+
+// overlapDriver lists a directly-attached group node (n2, HK-02) among the
+// manual nodes — what real daed does, and the one shape the stock stub
+// cannot express (its manual nodes share no ID with any group's).
+type overlapDriver struct{ stubDriver }
+
+func (overlapDriver) ListManualNodes(context.Context) ([]driver.Node, error) {
+	return []driver.Node{
+		{ID: "n2", Name: "HK-02", Protocol: "ss"},
+		{ID: "m1", Name: "自建-HK", Protocol: "vmess"},
+		{ID: "m2", Name: "自建-SG", Protocol: "trojan"},
+	}, nil
+}
+
+// One marked map used to serve three meanings (pending test / pending
+// removal / pending attach): a detail-pane tick rode into the add-node
+// picker and got attached as an addition, and closing the picker with esc
+// wiped the pending removals.
+func TestGroupsDetailTicksDoNotLeakIntoPicker(t *testing.T) {
+	m := newTestModelWith(t, overlapDriver{})
+	m, _ = m.Update(key("2"))
+	m, _ = m.Update(key("l"))     // focus the detail column
+	m, _ = m.Update(key("enter")) // open the subscription section
+	m, _ = m.Update(key("j"))     // 东京-01
+	m, _ = m.Update(key("j"))     // SG-03
+	m, _ = m.Update(key("j"))     // direct section header
+	m, _ = m.Update(key("enter")) // open it
+	m, _ = m.Update(key("j"))     // HK-02 (also an attach candidate here)
+	m, _ = m.Update(key("space"))
+	if v := m.View(); !strings.Contains(v, "已选 1") {
+		t.Fatalf("detail tick should count:\n%s", v)
+	}
+	m, _ = m.Update(key("tab")) // back to the group list (n lives there)
+	m, cmd := m.Update(key("n"))
+	if cmd == nil {
+		t.Fatal("n should load the attach candidates")
+	}
+	m, _ = m.Update(cmd())
+	// The picker opens clean: the detail tick is a pending removal, not a
+	// pending attach, so its count must not appear on the candidate list.
+	if v := m.View(); strings.Contains(v, "Enter 全部添加") {
+		t.Fatalf("picker inherited the detail ticks:\n%s", v)
+	}
+	m, _ = m.Update(key("j")) // cursor off HK-02 onto 自建-HK
+	lastAddNodeIDs = nil
+	m, cmd = m.Update(key("enter"))
+	if cmd == nil {
+		t.Fatal("enter should fire the attach")
+	}
+	if msg := cmd(); msg != nil {
+		m, _ = m.Update(msg)
+	}
+	if len(lastAddNodeIDs) != 1 || lastAddNodeIDs[0] != "m1" {
+		t.Fatalf("attach ids = %v, want [m1] (the row under the cursor)", lastAddNodeIDs)
+	}
+	// …and the reverse: a cancelled picker must not eat the pending
+	// removals either. Tick one more node, open the picker, esc out.
+	m, _ = m.Update(key("l"))
+	m, _ = m.Update(key("k")) // direct header
+	m, _ = m.Update(key("k")) // SG-03
+	m, _ = m.Update(key("k")) // 东京-01
+	m, _ = m.Update(key("space"))
+	m, _ = m.Update(key("tab"))
+	m, cmd = m.Update(key("n"))
+	if cmd == nil {
+		t.Fatal("n should reload the candidates")
+	}
+	m, _ = m.Update(cmd())
+	m, _ = m.Update(key("esc"))
+	if v := m.View(); !strings.Contains(v, "已选 2") {
+		t.Fatalf("esc from the picker wiped the detail ticks:\n%s", v)
+	}
+}
+
+// j/k are navigation muscle memory; on the cron toggle row they used to
+// flip the enable flag on the way past, and Enter then submitted the
+// silently-rewritten schedule.
+func TestCronToggleIgnoresNavigationKeys(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("3"))
+	m, _ = m.Update(key("c"))
+	m, _ = m.Update(key("tab")) // focus the enable toggle
+	if v := m.View(); !strings.Contains(v, "启用") || strings.Contains(v, "停用") {
+		t.Fatalf("toggle should start enabled:\n%s", v)
+	}
+	// Each press on its own: one j and one k cancel out, which would hide
+	// the bug behind a passing assertion.
+	m, _ = m.Update(key("j"))
+	if v := m.View(); !strings.Contains(v, "启用") || strings.Contains(v, "停用") {
+		t.Fatalf("j flipped the enable flag:\n%s", v)
+	}
+	m, _ = m.Update(key("k"))
+	if v := m.View(); !strings.Contains(v, "启用") || strings.Contains(v, "停用") {
+		t.Fatalf("k flipped the enable flag:\n%s", v)
+	}
+	// space still toggles — it is the documented key.
+	m, _ = m.Update(key("space"))
+	if v := m.View(); !strings.Contains(v, "停用") {
+		t.Fatalf("space should still toggle:\n%s", v)
+	}
+}
+
+// The node cursor indexes the filtered view, so a refresh must clamp it
+// against that; clamping against the raw list left it past the end (cur()
+// nil, j a dead key) until the filter was cleared.
+func TestNodesHandleNodesClampsCursorToVisible(t *testing.T) {
+	p := newNodesPage(driver.Caps{})
+	p.setSize(38, 60, 20)
+	nodes := []driver.Node{
+		{ID: "m1", Name: "alpha", Protocol: "vmess"},
+		{ID: "m2", Name: "beta", Protocol: "trojan"},
+		{ID: "m3", Name: "gamma", Protocol: "vmess"},
+	}
+	p.handleNodes(nodes, nil)
+	p.sel = 2
+	p.nodeView.applied = "alpha" // one row survives the filter
+	p.handleNodes(nodes, nil)
+	if p.sel != 0 {
+		t.Fatalf("sel = %d, want 0 (clamped to the filtered view)", p.sel)
+	}
+	if p.cur() == nil || p.cur().ID != "m1" {
+		t.Fatalf("cur() = %v, want m1", p.cur())
+	}
+}
+
+// rightClick walks the field rows bodyLines renders, but rightLines
+// prepends a 4-line banner when the last $EDITOR session was refused —
+// without charging for it, every click above the fold opened the wrong
+// field (or none).
+func TestConfigsRightClickCountsRejectionBanner(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("5"))
+	mm := m.(Model)
+	r := mm.configs.curRow()
+	if r == nil || r.section != "config" {
+		t.Fatalf("cursor should start in the config section, got %+v", r)
+	}
+	id := mm.configs.item(*r).ID
+	mm.configs.validateErr[id] = editRejection{Path: "/tmp/dae-tui-test.dns", Err: "line 1:24 mismatched input"}
+	m = mm
+	if v := m.View(); !strings.Contains(v, "校验未通过") {
+		t.Fatalf("banner should render:\n%s", v)
+	}
+	// Screen row 5 (y=10) is the first field row: 4 banner lines + title
+	// above it. It must open logLevel, the first editable field.
+	m, cmd := m.Update(mouseClick(90, 10))
+	if cmd == nil {
+		t.Fatal("clicking the first field row should open its editor")
+	}
+	if msg := cmd(); msg != nil {
+		m, _ = m.Update(msg)
+	}
+	if got := m.(Model).configs.editField.Name; got != "logLevel" {
+		t.Fatalf("opened field = %q, want logLevel", got)
+	}
+	if v := m.View(); !strings.Contains(v, "修改 日志级别") {
+		t.Fatalf("field editor should be open:\n%s", v)
+	}
+}
+
+// failNodesDriver fails every manual-node mutation — the nodes-side mirror
+// of failSubsDriver, so the busy flag's failure path is covered on this
+// page too (the mechanism is shared but the wiring is per-page).
+type failNodesDriver struct{ stubDriver }
+
+func (failNodesDriver) RemoveNodes(_ context.Context, ids []string) error {
+	return errors.New("backend said no")
+}
+
+func TestNodesMutationFailureClearsBusy(t *testing.T) {
+	m := newTestModelWith(t, failNodesDriver{})
+	m, _ = m.Update(key("4"))
+	m, _ = m.Update(key("x")) // opens the confirmation (no cmd of its own)
+	if v := m.View(); !strings.Contains(v, "确认删除节点") {
+		t.Fatalf("delete confirmation missing:\n%s", v)
+	}
+	m, cmd := m.Update(key("y"))
+	if cmd == nil {
+		t.Fatal("y should fire the node removal")
+	}
+	if !m.(Model).nodes.busy {
+		t.Fatal("y should mark the page busy while the mutation runs")
+	}
+	if v := m.View(); !strings.Contains(v, "处理中") {
+		t.Fatalf("busy page should show the indicator:\n%s", v)
+	}
+	msg, ok := firstMsgOf[opDoneMsg](execCmds(cmd))
+	if !ok {
+		t.Fatal("the failed mutation should report through opDoneMsg")
+	}
+	if msg.Err == nil {
+		t.Fatal("the driver override should have failed the mutation")
+	}
+	if msg.Idle != busyNodes {
+		t.Fatalf("Idle = %v, want busyNodes (the nodes page owns this mutation)", msg.Idle)
+	}
+	m, _ = m.Update(msg)
+	if m.(Model).nodes.busy {
+		t.Fatal("a failed mutation must clear busy")
+	}
+	if v := m.View(); strings.Contains(v, "处理中") {
+		t.Fatalf("indicator should be gone after the failure:\n%s", v)
+	}
+	if v := m.View(); !strings.Contains(v, "✗ 删除节点") {
+		t.Fatalf("the failure should still toast:\n%s", v)
+	}
+}
+
+// The import itself lands even when the follow-up node-list refresh fails,
+// so the batch's per-link outcomes must still be recorded (the previous
+// batch's numbers would otherwise sit there looking current). The failed
+// link's error also renders on its own line at full width — an inline
+// remainder left it truncated to "unsupported protoco…" once the link
+// filled its quota.
+func TestNodesImportReportSurvivesListFailure(t *testing.T) {
+	p := newNodesPage(driver.Caps{})
+	p.setSize(38, 60, 20)
+	// The refresh failure leaves the previously loaded list in place (the
+	// handler only replaces p.nodes when the message carries one), so the
+	// detail pane still has a subject to hang the report under.
+	p.nodes = []driver.Node{{ID: "m1", Name: "自建-HK", Protocol: "vmess"}}
+	p.handleImport(importDoneMsg{
+		Results: []driver.NodeImportResult{
+			{Link: "vmess://ok"},
+			{Link: "vmess://" + strings.Repeat("very-long-host.example", 3), Error: "unsupported protocol"},
+		},
+		Err: errors.New("list refresh failed"),
+	})
+	if p.importOK != 1 || len(p.importFail) != 1 {
+		t.Fatalf("report = %d ok / %d failed, want 1/1 (outcomes survive the list failure)",
+			p.importOK, len(p.importFail))
+	}
+	if p.err == nil {
+		t.Fatal("the list failure should still surface in the pane")
+	}
+	joined := strings.Join(p.rightLines(), "\n")
+	if !strings.Contains(joined, "unsupported protocol") {
+		t.Fatalf("the error should render in full on its own line:\n%s", joined)
+	}
+}

@@ -81,7 +81,9 @@ func TestPaneRowGrid(t *testing.T) {
 }
 
 // PaneRow with H=0 sizes both boxes to the taller side's content (the
-// home page's content-driven zones).
+// home page's content-driven zones). Sizing means sharing borders: the
+// short side's dead space is padded inside its box, so both boxes close
+// on the same line — not one floating above the other over blank rows.
 func TestPaneRowContentSized(t *testing.T) {
 	row := PaneRow(
 		PaneSpec{Title: "a", Lines: []string{"1"}, W: 12},
@@ -89,6 +91,18 @@ func TestPaneRowContentSized(t *testing.T) {
 	)
 	if len(row) != 5 { // 3 content rows + 2 borders
 		t.Fatalf("got %d rows, want 5", len(row))
+	}
+	if n := strings.Count(row[len(row)-1], "╰"); n != 2 {
+		t.Fatalf("last row carries %d bottom edges, want 2 (both boxes close here): %q", n, row[len(row)-1])
+	}
+	for i, l := range row[:len(row)-1] {
+		if strings.Contains(l, "╰") {
+			t.Fatalf("row %d has a floating bottom edge (the short box closed early): %q", i, l)
+		}
+	}
+	// The short side keeps its own box: a padded content row, not blanks.
+	if !strings.Contains(row[2], "│") {
+		t.Fatalf("row 2 should still be boxed on the short side: %q", row[2])
 	}
 }
 
