@@ -12,21 +12,18 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"dae-tui/internal/driver"
+	"dae-tui/internal/i18n"
 	"dae-tui/internal/ui"
 )
 
-// nodesPage manages manual (subscription-less) nodes: list, import from
-// share links (one or a pasted batch), edit tag/link in place, remove,
-// latency-test, and attach to a group.
 type nodesPage struct {
 	nodes  []driver.Node
 	sel    int
-	focus  int            // 0 left, 1 right
-	groups []driver.Group // for the attach-to-group picker
+	focus  int
+	groups []driver.Group
 
 	lat map[string]driver.Latency
 
-	// latency test polling state
 	testing   bool
 	testIDs   []string
 	testStart time.Time
@@ -35,36 +32,35 @@ type nodesPage struct {
 	err  error
 	busy bool
 
-	mode       int            // 0 list, 1 add form, 2 delete confirm, 3 group picker, 4 edit form
-	links      textarea.Model // import form: one share link per line
+	mode       int
+	links      textarea.Model
 	link       textinput.Model
 	tag        textinput.Model
 	ifld       int
 	pickCursor int
 
-	// last batch import report, shown in the detail pane until the next one
 	importOK   int
 	importFail []driver.NodeImportResult
 
-	nodeView // filter/sort for the node list
+	nodeView
 
 	caps driver.Caps
-	hist *latHistory // shared per-node latency samples for the trend sparkline
+	hist *latHistory
 
 	leftW, rightW, height int
 }
 
 func newNodesPage(caps driver.Caps) nodesPage {
 	l := textinput.New()
-	l.Placeholder = "vmess://… / ss://… / trojan://… 分享链接"
+	l.Placeholder = i18n.T("vmess://… / ss://… / trojan://… 分享链接")
 	l.CharLimit = 4096
 	l.Width = 48
 	t := textinput.New()
-	t.Placeholder = "标签 (可空)"
+	t.Placeholder = i18n.T("标签 (可空)")
 	t.CharLimit = 64
 	t.Width = 32
 	ta := textarea.New()
-	ta.Placeholder = "每行一个分享链接，可整段粘贴\nvmess://…\nss://…"
+	ta.Placeholder = i18n.T("每行一个分享链接，可整段粘贴\nvmess://…\nss://…")
 	ta.CharLimit = 65536
 	ta.SetWidth(52)
 	ta.SetHeight(6)
@@ -83,8 +79,7 @@ func (p *nodesPage) setSize(leftW, rightW, h int) {
 }
 
 func (p *nodesPage) handleNodes(nodes []driver.Node, err error) {
-	// Any arrival — a plain refresh or a mutation's follow-up — ends the
-	// in-flight mutation this page last started.
+
 	p.busy = false
 	if err != nil {
 		p.err = err
@@ -92,20 +87,12 @@ func (p *nodesPage) handleNodes(nodes []driver.Node, err error) {
 	}
 	p.err = nil
 	p.nodes = nodes
-	// The cursor indexes the filtered view, so it must be clamped against
-	// that, not the raw list: a filter that dropped the row under the
-	// cursor would otherwise leave sel pointing past the end (cur() nil,
-	// j a dead key) until the filter is cleared.
+
 	if n := len(p.visibleNodes()); p.sel >= n {
 		p.sel = max0(n - 1)
 	}
 }
 
-// handleImport stores a batch import's per-link outcomes: the failures stay
-// visible in the detail pane, because a toast line cannot name them. A
-// follow-up list failure (msg.Err) still carries the batch's outcomes — the
-// import itself landed — so the report is recorded either way; only the
-// refreshed node list is missing on that path.
 func (p *nodesPage) handleImport(msg importDoneMsg) {
 	p.busy = false
 	p.err = msg.Err
@@ -125,16 +112,15 @@ func (p *nodesPage) handleImport(msg importDoneMsg) {
 	}
 }
 
-// importToast summarizes the last batch import for the toast line.
 func (p *nodesPage) importToast() string {
 	total := p.importOK + len(p.importFail)
 	switch {
 	case total == 0:
-		return "✓ 没有可导入的链接"
+		return i18n.T("✓ 没有可导入的链接")
 	case len(p.importFail) == 0:
-		return fmt.Sprintf("✓ 导入 %d/%d 成功", p.importOK, total)
+		return i18n.T("✓ 导入 %d/%d 成功", p.importOK, total)
 	default:
-		return fmt.Sprintf("✗ 导入 %d/%d 成功，%d 条失败（详情见右栏）",
+		return i18n.T("✗ 导入 %d/%d 成功，%d 条失败（详情见右栏）",
 			p.importOK, total, len(p.importFail))
 	}
 }
@@ -163,7 +149,6 @@ func (p *nodesPage) handleLatencies(lats []driver.Latency) {
 	p.testing = false
 }
 
-// testProgress reports how many probed nodes have reported back.
 func (p *nodesPage) testProgress() (done, total int) {
 	if !p.testing {
 		return 0, 0
@@ -184,13 +169,10 @@ func (p *nodesPage) cur() *driver.Node {
 	return &visible[p.sel]
 }
 
-// visibleNodes is the manual node list as the filter and sort present it.
 func (p *nodesPage) visibleNodes() []driver.Node {
 	return p.nodeView.visible(p.nodes, p.lat)
 }
 
-// visibleLatencyIDs lists the nodes whose latency the list and the detail
-// pane render — the manual node list is always on screen.
 func (p *nodesPage) visibleLatencyIDs() []string {
 	nodes := p.visibleNodes()
 	ids := make([]string, 0, len(nodes))
@@ -200,8 +182,6 @@ func (p *nodesPage) visibleLatencyIDs() []string {
 	return ids
 }
 
-// clampCursor keeps the cursor inside the filtered list, which can shrink
-// under it while the user types.
 func (p *nodesPage) clampCursor() {
 	if n := len(p.visibleNodes()); p.sel >= n {
 		p.sel = max0(n - 1)
@@ -209,7 +189,7 @@ func (p *nodesPage) clampCursor() {
 }
 
 func (p *nodesPage) startTest(d driver.Driver, onlySelected bool) tea.Cmd {
-	// Probing covers exactly what is on screen: the filtered, sorted view.
+
 	visible := p.visibleNodes()
 	ids := make([]string, 0, len(visible))
 	if onlySelected {
@@ -256,7 +236,7 @@ func (p *nodesPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 				return nil
 			}
 			p.busy = true
-			return nodeMutateCmd(d, nodeMutation{kind: 1, ids: []string{n.ID}}, "删除节点 "+ui.SpaceAfterFlag(n.Name))
+			return nodeMutateCmd(d, nodeMutation{kind: 1, ids: []string{n.ID}}, i18n.T("删除节点 ")+ui.SpaceAfterFlag(n.Name))
 		case "n", "esc", "enter":
 			p.mode = 0
 		}
@@ -283,12 +263,11 @@ func (p *nodesPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			g := p.groups[p.pickCursor]
 			p.mode = 0
 			return groupMutateCmd(d, groupMutation{kind: 2, groupID: g.ID, ids: []string{n.ID}},
-				"添加节点 "+ui.SpaceAfterFlag(n.Name)+" 到组 "+g.Name)
+				i18n.T("添加节点 ")+ui.SpaceAfterFlag(n.Name)+i18n.T(" 到组 ")+g.Name)
 		}
 		return nil
 	}
 
-	// The node filter box swallows every key while it is open.
 	if cmd, consumed := p.nodeView.handleKey(msg); consumed {
 		p.clampCursor()
 		return cmd
@@ -304,17 +283,17 @@ func (p *nodesPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		return p.links.Focus()
 	case "t":
 		if !p.caps.TestLatency {
-			return unsupportedCmd("测速")
+			return unsupportedCmd(i18n.T("测速"))
 		}
 		return p.startTest(d, false)
 	case "T":
 		if !p.caps.TestLatency {
-			return unsupportedCmd("测速")
+			return unsupportedCmd(i18n.T("测速"))
 		}
 		return p.startTest(d, true)
 	case "y":
 		if n := p.cur(); n != nil && n.Link != "" {
-			return osc52CopyCmd(n.Link, "节点链接")
+			return osc52CopyCmd(n.Link, i18n.T("节点链接"))
 		}
 	}
 
@@ -357,7 +336,7 @@ func (p *nodesPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			return p.openEdit(n)
 		}
 	case "G":
-		// attach to group
+
 		if p.cur() != nil && len(p.groups) > 0 {
 			p.mode = 3
 			p.pickCursor = 0
@@ -366,9 +345,6 @@ func (p *nodesPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	return nil
 }
 
-// openEdit prefills the edit form with the node's tag and link. Editing in
-// place is what keeps the node's group memberships: tagNode/updateNode keep
-// the ID, while remove + re-import mints a new one.
 func (p *nodesPage) openEdit(n *driver.Node) tea.Cmd {
 	p.mode = 4
 	p.ifld = 0
@@ -409,7 +385,7 @@ func (p *nodesPage) editFormKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		if link != "" && link != n.Link {
 			nm.doLink = true
 		}
-		return nodeMutateCmd(d, nm, "编辑节点 "+ui.SpaceAfterFlag(n.Name))
+		return nodeMutateCmd(d, nm, i18n.T("编辑节点 ")+ui.SpaceAfterFlag(n.Name))
 	}
 	var cmd tea.Cmd
 	if p.ifld == 0 {
@@ -439,8 +415,7 @@ func (p *nodesPage) addFormKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	case "ctrl+s":
 		return p.submitImport(d)
 	case "enter":
-		// Enter submits from the tag field; inside the link box it is a
-		// newline, which is what a pasted batch needs.
+
 		if p.ifld == 1 {
 			return p.submitImport(d)
 		}
@@ -454,9 +429,6 @@ func (p *nodesPage) addFormKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	return cmd
 }
 
-// submitImport imports every non-blank line of the link box in one mutation.
-// rollbackError is off on the backend side, so a bad link is reported per
-// link instead of discarding the batch.
 func (p *nodesPage) submitImport(d driver.Driver) tea.Cmd {
 	links := splitLines(p.links.Value())
 	tag := strings.TrimSpace(p.tag.Value())
@@ -468,10 +440,9 @@ func (p *nodesPage) submitImport(d driver.Driver) tea.Cmd {
 	}
 	p.busy = true
 	p.importOK, p.importFail = 0, nil
-	return nodeMutateCmd(d, nodeMutation{kind: 0, links: links, tag: tag}, "导入节点")
+	return nodeMutateCmd(d, nodeMutation{kind: 0, links: links, tag: tag}, i18n.T("导入节点"))
 }
 
-// splitLines turns a pasted block into links: one per line, blanks dropped.
 func splitLines(s string) []string {
 	var out []string
 	for _, l := range strings.Split(s, "\n") {
@@ -483,63 +454,55 @@ func splitLines(s string) []string {
 }
 
 func (p nodesPage) View() string {
-	// The page is a dual-box row; in-pane modals (the delete confirmation
-	// and the group picker) render inside the right box — the boxes always
-	// fill the page height, so anything appended below them would be pushed
-	// off screen.
-	rvTitle := "详情"
+
+	rvTitle := i18n.T("详情")
 	if p.mode == 2 || p.mode == 3 {
 		rvTitle = p.modalTitle()
 	}
-	// Key hints ride the edges of the boxes they belong to: the left box is
-	// the node list (filter/sort/edit/delete), the right box the detail
-	// actions (and the open modal's keys); page-wide keys stay on the frame.
-	rightFooter := "G 加入群组"
+
+	rightFooter := i18n.T("G 加入群组")
 	switch p.mode {
 	case 2:
-		rightFooter = "y 确认 · n/esc 取消"
+		rightFooter = i18n.T("y 确认 · n/esc 取消")
 	case 3:
-		rightFooter = "Enter 确认 · j/k 移动 · esc 取消"
+		rightFooter = i18n.T("Enter 确认 · j/k 移动 · esc 取消")
 	}
 	return strings.Join(ui.PaneRow(
-		ui.PaneSpec{Title: "手动节点" + p.nodeView.countTitle(len(p.visibleNodes()), len(p.nodes)) +
-			p.nodeView.sortTitle(), Footer: "x 删除 · / 过滤 · o 排序", Lines: p.leftLines(),
+		ui.PaneSpec{Title: i18n.T("手动节点") + p.nodeView.countTitle(len(p.visibleNodes()), len(p.nodes)) +
+			p.nodeView.sortTitle(), Footer: i18n.T("x 删除 · / 过滤 · o 排序"), Lines: p.leftLines(),
 			Focused: p.focus == 0, W: p.leftW, H: p.height},
 		ui.PaneSpec{Title: rvTitle, Footer: rightFooter, Lines: p.rightLines(),
 			Focused: p.focus == 1, W: p.rightW, H: p.height},
 	), "\n")
 }
 
-// overlay returns the page's floating window: the batch-import and edit
-// forms. The delete confirmation and the group picker stay in the right
-// pane (the picker is a list to browse, not a dialog).
 func (p nodesPage) overlay() *overlaySpec {
 	switch p.mode {
 	case 1:
 		lines := []string{
-			ui.TitleStyle.Render(" 导入手动节点 (分享链接)"),
+			ui.TitleStyle.Render(i18n.T(" 导入手动节点 (分享链接)")),
 			"",
 		}
 		lines = append(lines, strings.Split(p.links.View(), "\n")...)
 		lines = append(lines,
 			"",
-			" 标签  "+p.tag.View(),
+			i18n.T(" 标签  ")+p.tag.View(),
 			"",
-			ui.HelpStyle.Render(" Tab 切换字段  标签框内 Enter 或 ctrl+s 提交  esc 取消"),
-			ui.HelpStyle.Render(" 批量粘贴：每行一条，坏链接会逐条报错，不影响其他链接"))
+			ui.HelpStyle.Render(i18n.T(" Tab 切换字段  标签框内 Enter 或 ctrl+s 提交  esc 取消")),
+			ui.HelpStyle.Render(i18n.T(" 批量粘贴：每行一条，坏链接会逐条报错，不影响其他链接")))
 		return &overlaySpec{lines: lines}
 	case 4:
-		title := " 编辑手动节点"
+		title := i18n.T(" 编辑手动节点")
 		if n := p.cur(); n != nil {
 			title += " · " + ui.SpaceAfterFlag(n.Name)
 		}
 		return &overlaySpec{lines: []string{
 			ui.TitleStyle.Render(title),
 			"",
-			" 标签  " + p.tag.View(),
-			" 链接  " + p.link.View(),
+			i18n.T(" 标签  ") + p.tag.View(),
+			i18n.T(" 链接  ") + p.link.View(),
 			"",
-			ui.HelpStyle.Render(" Tab 切换字段  Enter 提交  esc 取消"),
+			ui.HelpStyle.Render(i18n.T(" Tab 切换字段  Enter 提交  esc 取消")),
 		}}
 	}
 	return nil
@@ -548,30 +511,28 @@ func (p nodesPage) overlay() *overlaySpec {
 func (p nodesPage) modalTitle() string {
 	switch p.mode {
 	case 2:
-		return "删除确认"
+		return i18n.T("删除确认")
 	case 3:
-		return "加入群组"
+		return i18n.T("加入群组")
 	}
-	return "详情"
+	return i18n.T("详情")
 }
 
-// modalLines renders the in-pane modals: the delete confirmation and the
-// group picker (the import/edit forms float, see overlay).
 func (p nodesPage) modalLines() []string {
 	switch p.mode {
 	case 2:
 		if n := p.cur(); n != nil {
-			return ui.BoxLines(true, "确认删除节点 \""+ui.SpaceAfterFlag(n.Name)+"\"? (y/n)")
+			return ui.BoxLines(true, i18n.T("确认删除节点 \"")+ui.SpaceAfterFlag(n.Name)+"\"? (y/n)")
 		}
 	case 3:
-		lines := []string{ui.TitleStyle.Render(" 选择要加入的群组")}
+		lines := []string{ui.TitleStyle.Render(i18n.T(" 选择要加入的群组"))}
 		for i, g := range p.groups {
 			mark, style := "  ", ui.HelpStyle
 			if i == p.pickCursor {
 				mark, style = "❯ ", ui.CursorStyle
 			}
 			lines = append(lines, ui.HiRow(style.Render(mark+ui.PadRight(g.Name, 24))+
-				ui.HelpStyle.Render(strconv.Itoa(len(g.Nodes))+"节点"), p.rightW-4, i == p.pickCursor))
+				ui.HelpStyle.Render(strconv.Itoa(len(g.Nodes))+i18n.T("节点")), p.rightW-4, i == p.pickCursor))
 		}
 		return lines
 	}
@@ -584,14 +545,14 @@ func (p nodesPage) leftLines() []string {
 		lines = append(lines, ui.ErrorStyle.Render("✗ "+shortErr(p.err)))
 	}
 	if len(p.nodes) == 0 {
-		lines = append(lines, ui.HelpStyle.Render("无手动节点（按 a 导入）"))
+		lines = append(lines, ui.HelpStyle.Render(i18n.T("无手动节点（按 a 导入）")))
 	}
 	if prompt := p.nodeView.prompt(); prompt != "" {
 		lines = append(lines, ui.HelpStyle.Render(prompt))
 	}
 	nodes := p.visibleNodes()
 	if len(p.nodes) > 0 && len(nodes) == 0 {
-		lines = append(lines, ui.ErrorStyle.Render(" 没有匹配的节点（/ 重新编辑，框内 esc 清空）"))
+		lines = append(lines, ui.ErrorStyle.Render(i18n.T(" 没有匹配的节点（/ 重新编辑，框内 esc 清空）")))
 	}
 	rowsH := max0(p.height - 2 - len(lines))
 	start := 0
@@ -613,8 +574,6 @@ func (p nodesPage) leftLines() []string {
 	return append(lines, ui.WithScrollbar(list, p.leftW-4, len(nodes), start, p.focus == 0)...)
 }
 
-// leftClick selects the row-th displayed node, mirroring leftLines' prefix
-// and window math so the click lands on the row the user saw.
 func (p *nodesPage) leftClick(row int) {
 	prefix := 0
 	if p.err != nil {
@@ -636,7 +595,7 @@ func (p *nodesPage) leftClick(row int) {
 	}
 	rowsH := max0(p.height - 2 - prefix)
 	if row >= rowsH {
-		return // border row or dead space below the list
+		return
 	}
 	start := 0
 	if p.sel >= rowsH {
@@ -650,10 +609,6 @@ func (p *nodesPage) leftClick(row int) {
 	p.focus = 0
 }
 
-// trendChartH is the trend chart's height in cells. The detail box is the
-// one place on this page with room for the chart — the list rows carry a
-// single figure — and four cells (16 braille dot rows) resolve a 60-sample
-// window without crowding the facts above it.
 const trendChartH = 4
 
 func (p nodesPage) rightLines() []string {
@@ -662,46 +617,36 @@ func (p nodesPage) rightLines() []string {
 	}
 	n := p.cur()
 	if n == nil {
-		return []string{ui.HelpStyle.Render("（无节点）")}
+		return []string{ui.HelpStyle.Render(i18n.T("（无节点）"))}
 	}
 	lines := []string{
-		ui.SelectedStyle.Render("名称  ") + ui.SpaceAfterFlag(n.Name),
-		ui.SelectedStyle.Render("协议  ") + n.Protocol,
-		ui.SelectedStyle.Render("地址  ") + ui.Truncate(n.Address, max0(p.rightW-10)),
+		ui.SelectedStyle.Render(i18n.T("名称  ")) + ui.SpaceAfterFlag(n.Name),
+		ui.SelectedStyle.Render(i18n.T("协议  ")) + n.Protocol,
+		ui.SelectedStyle.Render(i18n.T("地址  ")) + ui.Truncate(n.Address, max0(p.rightW-10)),
 	}
 	if n.Tag != "" {
-		lines = append(lines, ui.SelectedStyle.Render("标签  ")+n.Tag)
+		lines = append(lines, ui.SelectedStyle.Render(i18n.T("标签  "))+n.Tag)
 	}
 	if n.Link != "" {
-		lines = append(lines, ui.SelectedStyle.Render("链接  ")+ui.Truncate(n.Link, max0(p.rightW-10)))
+		lines = append(lines, ui.SelectedStyle.Render(i18n.T("链接  "))+ui.Truncate(n.Link, max0(p.rightW-10)))
 	}
-	// Group membership: importing a node and forgetting to attach it is the
-	// classic dead end — the import succeeds, the node sits in this list, and
-	// nothing routes through it. Nothing else on the page says so.
-	lines = append(lines, ui.SelectedStyle.Render("群组  ")+p.groupMembership(n.ID))
+
+	lines = append(lines, ui.SelectedStyle.Render(i18n.T("群组  "))+p.groupMembership(n.ID))
 	if row, ok := latencyDetail(p.lat, n.ID); ok {
-		line := ui.SelectedStyle.Render("延迟  ") + row
-		// A dead node's backend message is the reason it is dead ("i/o
-		// timeout", "connection refused"), which is what the user came for.
+		line := ui.SelectedStyle.Render(i18n.T("延迟  ")) + row
+
 		if l := p.lat[n.ID]; !l.Alive && l.Message != "" {
 			line += ui.HelpStyle.Render("  " + ui.Truncate(firstLine(l.Message), max0(p.rightW-26)))
 		}
 		lines = append(lines, line+ui.HelpStyle.Render("  · "+ui.TimeAgo(p.lat[n.ID].TestedAt)))
 	}
 	lines = append(lines, p.trendLines(n.ID)...)
-	// The batch-import report trails the node's own details (a toast line
-	// cannot name the failed links): the pane's subject stays anchored at
-	// the top, the report is the appendix below it.
+
 	if p.importOK > 0 || len(p.importFail) > 0 {
-		lines = append(lines, "", ui.SelectedStyle.Render("上次导入 ")+
-			ui.HelpStyle.Render(fmt.Sprintf("%d 成功 / %d 失败", p.importOK, len(p.importFail))))
+		lines = append(lines, "", ui.SelectedStyle.Render(i18n.T("上次导入 "))+
+			ui.HelpStyle.Render(i18n.T("%d 成功 / %d 失败", p.importOK, len(p.importFail))))
 		for _, r := range p.importFail {
-			// Link and error each get a full line: a share link fills any
-			// inline quota it is given (they are hundreds of cells long),
-			// and the error is the reason the user is reading this appendix
-			// — an inline remainder left it at "unsupported protoco…".
-			// Same continuation-line shape the subscription pane uses for
-			// its info lines.
+
 			lines = append(lines, ui.ErrorStyle.Render(" ✗ "+ui.Truncate(r.Link, max0(p.rightW-7))))
 			lines = append(lines, ui.ErrorStyle.Render("    "+ui.Truncate(r.Error, max0(p.rightW-8))))
 		}
@@ -709,8 +654,6 @@ func (p nodesPage) rightLines() []string {
 	return lines
 }
 
-// groupMembership names the groups this node is attached to, or says it is in
-// none — with the key that fixes it, since that is what the reader wants next.
 func (p nodesPage) groupMembership(id string) string {
 	var names []string
 	for _, g := range p.groups {
@@ -722,22 +665,15 @@ func (p nodesPage) groupMembership(id string) string {
 		}
 	}
 	if len(names) == 0 {
-		return lipgloss.NewStyle().Foreground(ui.Yellow).Render("未加入任何群组（G 加入）")
+		return lipgloss.NewStyle().Foreground(ui.Yellow).Render(i18n.T("未加入任何群组（G 加入）"))
 	}
 	return strings.Join(names, "、")
 }
 
-// trendLines is the detail box's trend block: a header naming the window the
-// samples cover and the range across it, above a full-content-width braille
-// chart. The accumulated samples tell "slowing down" from "one bad probe",
-// which a single number cannot — and the chart's color is the latest
-// measurement's ramp color, so a node that just died trends gray. Without
-// samples it says how to get them: an untested node's box must read as
-// "press t", not as a rendering gap.
 func (p nodesPage) trendLines(id string) []string {
 	w := max0(p.rightW - 4)
-	empty := []string{ui.SelectedStyle.Render("趋势  ") +
-		ui.HelpStyle.Render("（暂无数据：按 t 测速后这里显示约 3 分钟的曲线）")}
+	empty := []string{ui.SelectedStyle.Render(i18n.T("趋势  ")) +
+		ui.HelpStyle.Render(i18n.T("（暂无数据：按 t 测速后这里显示约 3 分钟的曲线）"))}
 	if p.hist == nil || w < 12 {
 		return empty
 	}
@@ -754,8 +690,8 @@ func (p nodesPage) trendLines(id string) []string {
 			hi = v
 		}
 	}
-	head := ui.SelectedStyle.Render("趋势  ") + ui.HelpStyle.Render(fmt.Sprintf(
-		"近 %s · %d 次采样 · 最低 %dms · 最高 %dms",
+	head := ui.SelectedStyle.Render(i18n.T("趋势  ")) + ui.HelpStyle.Render(fmt.Sprintf(
+		i18n.T("近 %s · %d 次采样 · 最低 %dms · 最高 %dms"),
 		ui.Span(p.hist.span(id)), len(series), int(lo), int(hi)))
 	l := p.lat[id]
 	st := ui.LatencyStyle(l.Ms, l.Alive, !l.TestedAt.IsZero())

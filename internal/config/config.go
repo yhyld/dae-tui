@@ -38,6 +38,11 @@ type Config struct {
 	Border string `toml:"border"`
 	Dim    string `toml:"dim"`
 
+	// Lang selects the UI language: "en" for English, empty/"zh" for
+	// Chinese (the source language). Switchable live from the settings
+	// window, which rewrites this field and saves.
+	Lang string `toml:"lang"`
+
 	// Theme selects a named color scheme from the built-ins or a
 	// theme/*.toml file (config.Theme). When set it wins over the inline
 	// Accent/Border/Dim above, which remain the fallback for slots the

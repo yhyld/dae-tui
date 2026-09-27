@@ -27,8 +27,8 @@ type latSample struct {
 
 func newLatHistory() *latHistory {
 	return &latHistory{
-	window:   60,  // ~3 minutes at the 3s poll cadence
-	maxNodes: 256, // polled nodes plus on-demand tests; keep the recent ones
+		window:   60,  // ~3 minutes at the 3s poll cadence
+		maxNodes: 256, // polled nodes plus on-demand tests; keep the recent ones
 		byNode:   map[string][]latSample{},
 	}
 }

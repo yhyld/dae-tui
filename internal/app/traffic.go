@@ -7,11 +7,10 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"dae-tui/internal/driver"
+	"dae-tui/internal/i18n"
 	"dae-tui/internal/ui"
 )
 
-// trafficPage renders the runtimeOverview snapshot: two braille rate charts
-// plus counters. Data arrives via the app-wide 1s tick.
 type trafficPage struct {
 	snap   driver.TrafficSnapshot
 	err    error
@@ -30,7 +29,7 @@ func (p *trafficPage) update(snap driver.TrafficSnapshot) {
 
 func (p trafficPage) View() string {
 	if p.err != nil {
-		return ui.ErrorStyle.Render(" ✗ 获取流量数据失败: " + shortErr(p.err))
+		return ui.ErrorStyle.Render(i18n.T(" ✗ 获取流量数据失败: ") + shortErr(p.err))
 	}
 	chartW := p.width - 16
 	if chartW < 20 {
@@ -51,18 +50,18 @@ func (p trafficPage) View() string {
 
 	s := p.snap
 	stats := []string{
-		"活跃连接 " + strconv.Itoa(s.Conns),
-		"UDP 会话 " + strconv.Itoa(s.UDPSessions),
-		"累计 ↑ " + ui.Bytes(s.UpTotal),
-		"累计 ↓ " + ui.Bytes(s.DownTotal),
-		"更新于 " + ui.TimeAgo(s.UpdatedAt),
+		i18n.T("活跃连接 ") + strconv.Itoa(s.Conns),
+		i18n.T("UDP 会话 ") + strconv.Itoa(s.UDPSessions),
+		i18n.T("累计 ↑ ") + ui.Bytes(s.UpTotal),
+		i18n.T("累计 ↓ ") + ui.Bytes(s.DownTotal),
+		i18n.T("更新于 ") + ui.TimeAgo(s.UpdatedAt),
 	}
 
 	var b strings.Builder
-	b.WriteString(ui.TitleStyle.Render(" 实时流量") +
-		ui.HelpStyle.Render("  (runtimeOverview: 窗口10s, 60采样点)") + "\n\n")
-	b.WriteString("↑ 上行  " + green.Render(ui.Rate(s.UpRate)) + "\n" + up + "\n\n")
-	b.WriteString("↓ 下行  " + yellow.Render(ui.Rate(s.DownRate)) + "\n" + down + "\n\n")
+	b.WriteString(ui.TitleStyle.Render(i18n.T(" 实时流量")) +
+		ui.HelpStyle.Render(i18n.T("  (runtimeOverview: 窗口10s, 60采样点)")) + "\n\n")
+	b.WriteString(i18n.T("↑ 上行  ") + green.Render(ui.Rate(s.UpRate)) + "\n" + up + "\n\n")
+	b.WriteString(i18n.T("↓ 下行  ") + yellow.Render(ui.Rate(s.DownRate)) + "\n" + down + "\n\n")
 	b.WriteString(ui.HelpStyle.Render(" " + strings.Join(stats, "   ")))
 	return b.String()
 }

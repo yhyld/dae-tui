@@ -8,12 +8,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"dae-tui/internal/i18n"
 	"dae-tui/internal/ui"
 )
 
-// strongEnough is the password rule both forms advertise: at least 6
-// characters, with letters and digits. The backend is free to demand more,
-// but the hint must not promise a check that never runs.
 func strongEnough(p string) bool {
 	if len([]rune(p)) < 6 {
 		return false
@@ -30,27 +28,25 @@ func strongEnough(p string) bool {
 	return hasLetter && hasDigit
 }
 
-// loginForm is used both for login (existing account) and first-run setup
-// (create the account; daed only allows one user, created when none exist).
 type loginForm struct {
 	setup    bool
 	username textinput.Model
 	password textinput.Model
-	confirm  textinput.Model // setup only
-	focus    int             // 0 username, 1 password, 2 confirm
+	confirm  textinput.Model
+	focus    int
 	busy     bool
 	err      string
 }
 
 func newLoginForm(setup bool) loginForm {
 	u := textinput.New()
-	u.Placeholder = "用户名"
+	u.Placeholder = i18n.T("用户名")
 	u.CharLimit = 64
 	u.Width = 36
 	u.Focus()
 
 	p := textinput.New()
-	p.Placeholder = "密码 (至少6位, 含字母和数字)"
+	p.Placeholder = i18n.T("密码 (至少6位, 含字母和数字)")
 	p.EchoMode = textinput.EchoPassword
 	p.EchoCharacter = '•'
 	p.CharLimit = 128
@@ -59,7 +55,7 @@ func newLoginForm(setup bool) loginForm {
 	f := loginForm{setup: setup, username: u, password: p}
 	if setup {
 		c := textinput.New()
-		c.Placeholder = "确认密码"
+		c.Placeholder = i18n.T("确认密码")
 		c.EchoMode = textinput.EchoPassword
 		c.EchoCharacter = '•'
 		c.CharLimit = 128
@@ -73,7 +69,6 @@ func (f loginForm) init() tea.Cmd {
 	return textinput.Blink
 }
 
-// Update forwards key messages to the focused input.
 func (f loginForm) Update(msg tea.Msg) (loginForm, tea.Cmd) {
 	var cmds []tea.Cmd
 	if k, ok := msg.(tea.KeyMsg); ok {
@@ -121,53 +116,49 @@ func (f *loginForm) setFocus() {
 	}
 }
 
-// values validates the form and returns the credentials.
 func (f *loginForm) values() (string, string, bool) {
 	u := strings.TrimSpace(f.username.Value())
 	p := f.password.Value()
 	if u == "" || p == "" {
-		f.err = "用户名和密码不能为空"
+		f.err = i18n.T("用户名和密码不能为空")
 		return "", "", false
 	}
 	if f.setup && p != f.confirm.Value() {
-		f.err = "两次输入的密码不一致"
+		f.err = i18n.T("两次输入的密码不一致")
 		return "", "", false
 	}
 	if f.setup && !strongEnough(p) {
-		f.err = "密码至少 6 位，且需包含字母和数字"
+		f.err = i18n.T("密码至少 6 位，且需包含字母和数字")
 		return "", "", false
 	}
 	return u, p, true
 }
 
-// View renders the login/setup form in its own centered rounded box — the
-// same title-in-border language as the main phases (this phase sits
-// outside the app frame).
 func (f loginForm) View(endpoint string, setup bool, w, h int) string {
-	title := "登录 daed"
+	title := i18n.T("登录 daed")
 	if setup {
-		title = "初始化 daed 账号（尚无用户）"
+		title = i18n.T("初始化 daed 账号（尚无用户）")
 	}
 	lines := []string{
 		ui.HelpStyle.Render(endpoint),
 		"",
-		field("用户名", f.focus == 0, f.username.View()),
-		field("密码", f.focus == 1, f.password.View()),
+		field(i18n.T("用户名"), f.focus == 0, f.username.View()),
+		field(i18n.T("密码"), f.focus == 1, f.password.View()),
 	}
 	if setup {
-		lines = append(lines, field("确认", f.focus == 2, f.confirm.View()))
+		lines = append(lines, field(i18n.T("确认"), f.focus == 2, f.confirm.View()))
 	}
 	if f.busy {
-		lines = append(lines, "", ui.HelpStyle.Render("正在验证…"))
+		lines = append(lines, "", ui.HelpStyle.Render(i18n.T("正在验证…")))
 	}
 	if f.err != "" {
 		lines = append(lines, ui.ErrorStyle.Render("✗ "+f.err))
 	}
-	lines = append(lines, "", ui.HelpStyle.Render(" Tab 切换焦点  Enter 提交  "+submitHint(setup)))
+	lines = append(lines, "", ui.HelpStyle.Render(i18n.T(" Tab 切换焦点  Enter 提交  ")+submitHint(setup)))
 
 	bw := 46
 	for _, l := range lines {
-		if lw := lipgloss.Width(l) + 4; lw > bw { // borders + inner padding
+		if lw := lipgloss.Width(l) + 4; lw > bw {
 			bw = lw
 		}
 	}
@@ -180,9 +171,9 @@ func (f loginForm) View(endpoint string, setup bool, w, h int) string {
 
 func submitHint(setup bool) string {
 	if setup {
-		return "esc 返回"
+		return i18n.T("esc 返回")
 	}
-	return "esc 退出"
+	return i18n.T("esc 退出")
 }
 
 func field(label string, focused bool, input string) string {

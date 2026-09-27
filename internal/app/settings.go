@@ -7,43 +7,35 @@ import (
 
 	"dae-tui/internal/config"
 	"dae-tui/internal/driver"
+	"dae-tui/internal/i18n"
 	"dae-tui/internal/ui"
 )
 
-// settings is the global settings window (P): a menu floating over any page.
-// Each menu entry opens a sub-window (sub* below); account management moved
-// here from the home page (P used to open it directly), the rest fill in as
-// they land — disabled entries render dim and are skipped by the cursor.
 type settings struct {
 	open bool
 	cur  int
 
-	// Which sub-window is up: subMenu shows the menu itself.
 	sub int
 
-	// account sub-window state (the old homePage.acct machine).
-	acctCur int
-	user    string
-	pwFocus int // 0 current, 1 new, 2 confirm
-	pwCur   textinput.Model
-	pwNew   textinput.Model
+	acctCur  int
+	user     string
+	pwFocus  int
+	pwCur    textinput.Model
+	pwNew    textinput.Model
 	pwRepeat textinput.Model
-	pwErr   string
+	pwErr    string
 
-	// theme picker state: the candidate list is resolved (concrete colors,
-	// builtins then user files) when the picker opens, so new files show up
-	// without a restart. themeActive is the config's current theme name —
-	// the ● marker; esc restores what was on screen when the picker opened.
-	themes     []config.Theme
-	themeNotes []string
-	themeCur   int
+	themes      []config.Theme
+	themeNotes  []string
+	themeCur    int
 	themeActive string
 
-	// version rides in from main (ldflags / build info) for the about window.
 	version string
+
+	// language picker cursor.
+	langCur int
 }
 
-// Settings menu entries.
 const (
 	itemAccount = iota
 	itemTheme
@@ -52,7 +44,6 @@ const (
 	itemAbout
 )
 
-// Settings sub-windows.
 const (
 	subMenu = iota
 	subAcctMenu
@@ -60,11 +51,16 @@ const (
 	subLogoutConfirm
 	subTheme
 	subAbout
+	subLang
 )
 
-// aboutLogo is the placeholder dot-matrix emblem (a diamond, braille)
-// rendered in the accent color. Deliberately easy to swap once a real logo
-// is designed: it is one string slice in one place.
+// langEntry is one language picker row. The name is written in the language
+// itself and never translated — that is how users recognize their language.
+var langEntries = []struct{ name, code string }{
+	{"中文", "zh"},
+	{"English", "en"},
+}
+
 var aboutLogo = []string{
 	"⠀⠀⠀⣀⣴⣦⣀⠀⠀⠀",
 	"⠀⣴⣾⣿⣿⣿⣿⣷⣦⠀",
@@ -72,12 +68,8 @@ var aboutLogo = []string{
 	"⠀⠀⠀⠀⠈⠁⠀⠀⠀⠀",
 }
 
-// Version is stamped by main from the build (ldflags -X / build info) and
-// shown in the about window.
 var Version = "dev"
 
-// settingsItem is one settings menu row; disabled rows render dim and are
-// skipped by the cursor.
 type settingsItem struct {
 	label   string
 	enabled bool
@@ -86,16 +78,16 @@ type settingsItem struct {
 var settingsItems = []settingsItem{
 	{"账户", true},
 	{"主题", true},
-	{"语言", false},
+	{"语言", true},
 	{"快捷键", false},
 	{"关于", true},
 }
 
 func newSettings() settings {
 	s := settings{version: Version}
-	s.pwCur = newPasswordInput("当前密码")
-	s.pwNew = newPasswordInput("新密码 (至少6位, 含字母和数字)")
-	s.pwRepeat = newPasswordInput("确认新密码")
+	s.pwCur = newPasswordInput(i18n.T("当前密码"))
+	s.pwNew = newPasswordInput(i18n.T("新密码 (至少6位, 含字母和数字)"))
+	s.pwRepeat = newPasswordInput(i18n.T("确认新密码"))
 	return s
 }
 
@@ -109,8 +101,6 @@ func newPasswordInput(placeholder string) textinput.Model {
 	return ti
 }
 
-// key routes the settings window's keys. Sub-windows keep their own state
-// machines; the menu itself only needs j/k/enter/esc.
 func (s *settings) key(m *Model, msg tea.KeyMsg) tea.Cmd {
 	switch s.sub {
 	case subAcctMenu, subPwForm, subLogoutConfirm:
@@ -122,6 +112,8 @@ func (s *settings) key(m *Model, msg tea.KeyMsg) tea.Cmd {
 			s.sub = subMenu
 		}
 		return nil
+	case subLang:
+		return m.langKey(msg)
 	}
 	switch msg.String() {
 	case "esc":
@@ -148,6 +140,14 @@ func (s *settings) key(m *Model, msg tea.KeyMsg) tea.Cmd {
 				s.acctCur = 0
 			case itemTheme:
 				m.openThemePicker()
+			case itemLang:
+				s.sub = subLang
+				s.langCur = 0
+				for i, e := range langEntries {
+					if e.code == i18n.Lang() {
+						s.langCur = i
+					}
+				}
 			case itemAbout:
 				s.sub = subAbout
 			}
@@ -156,17 +156,11 @@ func (s *settings) key(m *Model, msg tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
-// cfgThemeDir returns the theme directory; ok=false when the OS config path
-// is unavailable (the picker then just shows the built-ins).
 func (m *Model) cfgThemeDir() (string, bool) {
 	dir, err := config.ThemeDir()
 	return dir, err == nil
 }
 
-// openThemePicker rebuilds the candidate list from the built-ins and the
-// theme dir, every entry resolved to concrete colors over the config's
-// inline values (what a partial theme file inherits). It parks the cursor
-// on the theme config.toml currently names.
 func (m *Model) openThemePicker() {
 	s := &m.settings
 	s.sub = subTheme
@@ -178,7 +172,7 @@ func (m *Model) openThemePicker() {
 		var err error
 		user, notes, err = config.LoadThemes(dir)
 		if err != nil {
-			notes = append(notes, "读取主题目录失败: "+err.Error())
+			notes = append(notes, i18n.T("读取主题目录失败: ")+err.Error())
 		}
 		s.themeNotes = notes
 	}
@@ -187,7 +181,7 @@ func (m *Model) openThemePicker() {
 	}
 	s.themeActive = m.cfg.Theme
 	if s.themeActive == "" {
-		s.themeActive = "默认"
+		s.themeActive = i18n.T("默认")
 	}
 	s.themeCur = 0
 	for i, t := range s.themes {
@@ -198,11 +192,6 @@ func (m *Model) openThemePicker() {
 	}
 }
 
-// themeKey drives the theme picker: j/k previews immediately (ApplyTheme
-// rebuilds every derived style and is cheap), enter persists the choice to
-// config.toml, esc restores the theme that was active when the picker
-// opened. The whole UI repaints under the preview on the next frame — the
-// fastest color swatch there is.
 func (m *Model) themeKey(msg tea.KeyMsg) tea.Cmd {
 	s := &m.settings
 	switch msg.String() {
@@ -226,11 +215,11 @@ func (m *Model) themeKey(msg tea.KeyMsg) tea.Cmd {
 		t := s.themes[s.themeCur]
 		m.cfg.Theme = t.Name
 		if err := m.cfg.Save(m.cfgPath); err != nil {
-			m.showErrToast("✗ 保存主题: " + shortErr(err))
+			m.showErrToast(i18n.T("✗ 保存主题: ") + shortErr(err))
 			return nil
 		}
 		m.theme = t
-		m.showToast("✓ 主题: " + t.Name)
+		m.showToast(i18n.T("✓ 主题: ") + t.Name)
 		s.sub = subMenu
 	}
 	return nil
@@ -241,12 +230,9 @@ func (m *Model) previewTheme() {
 	ui.ApplyTheme(t.Accent, t.Border, t.Dim)
 }
 
-// acctKey drives the account menu, the password form and the logout
-// confirmation. esc from the account menu returns to the settings menu
-// (s.sub = subMenu), esc from the settings menu itself closes it.
 func (s *settings) acctKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	switch s.sub {
-	case subAcctMenu: // menu
+	case subAcctMenu:
 		switch msg.String() {
 		case "esc":
 			s.sub = subMenu
@@ -275,7 +261,7 @@ func (s *settings) acctKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		}
 		return nil
 
-	case subPwForm: // password form
+	case subPwForm:
 		switch msg.String() {
 		case "esc":
 			s.sub = subAcctMenu
@@ -295,15 +281,15 @@ func (s *settings) acctKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			cur := s.pwCur.Value()
 			nw := s.pwNew.Value()
 			if cur == "" || nw == "" {
-				s.pwErr = "当前密码和新密码不能为空"
+				s.pwErr = i18n.T("当前密码和新密码不能为空")
 				return nil
 			}
 			if nw != s.pwRepeat.Value() {
-				s.pwErr = "两次输入的新密码不一致"
+				s.pwErr = i18n.T("两次输入的新密码不一致")
 				return nil
 			}
 			if !strongEnough(nw) {
-				s.pwErr = "新密码至少 6 位，且需包含字母和数字"
+				s.pwErr = i18n.T("新密码至少 6 位，且需包含字母和数字")
 				return nil
 			}
 			s.pwErr = ""
@@ -324,7 +310,7 @@ func (s *settings) acctKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		}
 		return cmd
 
-	case subLogoutConfirm: // logout confirm
+	case subLogoutConfirm:
 		switch msg.String() {
 		case "y":
 			s.sub = subMenu
@@ -351,37 +337,37 @@ func (s *settings) setPwFocus() {
 	}
 }
 
-// overlay renders the settings menu and its sub-windows. They float over
-// any page, so pageOverlay checks this before the page's own overlays.
 func (s settings) overlay() *overlaySpec {
 	switch s.sub {
 	case subMenu:
 		if !s.open {
 			return nil
 		}
-		lines := []string{ui.TitleStyle.Render(" 设置"), "",
-			ui.HelpStyle.Render(" 当前用户  " + s.user), ""}
+		lines := []string{ui.TitleStyle.Render(i18n.T(" 设置")), "",
+			ui.HelpStyle.Render(i18n.T(" 当前用户  ") + s.user), ""}
 		for i, it := range settingsItems {
 			mark, style := "  ", ui.HelpStyle
 			if i == s.cur {
 				mark, style = "❯ ", ui.CursorStyle
 			}
-			label := it.label
+			label := i18n.T(it.label)
 			if !it.enabled {
-				label += "（即将支持）"
+				label += i18n.T("（即将支持）")
 			}
 			lines = append(lines, style.Render(mark+label))
 		}
 		return &overlaySpec{lines: append(lines,
-			"", ui.HelpStyle.Render(" j/k 选择  Enter 确认  esc 关闭"))}
+			"", ui.HelpStyle.Render(i18n.T(" j/k 选择  Enter 确认  esc 关闭")))}
 	case subTheme:
 		return s.themeOverlay()
+	case subLang:
+		return s.langOverlay()
 	case subAbout:
 		return s.aboutOverlay()
 	case subAcctMenu:
-		lines := []string{ui.TitleStyle.Render(" 账户"), "",
-			ui.HelpStyle.Render(" 当前用户  " + s.user), ""}
-		items := []string{"修改密码", "退出登录"}
+		lines := []string{ui.TitleStyle.Render(i18n.T(" 账户")), "",
+			ui.HelpStyle.Render(i18n.T(" 当前用户  ") + s.user), ""}
+		items := []string{i18n.T("修改密码"), i18n.T("退出登录")}
 		for i, it := range items {
 			mark, style := "  ", ui.HelpStyle
 			if i == s.acctCur {
@@ -390,14 +376,14 @@ func (s settings) overlay() *overlaySpec {
 			lines = append(lines, style.Render(mark+it))
 		}
 		return &overlaySpec{lines: append(lines,
-			ui.HelpStyle.Render(" j/k 选择  Enter 确认  esc 返回"))}
+			ui.HelpStyle.Render(i18n.T(" j/k 选择  Enter 确认  esc 返回")))}
 	case subPwForm:
-		lines := []string{ui.TitleStyle.Render(" 修改密码"), ""}
+		lines := []string{ui.TitleStyle.Render(i18n.T(" 修改密码")), ""}
 		for i, f := range []struct {
 			label string
 			input textinput.Model
 		}{
-			{"当前密码", s.pwCur}, {"新密码", s.pwNew}, {"确认新密码", s.pwRepeat},
+			{i18n.T("当前密码"), s.pwCur}, {i18n.T("新密码"), s.pwNew}, {i18n.T("确认新密码"), s.pwRepeat},
 		} {
 			style := ui.HelpStyle
 			if i == s.pwFocus {
@@ -409,20 +395,18 @@ func (s settings) overlay() *overlaySpec {
 			lines = append(lines, "", ui.ErrorStyle.Render(" ✗ "+s.pwErr))
 		}
 		return &overlaySpec{lines: append(lines, "",
-			ui.HelpStyle.Render(" Tab 切换  Enter 提交  esc 返回"))}
+			ui.HelpStyle.Render(i18n.T(" Tab 切换  Enter 提交  esc 返回")))}
 	case subLogoutConfirm:
 		return &overlaySpec{destructive: true, lines: []string{
-			"确认退出登录?",
-			"将清除本机保存的密码与 token",
+			i18n.T("确认退出登录?"),
+			i18n.T("将清除本机保存的密码与 token"),
 			"",
-			ui.OKStyle.Render(" y 确认") + "    " + ui.ErrorStyle.Render("n / esc 取消"),
+			ui.OKStyle.Render(i18n.T(" y 确认")) + "    " + ui.ErrorStyle.Render(i18n.T("n / esc 取消")),
 		}}
 	}
 	return nil
 }
 
-// aboutOverlay is the about window: the emblem, version and a short
-// orientation of what the tool is and where its config lives.
 func (s settings) aboutOverlay() *overlaySpec {
 	lines := []string{""}
 	for _, l := range aboutLogo {
@@ -430,28 +414,24 @@ func (s settings) aboutOverlay() *overlaySpec {
 	}
 	lines = append(lines, "",
 		"    "+ui.SelectedStyle.Render("dae-tui "+s.version),
-		"    "+ui.HelpStyle.Render("dae 网络代理的终端管理界面"),
+		"    "+ui.HelpStyle.Render(i18n.T("dae 网络代理的终端管理界面")),
 		"",
-		"    "+ui.HelpStyle.Render("后端  daed GraphQL API（schema 冻结）"),
-		"    "+ui.HelpStyle.Render("配置  ~/.config/dae-tui/config.toml"),
-		"    "+ui.HelpStyle.Render("架构  可插拔 driver，可扩展其他后端"),
+		"    "+ui.HelpStyle.Render(i18n.T("后端  daed GraphQL API（schema 冻结）")),
+		"    "+ui.HelpStyle.Render(i18n.T("配置  ~/.config/dae-tui/config.toml")),
+		"    "+ui.HelpStyle.Render(i18n.T("架构  可插拔 driver，可扩展其他后端")),
 	)
 	return &overlaySpec{lines: append(lines, "",
-		ui.HelpStyle.Render(" esc 返回"))}
+		ui.HelpStyle.Render(i18n.T(" esc 返回")))}
 }
 
-// themeOverlay is the theme picker: one row per theme with the ● marker on
-// the theme config.toml currently names and three color swatches per row —
-// the preview repaints the whole UI anyway, the swatches say which row is
-// which at a glance. Unreadable files show up as dim notes below the list.
 func (s settings) themeOverlay() *overlaySpec {
-	lines := []string{ui.TitleStyle.Render(" 主题"), ""}
+	lines := []string{ui.TitleStyle.Render(i18n.T(" 主题")), ""}
 	for i, t := range s.themes {
 		mark, style := "  ", ui.HelpStyle
 		if i == s.themeCur {
 			mark, style = "❯ ", ui.CursorStyle
 		}
-		row := style.Render(mark+t.Name)
+		row := style.Render(mark + t.Name)
 		if t.Name == s.themeActive {
 			row += ui.OKStyle.Render(" ●")
 		}
@@ -462,12 +442,60 @@ func (s settings) themeOverlay() *overlaySpec {
 		lines = append(lines, "  "+ui.HelpStyle.Render("⚠ "+n))
 	}
 	return &overlaySpec{lines: append(lines, "",
-		ui.HelpStyle.Render(" j/k 预览  Enter 使用  esc 取消"))}
+		ui.HelpStyle.Render(i18n.T(" j/k 预览  Enter 使用  esc 取消")))}
 }
 
-// themeSwatches renders the three theme colors as small blocks (accent,
-// border, dim), so the list reads even on terminals that make the subtle
-// frame-color difference hard to see.
+// langKey drives the language picker: enter switches immediately (every
+// render-time i18n.T repaints translated on the next frame) and persists
+// the choice to config.toml.
+func (m *Model) langKey(msg tea.KeyMsg) tea.Cmd {
+	s := &m.settings
+	switch msg.String() {
+	case "esc":
+		s.sub = subMenu
+	case "j", "down":
+		if s.langCur < len(langEntries)-1 {
+			s.langCur++
+		}
+	case "k", "up":
+		if s.langCur > 0 {
+			s.langCur--
+		}
+	case "enter":
+		if s.langCur < 0 || s.langCur >= len(langEntries) {
+			return nil
+		}
+		e := langEntries[s.langCur]
+		i18n.SetLang(e.code)
+		m.cfg.Lang = e.code
+		if err := m.cfg.Save(m.cfgPath); err != nil {
+			m.showErrToast("✗ " + i18n.T("保存语言: ") + shortErr(err))
+			return nil
+		}
+		m.showToast("✓ " + i18n.T("语言") + ": " + e.name)
+		s.sub = subMenu
+	}
+	return nil
+}
+
+// langOverlay lists the languages with the ● marker on the active one.
+func (s settings) langOverlay() *overlaySpec {
+	lines := []string{ui.TitleStyle.Render(i18n.T(" 语言")), ""}
+	for i, e := range langEntries {
+		mark, style := "  ", ui.HelpStyle
+		if i == s.langCur {
+			mark, style = "❯ ", ui.CursorStyle
+		}
+		row := style.Render(mark + e.name)
+		if e.code == i18n.Lang() {
+			row += ui.OKStyle.Render(" ●")
+		}
+		lines = append(lines, row)
+	}
+	return &overlaySpec{lines: append(lines, "",
+		ui.HelpStyle.Render(i18n.T(" j/k 选择  Enter 确认  esc 返回")))}
+}
+
 func themeSwatches(t config.Theme) string {
 	block := func(c string) string {
 		if c == "" {

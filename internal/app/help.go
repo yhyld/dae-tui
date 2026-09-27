@@ -1,6 +1,8 @@
 package app
 
 import (
+	"dae-tui/internal/i18n"
+
 	"fmt"
 
 	"dae-tui/internal/ui"
@@ -106,21 +108,23 @@ var helpSections = []helpSection{
 // sectionLines renders one help section: the key column carries the accent
 // (it is what the eye scans for), descriptions stay dim, and the "-"
 // continuation rows keep the dim dash.
+// sectionLines translates the section title and every description at render
+// time — the table stores the Chinese source copy as the key (see i18n).
 func sectionLines(s helpSection) []string {
-	lines := []string{ui.SelectedStyle.Render(" " + s.title)}
+	lines := []string{ui.SelectedStyle.Render(" " + i18n.T(s.title))}
 	for _, r := range s.rows {
 		key := ui.SelectedStyle.Render(ui.PadRight(r[0], 14))
 		if r[0] == "-" {
 			key = ui.HelpStyle.Render(ui.PadRight(r[0], 14))
 		}
-		lines = append(lines, "  "+key+ui.HelpStyle.Render(r[1]))
+		lines = append(lines, "  "+key+ui.HelpStyle.Render(i18n.T(r[1])))
 	}
 	return append(lines, "")
 }
 
 // helpLines builds the full help block from the section table.
 func helpLines() []string {
-	lines := []string{ui.TitleStyle.Render(" dae-tui 帮助"), ""}
+	lines := []string{ui.TitleStyle.Render(i18n.T(" dae-tui 帮助")), ""}
 	for _, s := range helpSections {
 		lines = append(lines, sectionLines(s)...)
 	}
@@ -201,6 +205,6 @@ func helpOverlayBox(w, avail, scroll int) string {
 		body = append(body, ui.Truncate(l, helpW-6))
 	}
 	body = append(body, "",
-		ui.HelpStyle.Render(fmt.Sprintf(" %d-%d / %d   j/k 滚动   esc 关闭", scroll+1, end, len(lines))))
+		ui.HelpStyle.Render(fmt.Sprintf(i18n.T(" %d-%d / %d   j/k 滚动   esc 关闭"), scroll+1, end, len(lines))))
 	return overlayBox(&overlaySpec{lines: body}, helpW)
 }

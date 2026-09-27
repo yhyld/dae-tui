@@ -16,6 +16,7 @@ import (
 
 	"dae-tui/internal/config"
 	"dae-tui/internal/driver"
+	"dae-tui/internal/i18n"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -3037,7 +3038,7 @@ func TestMouseTabClick(t *testing.T) {
 	// pads 0,1).
 	tabX := func(i int) int {
 		x := 5
-		for j, t := range tabLabels {
+		for j, t := range tabLabels() {
 			if j == i {
 				break
 			}
@@ -3490,16 +3491,20 @@ func TestAcctOverlay(t *testing.T) {
 	}
 }
 
-// The settings menu's unimplemented entries (主题/语言/快捷键/关于) render
-// dim and are skipped by the cursor — Enter on them is unreachable.
+// The settings menu's unimplemented entry (快捷键) renders dim and is
+// skipped by the cursor — Enter on it is unreachable.
 func TestSettingsSkipsPendingEntries(t *testing.T) {
 	m := newTestModel(t)
 	m, _ = m.Update(key("P"))
-	for _, k := range []string{"j", "j", "j", "j", "k", "k"} {
-		m, _ = m.Update(key(k))
+	m, _ = m.Update(key("j")) // 主题
+	m, _ = m.Update(key("j")) // 语言
+	m, _ = m.Update(key("j")) // must land on 关于, skipping 快捷键
+	if mm := m.(Model); mm.settings.cur != itemAbout {
+		t.Fatalf("cursor should skip the pending entry, cur=%d", mm.settings.cur)
 	}
-	if mm := m.(Model); mm.settings.cur != 0 {
-		t.Fatalf("cursor should stay on the only enabled entry, cur=%d", mm.settings.cur)
+	m, _ = m.Update(key("k"))
+	if mm := m.(Model); mm.settings.cur != itemLang {
+		t.Fatalf("moving back should also skip the pending entry, cur=%d", mm.settings.cur)
 	}
 	if v := m.View(); !strings.Contains(v, "即将支持") {
 		t.Fatalf("pending entries should be marked:\n%s", v)
@@ -5016,7 +5021,8 @@ func TestSettingsAbout(t *testing.T) {
 	m := newTestModel(t)
 	m, _ = m.Update(key("P"))
 	m, _ = m.Update(key("j")) // 主题
-	m, _ = m.Update(key("j")) // 关于 (语言/快捷键 are skipped while pending)
+	m, _ = m.Update(key("j")) // 语言
+	m, _ = m.Update(key("j")) // 关于 (快捷键 is skipped while pending)
 	m, _ = m.Update(key("enter"))
 	v := m.(Model).View()
 	for _, want := range []string{"dae-tui", "终端管理界面", "schema 冻结"} {
@@ -5027,5 +5033,48 @@ func TestSettingsAbout(t *testing.T) {
 	m, _ = m.Update(key("esc"))
 	if mm := m.(Model); mm.settings.sub != subMenu {
 		t.Fatalf("esc should return to the settings menu, sub=%d", mm.settings.sub)
+	}
+}
+
+// The language picker switches the UI live: en mode renders translated
+// chrome, the choice lands in config.toml, and switching back restores zh.
+func TestSettingsLanguagePicker(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{Endpoint: "http://127.0.0.1:2023/graphql"}
+	var m tea.Model = New(stubDriver{}, cfg, filepath.Join(dir, "config.toml"))
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	m, _ = m.Update(bootMsg{Users: 1, Status: driver.Status{Version: "v2.1.1", Running: true}})
+	t.Cleanup(func() { i18n.SetLang("zh") })
+
+	m, _ = m.Update(key("P"))
+	m, _ = m.Update(key("j")) // 主题
+	m, _ = m.Update(key("j")) // 语言
+	m, _ = m.Update(key("enter"))
+	if v := m.View(); !strings.Contains(v, "中文") || !strings.Contains(v, "English") {
+		t.Fatalf("language picker missing:\n%s", v)
+	}
+	m, _ = m.Update(key("j")) // English
+	m, _ = m.Update(key("enter"))
+	mm := m.(Model)
+	if i18n.Lang() != "en" || mm.cfg.Lang != "en" {
+		t.Fatalf("enter should switch to en: lang=%s cfg=%s", i18n.Lang(), mm.cfg.Lang)
+	}
+	// The chrome repaints translated on the next frame.
+	if v := mm.View(); !strings.Contains(v, "1 home") || !strings.Contains(v, "settings") {
+		t.Fatalf("UI should render in English after the switch:\n%s", v[:min(600, len(v))])
+	}
+	// Back to Chinese: the picker itself now renders in English.
+	m, _ = mm.Update(key("enter")) // reopen the picker (still on 语言)
+	if v := m.View(); !strings.Contains(v, "language") {
+		t.Fatalf("settings chrome should stay English:\n%s", v)
+	}
+	m, _ = m.Update(key("k")) // 中文
+	m, _ = m.Update(key("enter"))
+	mm = m.(Model)
+	if i18n.Lang() != "zh" || mm.cfg.Lang != "zh" {
+		t.Fatalf("switching back should restore zh: lang=%s cfg=%s", i18n.Lang(), mm.cfg.Lang)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "config.toml")); err != nil {
+		t.Fatalf("language choice should be saved: %v", err)
 	}
 }

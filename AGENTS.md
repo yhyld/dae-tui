@@ -9,7 +9,7 @@ dae-tui 的仓库说明，供后续 ZCode agent 快速上手。细节以 `README
 v2.1.1，上游已于 2026-09-24 归档，schema 从此冻结）。功能：切换路由组节点、测速、
 实时流量、订阅管理、config/DNS/routing 方案切换与重载。
 
-用户可见文案全部是**中文**（UI 字符串、toast、错误提示）；Go 文档注释用英文。
+用户可见文案默认**中文**，可切英文（`internal/i18n`）；Go 文档注释用英文。
 
 ## 常用命令
 
@@ -295,6 +295,8 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   不能写 `tea.Batch(...)`——那返回的是 Cmd 不是消息**），最后一个回复清零
   `refreshing`，顶栏 `spinSuffix` 期间显示"刷新中"；回复丢了的兜底是 tickMsg 里的
   `refreshStale()`（15s），没有独立定时器。
+- **i18n（`internal/i18n`）**：中文文案**本身就是 key**——zh 模式 `T()` 原样返回 key（所以断言中文字面量的测试全部照旧），en 模式查 `en` 表、缺失回退 key，en 目录可以滞后于代码。两条铁律：**渲染期文本在 View/render 路径里调 T**（设置里切语言下一帧即生效，语言选择器在 `settings.go` 的 langKey）；**禁止把 T() 结果存进长寿命结构体字段**（包级表如 helpSections/tabLabels/presetLabels 存中文 key、渲染时翻译；toast 等瞬态消息允许构造时翻译，切语言后残留几秒可接受）。`config.toml` 的 `lang = "en"` 切英文，main.go 启动 `i18n.SetLang` 一次。driver 层错误是技术诊断信息，**不翻译**。en 表 key 与 T() 调用点的一致性靠"半合法即降级"兜底，别为对齐而硬编码两份清单。
+- **i18n（`internal/i18n`）**：中文文案**本身就是 key**——zh 模式 `T()` 原样返回 key（所以断言中文字面量的测试全部照旧），en 模式查 `en` 表、缺失回退 key，en 目录可以滞后于代码。两条铁律：**渲染期文本在 View/render 路径里调 T**（设置里切语言下一帧即生效，语言选择器在 `settings.go` 的 langKey）；**禁止把 T() 结果存进长寿命结构体字段**（包级表如 helpSections/tabLabels/presetLabels 存中文 key、渲染时翻译；toast 等瞬态消息允许构造时翻译，切语言后残留几秒可接受）。`config.toml` 的 `lang = "en"` 切英文，main.go 启动 `i18n.SetLang` 一次。driver 层错误是技术诊断信息，**不翻译**。en 表 key 与 T() 调用点的一致性靠"缺失即回退中文"兜底，别为对齐而维护第二份清单。
 - **`Model.View()` 末尾的硬钳制不能删**：body 行数超过 `height-6`（外框 2 行 + 页头盒
   3 行 + toast 1 行）就截断、不足就补齐空行，否则页签/帮助边框会被挤出屏幕（这是最早
   修的滚动 bug；钳制现在同时负责"撑满终端+页脚贴底"）。

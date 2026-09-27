@@ -10,17 +10,15 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"dae-tui/internal/driver"
+	"dae-tui/internal/i18n"
 	"dae-tui/internal/ui"
 )
 
 const (
-	latCellWide = 15 // 5-cell micro-bar + gap + right-aligned value
-	latCellSlim = 9  // value only, for panes too narrow to spare the bar
+	latCellWide = 15
+	latCellSlim = 9
 )
 
-// latCellW picks the latency column width for a pane whose content is w
-// cells wide: narrow master boxes (the capped 38-cell left column) need
-// the name more than the bar.
 func latCellW(w int) int {
 	if w >= 56 {
 		return latCellWide
@@ -28,10 +26,6 @@ func latCellW(w int) int {
 	return latCellSlim
 }
 
-// latencyCell renders a node row's latency column: the right-aligned value,
-// preceded by a 5-cell micro-bar when cellW is the wide variant, all in the
-// latency color so a page of nodes can be scanned by shape alone. Shared by
-// the group detail, subscription node list and manual node list.
 func latencyCell(lat map[string]driver.Latency, id string, cellW int) string {
 	latStr, bar, st := "-", ui.LatencyBar(0), ui.LatencyStyle(0, false, false)
 	if l, ok := lat[id]; ok && !l.TestedAt.IsZero() {
@@ -39,7 +33,7 @@ func latencyCell(lat map[string]driver.Latency, id string, cellW int) string {
 			latStr = strconv.Itoa(l.Ms) + "ms"
 			bar = ui.LatencyBar(l.Ms)
 		} else if !l.Alive {
-			latStr = "超时"
+			latStr = i18n.T("超时")
 		} else {
 			latStr = "…"
 		}
@@ -51,11 +45,6 @@ func latencyCell(lat map[string]driver.Latency, id string, cellW int) string {
 	return st.Render(ui.PadLeft(latStr, 9))
 }
 
-// latencyDetail renders a node's measured latency for a detail pane: the
-// value with its micro-bar when a figure exists, in the ramp's color. The
-// second return is false when the node has never been measured — a detail
-// pane then omits the row rather than asserting a state it does not know
-// ("alive but no figure" is a probe in flight, not a timeout).
 func latencyDetail(lat map[string]driver.Latency, id string) (string, bool) {
 	l, ok := lat[id]
 	if !ok || l.TestedAt.IsZero() {
@@ -64,28 +53,17 @@ func latencyDetail(lat map[string]driver.Latency, id string) (string, bool) {
 	st := ui.LatencyStyle(l.Ms, l.Alive, true)
 	switch {
 	case !l.Alive:
-		return st.Render("超时"), true
+		return st.Render(i18n.T("超时")), true
 	case l.Ms <= 0:
 		return st.Render("…"), true
 	}
 	return st.Render(strconv.Itoa(l.Ms)+"ms") + "  " + st.Render(ui.LatencyBar(l.Ms)), true
 }
 
-// Node lists are the one place where the volume of data hurts: a single
-// airport subscription routinely carries hundreds of nodes, and scrolling
-// to find one — or eyeballing which of them is fastest — is the difference
-// between a tool that is usable and one that is not. nodeView is the shared
-// filter/sort state every node list embeds: group members, subscription
-// nodes, manual nodes and the add-node picker all behave the same way.
-//
-//	/      open the filter box (live as you type)
-//	enter  close the box, keep the filter applied
-//	esc    close the box and clear the filter
-//	o      cycle the sort: backend order → latency ↑ → latency ↓
 type nodeView struct {
-	open    bool // the filter box takes every keystroke
+	open    bool
 	input   textinput.Model
-	applied string // filter in effect (live from the input while open)
+	applied string
 	sortBy  int
 }
 
@@ -97,15 +75,12 @@ const (
 
 func newNodeView() nodeView {
 	ti := textinput.New()
-	ti.Placeholder = "名称/协议/标签/地址"
+	ti.Placeholder = i18n.T("名称/协议/标签/地址")
 	ti.CharLimit = 64
 	ti.Width = 20
 	return nodeView{input: ti}
 }
 
-// handleKey runs the filter box and the sort toggle. It reports whether the
-// keystroke was consumed; when it was, the page must not act on it — the box
-// swallows every key, the same rule the other modals follow.
 func (v *nodeView) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	if v.open {
 		switch msg.String() {
@@ -139,7 +114,6 @@ func (v *nodeView) close(q string) {
 	v.input.Blur()
 }
 
-// filter is the query currently in effect.
 func (v *nodeView) filter() string {
 	if v.open {
 		return v.input.Value()
@@ -147,7 +121,6 @@ func (v *nodeView) filter() string {
 	return v.applied
 }
 
-// visible returns the nodes matching the filter, in the current sort order.
 func (v *nodeView) visible(nodes []driver.Node, lat map[string]driver.Latency) []driver.Node {
 	q := strings.ToLower(strings.TrimSpace(v.filter()))
 	out := make([]driver.Node, 0, len(nodes))
@@ -166,8 +139,6 @@ func (v *nodeView) visible(nodes []driver.Node, lat map[string]driver.Latency) [
 	return out
 }
 
-// matchNode matches the filter against everything a user might recognize a
-// node by, so "ss" or "hk" both narrow the list usefully.
 func matchNode(n driver.Node, q string) bool {
 	if q == "" {
 		return true
@@ -180,8 +151,6 @@ func matchNode(n driver.Node, q string) bool {
 	return false
 }
 
-// lessByLatency orders measured nodes by latency. Dead and untested nodes
-// have no latency to sort by and always trail, in their original order.
 func lessByLatency(a, b driver.Node, lat map[string]driver.Latency, desc bool) bool {
 	ma, oka := measured(a, lat)
 	mb, okb := measured(b, lat)
@@ -208,7 +177,6 @@ func measured(n driver.Node, lat map[string]driver.Latency) (int, bool) {
 	return l.Ms, true
 }
 
-// countTitle is the pane-title suffix: matched/total while filtering.
 func (v *nodeView) countTitle(shown, total int) string {
 	if v.filter() != "" {
 		return fmt.Sprintf(" (%d/%d)", shown, total)
@@ -216,25 +184,22 @@ func (v *nodeView) countTitle(shown, total int) string {
 	return fmt.Sprintf(" (%d)", total)
 }
 
-// sortTitle names the sort mode for the pane title ("" in backend order).
 func (v *nodeView) sortTitle() string {
 	switch v.sortBy {
 	case sortLatencyAsc:
-		return " · 延迟↑"
+		return i18n.T(" · 延迟↑")
 	case sortLatencyDesc:
-		return " · 延迟↓"
+		return i18n.T(" · 延迟↓")
 	}
 	return ""
 }
 
-// prompt is the filter line to render above a list: the live input while the
-// box is open, otherwise a reminder of the applied filter.
 func (v *nodeView) prompt() string {
 	if v.open {
 		return " / " + v.input.View()
 	}
 	if v.applied != "" {
-		return " 过滤: " + v.applied + "  (/ 重新编辑)"
+		return i18n.T(" 过滤: ") + v.applied + i18n.T("  (/ 重新编辑)")
 	}
 	return ""
 }

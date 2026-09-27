@@ -9,33 +9,28 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"dae-tui/internal/driver"
+	"dae-tui/internal/i18n"
 	"dae-tui/internal/ui"
 )
 
-// subsPage: master-detail. Left lists subscriptions; the right column is
-// two stacked boxes — the selected subscription's metadata on top, its
-// full node list below (fetched on selection, cached), with a node cursor
-// for latency testing.
 type subsPage struct {
 	subs  []driver.Subscription
 	sel   int
-	focus int // 0 left, 1 right (node list)
+	focus int
 
 	subNodes map[string][]driver.Node
-	loading  string // subID being fetched
+	loading  string
 	subErr   map[string]error
-	// stale lists subscriptions whose nodes were just re-fetched by the
-	// backend (an `u` update). Their cache entry is dropped when the reloaded
-	// list arrives, instead of throwing away every subscription's nodes.
-	stale map[string]bool
-	nc    int // node cursor in right pane
 
-	nodeView // filter/sort for the right pane's node list
+	stale map[string]bool
+	nc    int
+
+	nodeView
 
 	err  error
 	busy bool
 
-	mode      int // 0 list, 1 add form, 2 delete confirm, 3 cron edit, 4 edit form
+	mode      int
 	link      textinput.Model
 	tag       textinput.Model
 	ifld      int
@@ -46,7 +41,6 @@ type subsPage struct {
 
 	caps driver.Caps
 
-	// latency test polling state
 	testing   bool
 	testIDs   []string
 	testStart time.Time
@@ -57,15 +51,15 @@ type subsPage struct {
 
 func newSubsPage(caps driver.Caps) subsPage {
 	l := textinput.New()
-	l.Placeholder = "https://example.com/sub 或 data:… 链接"
+	l.Placeholder = i18n.T("https://example.com/sub 或 data:… 链接")
 	l.CharLimit = 2048
 	l.Width = 48
 	t := textinput.New()
-	t.Placeholder = "标签 (可空)"
+	t.Placeholder = i18n.T("标签 (可空)")
 	t.CharLimit = 64
 	t.Width = 32
 	c := textinput.New()
-	c.Placeholder = "cron 表达式，如 0 */6 * * *"
+	c.Placeholder = i18n.T("cron 表达式，如 0 */6 * * *")
 	c.CharLimit = 64
 	c.Width = 32
 	return subsPage{
@@ -85,8 +79,7 @@ func (p *subsPage) setSize(leftW, rightW, h int) {
 }
 
 func (p *subsPage) handleSubs(subs []driver.Subscription, err error) {
-	// Any arrival — a plain refresh or a mutation's follow-up — ends the
-	// in-flight mutation this page last started.
+
 	p.busy = false
 	if err != nil {
 		p.err = err
@@ -94,11 +87,7 @@ func (p *subsPage) handleSubs(subs []driver.Subscription, err error) {
 	}
 	p.err = nil
 	p.subs = subs
-	// Keep the per-subscription node caches: editing a tag or a cron
-	// expression reloads this list too, and dropping every entry would force
-	// a full re-fetch of each expanded subscription for a change that
-	// touched no nodes at all. Only entries the backend actually refreshed
-	// (an `u` update) or that no longer exist are dropped.
+
 	live := make(map[string]bool, len(subs))
 	for _, s := range subs {
 		live[s.ID] = true
@@ -113,8 +102,7 @@ func (p *subsPage) handleSubs(subs []driver.Subscription, err error) {
 	if p.sel >= len(subs) {
 		p.sel = max0(len(subs) - 1)
 	}
-	// The node list under the cursor may have shrunk; keep the cursor valid
-	// without yanking it back to the top on every reload.
+
 	if p.nc >= len(p.visibleNodes()) {
 		p.nc = max0(len(p.visibleNodes()) - 1)
 	}
@@ -152,7 +140,6 @@ func (p *subsPage) handleLatencies(lats []driver.Latency) {
 	p.testing = false
 }
 
-// testProgress reports how many probed nodes have reported back.
 func (p *subsPage) testProgress() (done, total int) {
 	if !p.testing {
 		return 0, 0
@@ -172,10 +159,6 @@ func (p *subsPage) cur() *driver.Subscription {
 	return &p.subs[p.sel]
 }
 
-// ensureNodes returns a fetch command when the selected subscription's
-// nodes are not cached yet (or were just invalidated by an update). The
-// node list is always visible, so plain selection already fetches; any
-// caller is safe — the cache and loading state decide.
 func (p *subsPage) ensureNodes(d driver.Driver) tea.Cmd {
 	s := p.cur()
 	if s == nil {
@@ -188,12 +171,8 @@ func (p *subsPage) ensureNodes(d driver.Driver) tea.Cmd {
 	return loadSubNodesCmd(d, s.ID)
 }
 
-// testIDLimit caps one probe request: the driver chunks longer lists into
-// several requests, and a runaway subscription should not become one.
 const testIDLimit = 500
 
-// startTest probes ids and watches for their results — the shared tail of
-// `t` (the visible list) and `T` (the selected node).
 func (p *subsPage) startTest(d driver.Driver, ids []string) tea.Cmd {
 	if len(ids) == 0 {
 		return nil
@@ -211,7 +190,6 @@ func (p *subsPage) startTest(d driver.Driver, ids []string) tea.Cmd {
 	return testLatencyCmd(d, ids)
 }
 
-// visibleNodeIDs lists the ids the right pane shows, in display order.
 func (p *subsPage) visibleNodeIDs(limit int) []string {
 	nodes := p.visibleNodes()
 	ids := make([]string, 0, len(nodes))
@@ -240,7 +218,7 @@ func (p *subsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 				return nil
 			}
 			p.mode = 0
-			return subMutateCmd(d, subMutation{kind: 2, ids: []string{s.ID}}, "删除订阅")
+			return subMutateCmd(d, subMutation{kind: 2, ids: []string{s.ID}}, i18n.T("删除订阅"))
 		case "n", "esc", "enter":
 			p.mode = 0
 		}
@@ -250,29 +228,25 @@ func (p *subsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		return p.cronKey(msg, d)
 	}
 
-	// The node filter box swallows every key while it is open, like any
-	// other modal on this page.
 	if cmd, consumed := p.nodeView.handleKey(msg); consumed {
 		p.clampNodeCursor()
 		return cmd
 	}
 
-	// Global to this page.
 	switch msg.String() {
 	case "u":
 		if !p.caps.Subscriptions {
-			return unsupportedCmd("更新订阅")
+			return unsupportedCmd(i18n.T("更新订阅"))
 		}
 		if s := p.cur(); s != nil {
 			p.busy = true
-			// The backend re-fetches the subscription's nodes; drop the
-			// cached list when the reloaded subscriptions arrive.
+
 			p.stale[s.ID] = true
-			return subMutateCmd(d, subMutation{kind: 1, id: s.ID}, "更新订阅 "+s.Tag)
+			return subMutateCmd(d, subMutation{kind: 1, id: s.ID}, i18n.T("更新订阅 ")+s.Tag)
 		}
 	case "c":
 		if !p.caps.Subscriptions {
-			return unsupportedCmd("定时刷新")
+			return unsupportedCmd(i18n.T("定时刷新"))
 		}
 		if s := p.cur(); s != nil && p.focus == 0 {
 			p.mode = 3
@@ -284,7 +258,7 @@ func (p *subsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		}
 	case "n":
 		if !p.caps.Subscriptions {
-			return unsupportedCmd("新增订阅")
+			return unsupportedCmd(i18n.T("新增订阅"))
 		}
 		p.mode = 1
 		p.ifld = 0
@@ -294,29 +268,25 @@ func (p *subsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		p.tag.Blur()
 		return textinput.Blink
 	case "y":
-		// `y` copies whatever the info box describes: the node under the
-		// right pane's cursor while that pane has focus, the subscription
-		// otherwise. The toast names which, so the context switch is never
-		// a guess.
+
 		if p.focus == 1 {
 			if n := p.selectedNode(); n != nil && n.Link != "" {
-				return osc52CopyCmd(n.Link, "节点链接")
+				return osc52CopyCmd(n.Link, i18n.T("节点链接"))
 			}
 		}
 		if s := p.cur(); s != nil && s.Link != "" {
-			return osc52CopyCmd(s.Link, "订阅链接")
+			return osc52CopyCmd(s.Link, i18n.T("订阅链接"))
 		}
 	case "t":
-		// The node list is always on screen, so `t` probes exactly what it
-		// shows — the filtered, sorted view — from either focus.
+
 		if !p.caps.TestLatency {
-			return unsupportedCmd("测速")
+			return unsupportedCmd(i18n.T("测速"))
 		}
 		return p.startTest(d, p.visibleNodeIDs(testIDLimit))
 	case "T":
-		// Only the selected node — the same t/T pair the groups page uses.
+
 		if !p.caps.TestLatency {
-			return unsupportedCmd("测速")
+			return unsupportedCmd(i18n.T("测速"))
 		}
 		if n := p.selectedNode(); n != nil {
 			return p.startTest(d, []string{n.ID})
@@ -346,21 +316,21 @@ func (p *subsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			p.nc = 0
 			return p.ensureNodes(d)
 		case "tab", "l", "right", "enter":
-			// The node list is always rendered; this just moves focus.
+
 			if s := p.cur(); s != nil {
 				p.focus = 1
 				return p.ensureNodes(d)
 			}
 		case "x":
 			if !p.caps.Subscriptions {
-				return unsupportedCmd("删除订阅")
+				return unsupportedCmd(i18n.T("删除订阅"))
 			}
 			if p.cur() != nil {
 				p.mode = 2
 			}
 		case "e":
 			if !p.caps.Subscriptions {
-				return unsupportedCmd("编辑订阅")
+				return unsupportedCmd(i18n.T("编辑订阅"))
 			}
 			if s := p.cur(); s != nil {
 				return p.openEdit(s)
@@ -369,12 +339,11 @@ func (p *subsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		return nil
 	}
 
-	// Right-pane navigation over the node list.
 	nodes := p.visibleNodes()
 	switch msg.String() {
 	case "e":
 		if !p.caps.Subscriptions {
-			return unsupportedCmd("编辑订阅")
+			return unsupportedCmd(i18n.T("编辑订阅"))
 		}
 		if s := p.cur(); s != nil {
 			return p.openEdit(s)
@@ -413,18 +382,15 @@ func (p *subsPage) cronKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			return textinput.Blink
 		}
 		return nil
-	case " ": // bubbletea reports the space key as " ", not "space"
-		// Only space toggles: j/k are navigation muscle memory, and letting
-		// them flip the switch silently rewrote the cron's enable state on
-		// the way to another row. On the toggle row they are a no-op; on the
-		// expression row they fall through to the text input below.
+	case " ":
+
 		if p.ifld == 1 {
 			p.cronOn = !p.cronOn
 			return nil
 		}
 	case "enter":
 		if p.ifld == 0 {
-			// jump to the toggle instead of submitting immediately
+
 			p.ifld = 1
 			p.cronInput.Blur()
 			return nil
@@ -438,7 +404,7 @@ func (p *subsPage) cronKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		}
 		p.busy = true
 		return subMutateCmd(d, subMutation{kind: 3, id: s.ID, cronExp: exp, cronOn: p.cronOn},
-			"更新 "+s.Tag+" 定时刷新 ("+onOff(p.cronOn)+")")
+			i18n.T("更新 ")+s.Tag+i18n.T(" 定时刷新 (")+onOff(p.cronOn)+")")
 	}
 	if p.ifld == 0 {
 		var cmd tea.Cmd
@@ -455,10 +421,6 @@ func (p *subsPage) curNodes() []driver.Node {
 	return nil
 }
 
-// selectedNode is the node the right pane's cursor sits on, or nil when the
-// pane holds no node list (a modal is open, nothing fetched, no match). The
-// cursor's highlight follows focus but the selection does not: Tab away and
-// back and the same row is still the selected one.
 func (p subsPage) selectedNode() *driver.Node {
 	if p.mode != 0 {
 		return nil
@@ -471,40 +433,25 @@ func (p subsPage) selectedNode() *driver.Node {
 	return &n
 }
 
-// showNodeInfo reports whether the info box describes the selected node
-// instead of the subscription. Focus is the switch, so Tab back to the left
-// list restores the card — the node view is where the cursor is, not a mode
-// the user has to undo.
 func (p subsPage) showNodeInfo() bool {
 	return p.focus == 1 && p.selectedNode() != nil
 }
 
-// nodeInfoLines is the info box's node state: what the selected node is, in
-// the same 6-cell label column as every other detail pane. Latency comes
-// from the poll this page already runs over its visible nodes — the node
-// view adds no request of its own. The node's tag is deliberately absent:
-// a subscription node carries its subscription's tag, which is the one fact
-// this page already states in three other places.
 func (p subsPage) nodeInfoLines(n *driver.Node) []string {
 	lines := []string{
-		ui.SelectedStyle.Render("名称  ") + ui.SpaceAfterFlag(n.Name),
-		ui.SelectedStyle.Render("协议  ") + n.Protocol,
-		ui.SelectedStyle.Render("地址  ") + ui.Truncate(n.Address, max0(p.rightW-10)),
+		ui.SelectedStyle.Render(i18n.T("名称  ")) + ui.SpaceAfterFlag(n.Name),
+		ui.SelectedStyle.Render(i18n.T("协议  ")) + n.Protocol,
+		ui.SelectedStyle.Render(i18n.T("地址  ")) + ui.Truncate(n.Address, max0(p.rightW-10)),
 	}
 	if n.Link != "" {
-		lines = append(lines, ui.SelectedStyle.Render("链接  ")+ui.Truncate(n.Link, max0(p.rightW-10)))
+		lines = append(lines, ui.SelectedStyle.Render(i18n.T("链接  "))+ui.Truncate(n.Link, max0(p.rightW-10)))
 	}
 	if row, ok := latencyDetail(p.lat, n.ID); ok {
-		lines = append(lines, ui.SelectedStyle.Render("延迟  ")+row)
+		lines = append(lines, ui.SelectedStyle.Render(i18n.T("延迟  "))+row)
 	}
 	return lines
 }
 
-// infoBoxLen is the info box's row count, pinned to the taller of the two
-// states it can show (subscription card / selected node). A box that resized
-// with the cursor would reflow the node list under the user's eyes on every
-// j/k; the shorter state pads inside its box instead, the same dead-space
-// rule the paired home zones follow.
 func (p subsPage) infoBoxLen() int {
 	n := len(p.infoLines())
 	if sel := p.selectedNode(); sel != nil {
@@ -515,14 +462,10 @@ func (p subsPage) infoBoxLen() int {
 	return n
 }
 
-// visibleNodes is the subscription's node list as the filter and sort
-// currently present it.
 func (p *subsPage) visibleNodes() []driver.Node {
 	return p.nodeView.visible(p.curNodes(), p.lat)
 }
 
-// visibleLatencyIDs lists the nodes whose latency the right column renders:
-// whatever the node list currently shows (nothing before it is fetched).
 func (p *subsPage) visibleLatencyIDs() []string {
 	nodes := p.visibleNodes()
 	ids := make([]string, 0, len(nodes))
@@ -532,8 +475,6 @@ func (p *subsPage) visibleLatencyIDs() []string {
 	return ids
 }
 
-// clampNodeCursor keeps the node cursor inside the filtered list, which can
-// shrink under it while the user types.
 func (p *subsPage) clampNodeCursor() {
 	if n := len(p.visibleNodes()); p.nc >= n {
 		p.nc = max0(n - 1)
@@ -564,7 +505,7 @@ func (p *subsPage) addFormKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		tag := strings.TrimSpace(p.tag.Value())
 		p.mode = 0
 		p.busy = true
-		return subMutateCmd(d, subMutation{kind: 0, link: link, tag: tag}, "新增订阅")
+		return subMutateCmd(d, subMutation{kind: 0, link: link, tag: tag}, i18n.T("新增订阅"))
 	}
 	var cmd tea.Cmd
 	if p.ifld == 0 {
@@ -575,10 +516,6 @@ func (p *subsPage) addFormKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	return cmd
 }
 
-// openEdit prefills the edit form with the subscription's tag and link.
-// Editing in place keeps the subscription ID, which is what groups attach
-// to — removing and re-adding mints a new ID and silently detaches the
-// subscription from every group.
 func (p *subsPage) openEdit(s *driver.Subscription) tea.Cmd {
 	p.mode = 4
 	p.ifld = 0
@@ -619,7 +556,7 @@ func (p *subsPage) editFormKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		if link != "" && link != s.Link {
 			m.doLink = true
 		}
-		return subMutateCmd(d, m, "编辑订阅 "+s.Tag)
+		return subMutateCmd(d, m, i18n.T("编辑订阅 ")+s.Tag)
 	}
 	var cmd tea.Cmd
 	if p.ifld == 0 {
@@ -631,18 +568,9 @@ func (p *subsPage) editFormKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 }
 
 func (p subsPage) View() string {
-	// The page is a master/detail row whose detail side is two stacked
-	// boxes (subscription info on top, node list below), built by
-	// PaneRowColumn; the in-pane modal (the delete confirmation) renders in
-	// the bottom box — the boxes always fill the page height, so anything
-	// appended below them would be pushed off screen.
-	//
-	// The info box follows the focus: the subscription card while the left
-	// list owns the keyboard, the selected node's details once the node list
-	// does. Its height is pinned (infoBoxLen), so switching states — and
-	// moving the cursor inside the node state — never resizes the node list.
+
 	info := p.infoLines()
-	topTitle := "订阅"
+	topTitle := i18n.T("订阅")
 	if s := p.cur(); s != nil && s.Tag != "" {
 		topTitle = s.Tag
 	}
@@ -651,27 +579,23 @@ func (p subsPage) View() string {
 	}
 	topH, bottomInner := stackedDetail(p.infoBoxLen(), p.height)
 	body := p.bodyLines(bottomInner)
-	bottomTitle := "节点"
+	bottomTitle := i18n.T("节点")
 	if s := p.cur(); s != nil {
 		if p.mode == 2 {
-			bottomTitle = "删除确认"
+			bottomTitle = i18n.T("删除确认")
 		} else if all := p.subNodes[s.ID]; all != nil {
 			bottomTitle += p.nodeView.countTitle(len(p.visibleNodes()), len(all)) +
 				p.nodeView.sortTitle()
 		}
 	}
-	// Key hints ride the edges of the boxes they belong to: the left box
-	// carries the left-focused actions, the bottom box the node-list keys
-	// (and the delete confirmation's y/n while it is open); page-wide keys
-	// stay on the app frame, where `y 复制链接` covers the left pane's
-	// subject — the subscription — while this edge covers the node's.
-	rightFooter := "t/T 测速 · y 复制 · / 过滤 · o 排序"
+
+	rightFooter := i18n.T("t/T 测速 · y 复制 · / 过滤 · o 排序")
 	if p.mode == 2 {
-		rightFooter = "y 确认 · n/esc 取消"
+		rightFooter = i18n.T("y 确认 · n/esc 取消")
 	}
 	return strings.Join(ui.PaneRowColumn(
-		ui.PaneSpec{Title: "订阅 (" + strconv.Itoa(len(p.subs)) + ")",
-			Footer: "Tab 切栏 · c 定时刷新 · x 删除", Lines: p.leftLines(),
+		ui.PaneSpec{Title: i18n.T("订阅 (") + strconv.Itoa(len(p.subs)) + ")",
+			Footer: i18n.T("Tab 切栏 · c 定时刷新 · x 删除"), Lines: p.leftLines(),
 			Focused: p.focus == 0, W: p.leftW, H: p.height},
 		ui.PaneSpec{Title: topTitle, Lines: info, W: p.rightW, H: topH},
 		ui.PaneSpec{Title: bottomTitle, Footer: rightFooter, Lines: body,
@@ -679,74 +603,69 @@ func (p subsPage) View() string {
 	), "\n")
 }
 
-// overlay returns the page's floating window: the add / cron / edit forms.
-// The delete confirmation stays in the right pane — it belongs next to the
-// item it names.
 func (p subsPage) overlay() *overlaySpec {
 	switch p.mode {
 	case 1:
 		return &overlaySpec{lines: []string{
-			ui.TitleStyle.Render(" 新增订阅"),
+			ui.TitleStyle.Render(i18n.T(" 新增订阅")),
 			"",
-			" 链接  " + p.link.View(),
-			" 标签  " + p.tag.View(),
+			i18n.T(" 链接  ") + p.link.View(),
+			i18n.T(" 标签  ") + p.tag.View(),
 			"",
-			ui.HelpStyle.Render(" Tab 切换字段  Enter 提交  esc 取消"),
+			ui.HelpStyle.Render(i18n.T(" Tab 切换字段  Enter 提交  esc 取消")),
 		}}
 	case 3:
 		if s := p.cur(); s != nil {
-			on := ui.ErrorStyle.Render("停用")
+			on := ui.ErrorStyle.Render(i18n.T("停用"))
 			if p.cronOn {
-				on = ui.OKStyle.Render("启用")
+				on = ui.OKStyle.Render(i18n.T("启用"))
 			}
 			cursor := "  "
 			if p.ifld == 1 {
 				cursor = ui.CursorStyle.Render("❯ ")
 			}
 			return &overlaySpec{lines: []string{
-				ui.TitleStyle.Render(" 定时刷新 " + s.Tag),
+				ui.TitleStyle.Render(i18n.T(" 定时刷新 ") + s.Tag),
 				"",
-				" 表达式  " + p.cronInput.View(),
-				" 启用    " + cursor + on + ui.HelpStyle.Render("  (space 切换)"),
+				i18n.T(" 表达式  ") + p.cronInput.View(),
+				i18n.T(" 启用    ") + cursor + on + ui.HelpStyle.Render(i18n.T("  (space 切换)")),
 				"",
-				ui.HelpStyle.Render(" Tab 切换  space 开关  Enter 提交  esc 取消"),
+				ui.HelpStyle.Render(i18n.T(" Tab 切换  space 开关  Enter 提交  esc 取消")),
 			}}
 		}
 	case 4:
 		if s := p.cur(); s != nil {
 			return &overlaySpec{lines: []string{
-				ui.TitleStyle.Render(" 编辑订阅 · " + s.Tag),
+				ui.TitleStyle.Render(i18n.T(" 编辑订阅 · ") + s.Tag),
 				"",
-				" 标签  " + p.tag.View(),
-				" 链接  " + p.link.View(),
+				i18n.T(" 标签  ") + p.tag.View(),
+				i18n.T(" 链接  ") + p.link.View(),
 				"",
-				ui.HelpStyle.Render(" 改链接不会重新拉取节点（u 才会）"),
-				ui.HelpStyle.Render(" Tab 切换字段  Enter 提交  esc 取消"),
+				ui.HelpStyle.Render(i18n.T(" 改链接不会重新拉取节点（u 才会）")),
+				ui.HelpStyle.Render(i18n.T(" Tab 切换字段  Enter 提交  esc 取消")),
 			}}
 		}
 	}
 	return nil
 }
 
-// modalLines renders the in-pane modal: only the delete confirmation
-// (the forms float, see overlay).
 func (p subsPage) modalLines() []string {
 	if s := p.cur(); s != nil {
-		return ui.BoxLines(true, "确认删除订阅 \""+s.Tag+"\"? (y/n)")
+		return ui.BoxLines(true, i18n.T("确认删除订阅 \"")+s.Tag+"\"? (y/n)")
 	}
-	return []string{ui.HelpStyle.Render("（无订阅）")}
+	return []string{ui.HelpStyle.Render(i18n.T("（无订阅）"))}
 }
 
 func (p subsPage) leftLines() []string {
 	var lines []string
 	if !p.caps.Subscriptions {
-		lines = append(lines, ui.ErrorStyle.Render("✗ 当前后端不支持订阅管理"))
+		lines = append(lines, ui.ErrorStyle.Render(i18n.T("✗ 当前后端不支持订阅管理")))
 	}
 	if p.err != nil {
 		lines = append(lines, ui.ErrorStyle.Render("✗ "+shortErr(p.err)))
 	}
 	if len(p.subs) == 0 {
-		lines = append(lines, ui.HelpStyle.Render("无订阅（按 n 添加）"))
+		lines = append(lines, ui.HelpStyle.Render(i18n.T("无订阅（按 n 添加）")))
 	}
 	rowsH := max0(p.height - 2)
 	start := 0
@@ -760,10 +679,7 @@ func (p subsPage) leftLines() []string {
 		if i == p.sel {
 			cursor = ui.CursorStyle.Render("❯")
 		}
-		// daed never writes the subscription's status field (created as ""
-		// and the refresh flow does not touch it), so emptiness is not a
-		// failure signal — render a dim dash and judge by freshness. A
-		// status that does name a failure gets its info first line below.
+
 		failed := containsFold(s.Status, "fail") || containsFold(s.Status, "error")
 		st, stStyle := s.Status, ui.OKStyle
 		switch {
@@ -774,7 +690,7 @@ func (p subsPage) leftLines() []string {
 		}
 		row := cursor + " " + ui.PadRight(s.Tag, max0(p.leftW-26)) +
 			stStyle.Render(ui.Truncate(st, 10)) +
-			ui.HelpStyle.Render(" "+strconv.Itoa(s.NodeCount)+"节点")
+			ui.HelpStyle.Render(" "+strconv.Itoa(s.NodeCount)+i18n.T("节点"))
 		list = append(list, ui.HiRow(row, p.leftW-4, i == p.sel))
 		if failed && s.Info != "" {
 			list = append(list, "    "+ui.ErrorStyle.Render(
@@ -784,10 +700,6 @@ func (p subsPage) leftLines() []string {
 	return append(lines, ui.WithScrollbar(list, p.leftW-4, len(p.subs), start, p.focus == 0)...)
 }
 
-// leftClick selects the row-th displayed subscription, mirroring leftLines'
-// row layout (prefix lines, failed subs' info rows and the scroll window)
-// so the click lands on the row the user saw. Selecting also (re)fetches
-// the subscription's node list.
 func (p *subsPage) leftClick(row int, d driver.Driver) tea.Cmd {
 	prefix := 0
 	if !p.caps.Subscriptions {
@@ -805,15 +717,13 @@ func (p *subsPage) leftClick(row int, d driver.Driver) tea.Cmd {
 	}
 	rowsH := max0(p.height - 2)
 	if row >= rowsH {
-		return nil // border row or dead space below the list
+		return nil
 	}
 	start := 0
 	if p.sel >= rowsH {
 		start = p.sel - rowsH + 1
 	}
-	// Walk the same rows leftLines renders: each sub has one row and a
-	// failed sub with an info line one more — clicking that info row
-	// selects the failed sub it describes.
+
 	i := start
 	for i < len(p.subs) {
 		s := p.subs[i]
@@ -837,15 +747,6 @@ func (p *subsPage) leftClick(row int, d driver.Driver) tea.Cmd {
 	return p.ensureNodes(d)
 }
 
-// rightClick puts the node cursor on the clicked row of the bottom box.
-// Same contract as groupsPage.rightClick: row counts the column's content
-// rows from the info box's first line, so the info box including both
-// borders (topH), the bottom box's top border and the filter prompt must be
-// subtracted before mapping through the window bodyLines renders with. The
-// click must also land inside that window: the bottom border and the rows
-// below the box are no-ops, or a list longer than the box would move the
-// cursor onto a node the window never rendered. The info box is
-// display-only: clicks there do nothing.
 func (p *subsPage) rightClick(row int) {
 	if p.mode != 0 {
 		return
@@ -855,10 +756,10 @@ func (p *subsPage) rightClick(row int) {
 	if p.nodeView.prompt() != "" {
 		head = 1
 	}
-	d := row - topH - head // node row within the bottom box's window
+	d := row - topH - head
 	rowsH := max0(inner - head)
 	if d < 0 || d >= rowsH {
-		return // info box, box edges, prompt line or dead space below
+		return
 	}
 	nodes := p.visibleNodes()
 	start := 0
@@ -872,15 +773,12 @@ func (p *subsPage) rightClick(row int) {
 	}
 }
 
-// infoLines is the right column's top box: the subscription's metadata,
-// labels on a shared 6-cell column like every other detail pane.
 func (p subsPage) infoLines() []string {
 	s := p.cur()
 	if s == nil {
-		return []string{ui.HelpStyle.Render("（无订阅）")}
+		return []string{ui.HelpStyle.Render(i18n.T("（无订阅）"))}
 	}
-	// daed never writes the status field (always ""), so emptiness renders
-	// as a dim dash; only a status naming a failure is red.
+
 	failed := containsFold(s.Status, "fail") || containsFold(s.Status, "error")
 	status := ui.OKStyle.Render(s.Status)
 	switch {
@@ -894,37 +792,34 @@ func (p subsPage) infoLines() []string {
 		cron += ui.HelpStyle.Render(" (" + s.CronExp + ")")
 	}
 	lines := []string{
-		ui.SelectedStyle.Render("标签  ") + s.Tag,
-		ui.SelectedStyle.Render("状态  ") + status,
-		ui.SelectedStyle.Render("定时  ") + cron,
-		ui.SelectedStyle.Render("链接  ") + ui.Truncate(s.Link, max0(p.rightW-10)),
+		ui.SelectedStyle.Render(i18n.T("标签  ")) + s.Tag,
+		ui.SelectedStyle.Render(i18n.T("状态  ")) + status,
+		ui.SelectedStyle.Render(i18n.T("定时  ")) + cron,
+		ui.SelectedStyle.Render(i18n.T("链接  ")) + ui.Truncate(s.Link, max0(p.rightW-10)),
 	}
 	if s.Info != "" {
-		lines = append(lines, ui.SelectedStyle.Render("信息  ")+ui.Truncate(firstLine(s.Info), max0(p.rightW-10)))
+		lines = append(lines, ui.SelectedStyle.Render(i18n.T("信息  "))+ui.Truncate(firstLine(s.Info), max0(p.rightW-10)))
 	}
-	return append(lines, ui.SelectedStyle.Render("更新  ")+ui.TimeAgo(s.UpdatedAt))
+	return append(lines, ui.SelectedStyle.Render(i18n.T("更新  "))+ui.TimeAgo(s.UpdatedAt))
 }
 
-// bodyLines is the right column's bottom box: the subscription's node list
-// (or the delete confirmation in its place). inner is the box's content
-// height; the node list windows itself to it.
 func (p subsPage) bodyLines(inner int) []string {
 	if p.mode == 2 {
-		return p.modalLines() // delete confirmation
+		return p.modalLines()
 	}
 	s := p.cur()
 	if s == nil {
-		return []string{ui.HelpStyle.Render("（无订阅）")}
+		return []string{ui.HelpStyle.Render(i18n.T("（无订阅）"))}
 	}
 	if err := p.subErr[s.ID]; err != nil {
-		return []string{ui.ErrorStyle.Render("✗ 拉取节点失败: " + shortErr(err))}
+		return []string{ui.ErrorStyle.Render(i18n.T("✗ 拉取节点失败: ") + shortErr(err))}
 	}
 	all := p.subNodes[s.ID]
 	if p.loading == s.ID && all == nil {
-		return []string{ui.HelpStyle.Render(" 拉取节点中…")}
+		return []string{ui.HelpStyle.Render(i18n.T(" 拉取节点中…"))}
 	}
 	if len(all) == 0 {
-		return []string{ui.HelpStyle.Render(" 无节点（u 更新订阅后重试）")}
+		return []string{ui.HelpStyle.Render(i18n.T(" 无节点（u 更新订阅后重试）"))}
 	}
 	var lines []string
 	if prompt := p.nodeView.prompt(); prompt != "" {
@@ -932,7 +827,7 @@ func (p subsPage) bodyLines(inner int) []string {
 	}
 	nodes := p.visibleNodes()
 	if len(nodes) == 0 {
-		return append(lines, ui.ErrorStyle.Render(" 没有匹配的节点（/ 重新编辑，框内 esc 清空）"))
+		return append(lines, ui.ErrorStyle.Render(i18n.T(" 没有匹配的节点（/ 重新编辑，框内 esc 清空）")))
 	}
 	rowsH := max0(inner - len(lines))
 	start := 0
@@ -957,9 +852,9 @@ func (p subsPage) bodyLines(inner int) []string {
 
 func onOff(b bool) string {
 	if b {
-		return "开"
+		return i18n.T("开")
 	}
-	return "关"
+	return i18n.T("关")
 }
 
 func containsFold(s, sub string) bool {

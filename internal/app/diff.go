@@ -1,27 +1,23 @@
 package app
 
 import (
+	"dae-tui/internal/i18n"
 	"strconv"
 	"strings"
 )
 
-// diffLine is one rendered line of a line-oriented diff.
 type diffLine struct {
 	kind int
 	text string
 }
 
 const (
-	diffEqual = iota // unchanged context
-	diffAdd          // present only in the new text
-	diffDel          // present only in the old text
-	diffGap          // a collapsed run of unchanged lines
+	diffEqual = iota
+	diffAdd
+	diffDel
+	diffGap
 )
 
-// diffLines compares old → new line by line and returns display lines.
-// Unchanged runs longer than a few lines collapse into a gap marker, so the
-// interesting part of a DSL edit stays on screen instead of scrolling past
-// pages of context.
 func diffLines(old, new string) []diffLine {
 	ops := lcsDiff(splitDiffLines(old), splitDiffLines(new))
 	var out []diffLine
@@ -36,7 +32,7 @@ func diffLines(old, new string) []diffLine {
 			j++
 		}
 		if run := j - i; run > 4 {
-			out = append(out, diffLine{kind: diffGap, text: "… " + strconv.Itoa(run) + " 行相同"})
+			out = append(out, diffLine{kind: diffGap, text: "… " + strconv.Itoa(run) + i18n.T(" 行相同")})
 		} else {
 			out = append(out, ops[i:j]...)
 		}
@@ -45,16 +41,8 @@ func diffLines(old, new string) []diffLine {
 	return out
 }
 
-// maxDiffCells caps the LCS table: the builtin editor accepts arbitrarily
-// large pastes, and a quadratic table over a multi-thousand-line diff is
-// real memory for a confirmation the user answers with y/n.
 const maxDiffCells = 1 << 21
 
-// lcsDiff computes the edit script between a and b. The common head and
-// tail are trimmed first — a one-rule change inside a long profile then
-// pays an LCS table for the changed middle only — and a middle that is
-// still too large to diff pairwise degrades to a wholesale replacement
-// (everything deleted, everything added) instead of trying to align it.
 func lcsDiff(a, b []string) []diffLine {
 	pre := 0
 	for pre < len(a) && pre < len(b) && a[pre] == b[pre] {
@@ -85,9 +73,6 @@ func lcsDiff(a, b []string) []diffLine {
 	return ops
 }
 
-// lcsTable is the classic longest-common-subsequence edit script. Routing/
-// DNS profiles are tens of lines (and lcsDiff trims the unchanged frame
-// first), so the quadratic table is not a concern here.
 func lcsTable(a, b []string) []diffLine {
 	n, m := len(a), len(b)
 	if n == 0 || m == 0 {
@@ -141,8 +126,6 @@ func lcsTable(a, b []string) []diffLine {
 	return ops
 }
 
-// splitDiffLines drops the trailing newline and blank-only edges so a diff
-// does not open with a spurious empty line.
 func splitDiffLines(s string) []string {
 	s = strings.Trim(s, "\n")
 	if s == "" {

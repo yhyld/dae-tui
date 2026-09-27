@@ -2,7 +2,6 @@ package app
 
 import (
 	"errors"
-	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -12,43 +11,27 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"dae-tui/internal/driver"
+	"dae-tui/internal/i18n"
 	"dae-tui/internal/ui"
 )
 
-// groupsPage: master-detail. Left pane lists groups; the right column is
-// two stacked boxes — the selected group's info on top, its attached
-// subscriptions with matched nodes and then manually added nodes below,
-// with their own cursor and scroll window. Tab/l moves focus to the right
-// column, h/esc returns to the group list.
 type groupsPage struct {
 	groups []driver.Group
 	subs   []driver.Subscription
-	// refs maps a group name to the routing profiles whose DSL references
-	// it. Renaming or deleting such a group breaks those profiles silently
-	// (daed accepts the change; the rules just stop matching), so the R/D
-	// confirmations must name them.
+
 	refs map[string][]string
 
-	gi    int // left cursor: group index
-	focus int // 0 left, 1 right (detail column)
-	// per-section expansion in the right pane (default collapsed). Keyed by
-	// subscription ID, not by position: a refresh can reorder the group's
-	// subscriptions, and an index key would open someone else's section.
+	gi    int
+	focus int
+
 	subOpen    map[string]bool
 	directOpen bool
 
-	// right pane flattened detail rows for the selected group
 	rows []trow
-	rc   int // right cursor
+	rc   int
 
-	// marked holds the node IDs ticked with space in the detail pane, for
-	// batch test / remove. Marks live across filtering and scrolling but are
-	// dropped when the group changes or the detail collapses.
 	marked map[string]bool
-	// pickMarked is the same idea for the `n` add-node picker's candidates.
-	// It is deliberately a separate map: sharing one made detail-pane ticks
-	// (meant for removal) ride into the picker and get attached as
-	// additions, and closing the picker with esc wiped the pending removals.
+
 	pickMarked map[string]bool
 
 	lat map[string]driver.Latency
@@ -56,23 +39,21 @@ type groupsPage struct {
 	loading bool
 	err     error
 
-	// latency test polling state
 	testing   bool
 	testIDs   []string
 	testStart time.Time
 	baseline  map[string]time.Time
 
-	// picker/modal state (rendered inside the right pane)
 	mode       int
 	pickCursor int
-	manual     []driver.Node // manual nodes from loadManualNodesCmd
-	candManual []driver.Node // `n` picker candidates
+	manual     []driver.Node
+	candManual []driver.Node
 	candSubs   []subNodes
 	candBusy   bool
 	pickErr    string
-	input      textinput.Model // inputCreate / inputRename
+	input      textinput.Model
 
-	nodeView // filter/sort for the detail pane's nodes and the `n` picker
+	nodeView
 
 	caps driver.Caps
 
@@ -83,7 +64,7 @@ const (
 	rowGroup = iota
 	rowSub
 	rowNode
-	rowDirect // section header: directly-added nodes
+	rowDirect
 )
 
 const (
@@ -104,13 +85,13 @@ type trow struct {
 	gi     int
 	si     int
 	node   driver.Node
-	manual bool // node row in the direct section: subscription-less node
-	direct bool // node row in the direct section (explicitly attached)
+	manual bool
+	direct bool
 }
 
 func newGroupsPage(caps driver.Caps) groupsPage {
 	ti := textinput.New()
-	ti.Placeholder = "名称"
+	ti.Placeholder = i18n.T("名称")
 	ti.CharLimit = 64
 	ti.Width = 32
 	return groupsPage{
@@ -126,25 +107,17 @@ func newGroupsPage(caps driver.Caps) groupsPage {
 	}
 }
 
-// policyChoices are the selectable group policies (fixed is set per-node
-// via Enter, so it is not offered here).
 var policyChoices = []struct{ name, label string }{
-	{"min_moving_avg", "自动 · 最小移动平均延迟"},
-	{"min_avg10", "自动 · 最小平均延迟"},
-	{"min", "自动 · 最小最新延迟"},
-	{"random", "随机"},
+	{"min_moving_avg", i18n.T("自动 · 最小移动平均延迟")},
+	{"min_avg10", i18n.T("自动 · 最小平均延迟")},
+	{"min", i18n.T("自动 · 最小最新延迟")},
+	{"random", i18n.T("随机")},
 }
 
 func (p *groupsPage) setSize(leftW, rightW, h int) {
 	p.leftW, p.rightW, p.height = leftW, rightW, h
 }
 
-// rebuild regenerates the right-pane rows for the selected group. The
-// filter and sort are applied per section (visible() does both), so the
-// section structure survives a latency sort — only the order inside each
-// section changes. While a node filter is active, sections behave as
-// expanded and drop out entirely when nothing in them matches, so the filter
-// result is never hidden behind a collapsed section.
 func (p *groupsPage) rebuild() {
 	p.rows = p.rows[:0]
 	if p.gi >= len(p.groups) {
@@ -164,8 +137,7 @@ func (p *groupsPage) rebuild() {
 			}
 		}
 	}
-	// Group.nodes is exactly the set of directly-attached nodes (manual
-	// imports plus nodes picked out of subscriptions).
+
 	direct := p.nodeView.visible(g.Nodes, p.lat)
 	if len(direct) > 0 {
 		p.rows = append(p.rows, trow{kind: rowDirect, gi: p.gi})
@@ -181,8 +153,6 @@ func (p *groupsPage) rebuild() {
 	}
 }
 
-// collapseSections resets per-section expansion (a group change is what
-// calls it: leaving the detail column keeps the sections as they are).
 func (p *groupsPage) collapseSections() {
 	p.subOpen = map[string]bool{}
 	p.directOpen = false
@@ -210,8 +180,7 @@ func (p *groupsPage) handleGroups(groups []driver.Group, err error) {
 		return
 	}
 	p.err = nil
-	// A stale picker error outlives whatever produced it (e.g. a failed
-	// candidates load); a fresh group list retires it.
+
 	p.pickErr = ""
 	p.groups = groups
 	p.loading = false
@@ -227,9 +196,7 @@ func (p *groupsPage) setSubs(subs []driver.Subscription, err error) {
 	}
 	p.pickErr = ""
 	p.subs = subs
-	// A subscription's tag is displayed inside groups too; patch it in place
-	// so a rename does not leave the group pane showing the old tag until the
-	// next full refresh.
+
 	for gi := range p.groups {
 		for si := range p.groups[gi].Subscriptions {
 			gs := &p.groups[gi].Subscriptions[si]
@@ -243,8 +210,6 @@ func (p *groupsPage) setSubs(subs []driver.Subscription, err error) {
 	p.rebuild()
 }
 
-// setReferences records which routing profiles reference which group names,
-// from the backend's referenceGroups field.
 func (p *groupsPage) setReferences(routings []driver.ConfigItem) {
 	refs := map[string][]string{}
 	for _, r := range routings {
@@ -255,21 +220,18 @@ func (p *groupsPage) setReferences(routings []driver.ConfigItem) {
 	p.refs = refs
 }
 
-// refNote names the routing profiles that reference a group, or "" when none
-// do. Renaming or deleting such a group breaks those profiles silently
-// (daed accepts the change; the rules just stop matching).
 func (p *groupsPage) refNote(name string) string {
 	profiles := p.refs[name]
 	if len(profiles) == 0 {
 		return ""
 	}
-	return "该组被路由方案 " + strings.Join(quoteAll(profiles), "、") + " 引用，改名/删除后这些规则将静默失效"
+	return i18n.T("该组被路由方案 ") + strings.Join(quoteAll(profiles), "、") + i18n.T(" 引用，改名/删除后这些规则将静默失效")
 }
 
 func quoteAll(items []string) []string {
 	out := make([]string, len(items))
 	for i, s := range items {
-		out[i] = "「" + s + "」"
+		out[i] = i18n.T("「") + s + i18n.T("」")
 	}
 	return out
 }
@@ -314,8 +276,6 @@ func (p *groupsPage) handleLatencies(lats []driver.Latency, err error) {
 	p.testing = false
 }
 
-// testProgress reports how many probed nodes have reported back, so the tab
-// bar can show real progress instead of a spinner that lies.
 func (p *groupsPage) testProgress() (done, total int) {
 	if !p.testing {
 		return 0, 0
@@ -329,7 +289,7 @@ func (p *groupsPage) testProgress() (done, total int) {
 }
 
 func (p *groupsPage) testIDsFor(onlySelected bool) []string {
-	// Ticks win over the section/group semantics: the user named the nodes.
+
 	if ids := p.markedIDs(); len(ids) > 0 && !onlySelected {
 		return ids
 	}
@@ -346,10 +306,7 @@ func (p *groupsPage) testIDsFor(onlySelected bool) []string {
 			}
 			return []string{r.node.ID}
 		}
-		// "Whole group" means every member, including the nodes contributed
-		// by attached subscriptions: Group.Nodes holds only the directly
-		// attached ones in daed v2, while the left pane advertises
-		// len(Members()) as the group's node count.
+
 		nodes = g.Members()
 	} else {
 		r := p.cur()
@@ -372,11 +329,6 @@ func (p *groupsPage) testIDsFor(onlySelected bool) []string {
 	return ids
 }
 
-// visibleLatencyIDs lists the nodes whose latency the detail pane renders:
-// the node rows of the open sections (the filtered set while a filter is
-// active), or the picker's candidates while the add-node picker is open —
-// its sort-by-latency order reads the same table. The other modals show no
-// latency, so they poll nothing.
 func (p *groupsPage) visibleLatencyIDs() []string {
 	if p.mode == pickNode {
 		rows := p.visibleCandidates()
@@ -400,9 +352,6 @@ func (p *groupsPage) visibleLatencyIDs() []string {
 	return ids
 }
 
-// markedIDs lists the ticked nodes in row order, so batch mutations probe
-// and report them deterministically. A node attached both directly and
-// through a subscription occupies two rows; it is listed once.
 func (p *groupsPage) markedIDs() []string {
 	seen := map[string]bool{}
 	var out []string
@@ -415,9 +364,6 @@ func (p *groupsPage) markedIDs() []string {
 	return out
 }
 
-// markedDirectNodes lists the ticked nodes that were attached directly
-// (manually imported or picked out of a subscription) — the only ones a
-// group can drop without detaching a whole subscription.
 func (p *groupsPage) markedDirectNodes() []driver.Node {
 	seen := map[string]bool{}
 	var out []driver.Node
@@ -448,7 +394,6 @@ func (p *groupsPage) startTest(d driver.Driver, onlySelected bool) tea.Cmd {
 	return testLatencyCmd(d, ids)
 }
 
-// pickableSubs returns subscriptions not yet attached to the given group.
 func (p *groupsPage) pickableSubs(g *driver.Group) []driver.Subscription {
 	attached := map[string]bool{}
 	for _, s := range g.Subscriptions {
@@ -463,10 +408,6 @@ func (p *groupsPage) pickableSubs(g *driver.Group) []driver.Subscription {
 	return out
 }
 
-// selectGroupAt moves the left-pane cursor. The detail rows follow the
-// selected group; without the rebuild the right pane would render the
-// previous group's nodes whenever a filter keeps it visible across a group
-// change.
 func (p *groupsPage) selectGroupAt(next int) {
 	p.gi = next
 	p.rc = 0
@@ -474,40 +415,33 @@ func (p *groupsPage) selectGroupAt(next int) {
 	p.rebuild()
 }
 
-// overlay returns the page's floating window: the create/rename input
-// forms. Pickers and confirmations stay in the right pane next to what they
-// act on.
 func (p groupsPage) overlay() *overlaySpec {
 	switch p.mode {
 	case inputCreate:
 		return &overlaySpec{lines: []string{
-			ui.TitleStyle.Render(" 创建群组 (默认策略: 自动·最小移动平均)"),
+			ui.TitleStyle.Render(i18n.T(" 创建群组 (默认策略: 自动·最小移动平均)")),
 			"",
-			" 名称  " + p.input.View(),
+			i18n.T(" 名称  ") + p.input.View(),
 			"",
-			ui.HelpStyle.Render(" Enter 确认  esc 取消"),
+			ui.HelpStyle.Render(i18n.T(" Enter 确认  esc 取消")),
 		}}
 	case inputRename:
 		if g := p.curGroup(); g != nil {
 			lines := []string{
-				ui.TitleStyle.Render(" 重命名群组"),
+				ui.TitleStyle.Render(i18n.T(" 重命名群组")),
 				"",
-				" 名称  " + p.input.View(),
+				i18n.T(" 名称  ") + p.input.View(),
 			}
 			if note := p.refNote(g.Name); note != "" {
 				lines = append(lines, "", ui.ErrorStyle.Render(" ⚠ "+note))
 			}
 			return &overlaySpec{lines: append(lines, "",
-				ui.HelpStyle.Render(" Enter 确认  esc 取消"))}
+				ui.HelpStyle.Render(i18n.T(" Enter 确认  esc 取消")))}
 		}
 	}
 	return nil
 }
 
-// leftClick selects the row-th displayed group, mirroring leftLines' window
-// math so the click lands on the row the user saw. Border rows hold no
-// groups: a click on them must not fall through to the hidden row just
-// outside the window.
 func (p *groupsPage) leftClick(row int) {
 	rowsH := max0(p.height - 2)
 	if row < 0 || row >= rowsH {
@@ -524,13 +458,6 @@ func (p *groupsPage) leftClick(row int) {
 	p.selectGroupAt(i)
 }
 
-// rightClick puts the right-pane cursor on the clicked detail row. row
-// counts the column's content rows from the info box's first line (the
-// column's top border row is row -1), so everything the stacked layout
-// renders above the data rows — the info box including its borders (topH),
-// the bottom box's top border and the filter prompt — must be subtracted
-// before mapping through the same window bodyLines renders with. The info
-// box is display-only: clicks there do nothing.
 func (p *groupsPage) rightClick(row int) {
 	if p.mode != pickNone {
 		return
@@ -540,10 +467,10 @@ func (p *groupsPage) rightClick(row int) {
 	if p.nodeView.prompt() != "" {
 		head = 1
 	}
-	d := row - topH - head // data row within the bottom box's window
+	d := row - topH - head
 	start, rowsH := p.rowsWindow(inner)
 	if d < 0 || d >= rowsH {
-		return // info box, box edges, prompt line or dead space below
+		return
 	}
 	i := start + d
 	if i >= 0 && i < len(p.rows) {
@@ -553,8 +480,7 @@ func (p *groupsPage) rightClick(row int) {
 }
 
 func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
-	// The filter box applies to node lists, which exist both in the detail
-	// pane and in the add-node picker; it swallows every key while open.
+
 	if p.mode == pickNone || p.mode == pickNode {
 		if cmd, consumed := p.nodeView.handleKey(msg); consumed {
 			if p.mode == pickNode {
@@ -571,23 +497,22 @@ func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		return p.pickerKey(msg, d)
 	}
 
-	// Global to this page.
 	switch msg.String() {
 	case "a":
 		if !p.caps.SwitchNode {
-			return unsupportedCmd("切换策略")
+			return unsupportedCmd(i18n.T("切换策略"))
 		}
 		if g := p.curGroup(); g != nil {
 			return switchNodeCmd(d, g.ID, driver.Policy{Name: "min_moving_avg"})
 		}
 	case "t":
 		if !p.caps.TestLatency {
-			return unsupportedCmd("测速")
+			return unsupportedCmd(i18n.T("测速"))
 		}
 		return p.startTest(d, false)
 	case "T":
 		if !p.caps.TestLatency {
-			return unsupportedCmd("测速")
+			return unsupportedCmd(i18n.T("测速"))
 		}
 		return p.startTest(d, true)
 	}
@@ -608,25 +533,23 @@ func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		case "G":
 			selectGroup(max0(len(p.groups) - 1))
 		case "tab", "l", "right", "enter":
-			// The detail column is always rendered; this just moves focus.
+
 			if len(p.groups) > 0 {
 				p.focus = 1
 			}
 		case "s":
 			if !p.caps.Subscriptions {
-				return unsupportedCmd("挂载订阅")
+				return unsupportedCmd(i18n.T("挂载订阅"))
 			}
 			g := p.curGroup()
 			if g == nil {
 				return nil
 			}
 			if len(p.pickableSubs(g)) == 0 {
-				// Toast, not a persistent pane line: there is nothing to
-				// confirm here, and a stuck red note that only a restart
-				// clears reads like a broken state.
+
 				return func() tea.Msg {
-					return opDoneMsg{Op: "挂载订阅",
-						Err: errors.New("没有可添加的订阅（全部已挂载或无订阅）；先在 3 订阅页新增")}
+					return opDoneMsg{Op: i18n.T("挂载订阅"),
+						Err: errors.New(i18n.T("没有可添加的订阅（全部已挂载或无订阅）；先在 3 订阅页新增"))}
 				}
 			}
 			p.mode = pickSub
@@ -640,29 +563,27 @@ func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 				p.candManual = nil
 				p.candSubs = nil
 				p.candBusy = true
-				// The picker's ticks are its own: opening it must neither
-				// inherit the detail pane's pending removals nor disturb
-				// them (esc used to wipe both).
+
 				p.pickMarked = map[string]bool{}
 				return loadAttachCandidatesCmd(d)
 			}
-		case "c": // create group
+		case "c":
 			p.mode = inputCreate
 			p.input.SetValue("")
 			p.input.Focus()
 			return textinput.Blink
-		case "R": // rename group
+		case "R":
 			if g := p.curGroup(); g != nil {
 				p.mode = inputRename
 				p.input.SetValue(g.Name)
 				p.input.Focus()
 				return textinput.Blink
 			}
-		case "D": // delete group (confirm)
+		case "D":
 			if p.curGroup() != nil {
 				p.mode = pickDeleteGroup
 			}
-		case "p": // change policy
+		case "p":
 			if p.curGroup() != nil {
 				p.mode = pickPolicy
 				p.pickCursor = 0
@@ -671,8 +592,6 @@ func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		return nil
 	}
 
-	// focus == 1: right pane navigation. Sections are collapsed by
-	// default; Enter/l toggles the section under the cursor.
 	switch msg.String() {
 	case "j", "down":
 		if p.rc < len(p.rows)-1 {
@@ -687,9 +606,7 @@ func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	case "G":
 		p.rc = len(p.rows) - 1
 	case "tab", "h", "left", "esc":
-		// Leaving the detail keeps the sections as they are: the column
-		// stays visible, and collapsing it under the user's eyes would read
-		// as data loss. A group change is what resets sections (and marks).
+
 		p.focus = 0
 	case "enter", "l", "right":
 		r := p.cur()
@@ -705,15 +622,10 @@ func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			p.directOpen = !p.directOpen
 			p.rebuild()
 		case rowNode:
-			// Pinning a node was removed: daed v2 fixed groups allow
-			// exactly one member, so the old flow silently rebuilt the
-			// whole group (detaching every subscription). Existing fixed
-			// groups are still shown read-only; a/p switch them back to an
-			// automatic policy.
+
 		}
 	case " ":
-		// Space ticks a node for batch test / remove / attach. bubbletea
-		// reports the space key as " ".
+
 		if r := p.cur(); r != nil && r.kind == rowNode {
 			if p.marked[r.node.ID] {
 				delete(p.marked, r.node.ID)
@@ -724,10 +636,9 @@ func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	case "x":
 		if len(p.marked) > 0 {
 			if len(p.markedDirectNodes()) == 0 {
-				// Subscription-contributed nodes leave with their whole
-				// subscription; say so instead of confirming a no-op.
+
 				return func() tea.Msg {
-					return opDoneMsg{Op: "移除节点", Err: errors.New("已标记的节点均来自订阅挂载，只能随订阅一起移除（对订阅行按 x）")}
+					return opDoneMsg{Op: i18n.T("移除节点"), Err: errors.New(i18n.T("已标记的节点均来自订阅挂载，只能随订阅一起移除（对订阅行按 x）"))}
 				}
 			}
 			p.mode = pickRemoveNodes
@@ -742,7 +653,7 @@ func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			p.mode = pickDetach
 		case rowNode:
 			if r.direct {
-				// only explicitly-attached nodes can be removed from a group
+
 				p.mode = pickRemoveNode
 			}
 		}
@@ -750,10 +661,6 @@ func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	return nil
 }
 
-// pickerKey routes the current picker/modal's keys; the per-mode handlers
-// live in groups_picker.go.
-
-// markedCandidateIDs lists the ticked picker candidates in display order.
 func (p *groupsPage) markedCandidateIDs(rows []candidateRow) []string {
 	var out []string
 	for _, r := range rows {
@@ -764,13 +671,11 @@ func (p *groupsPage) markedCandidateIDs(rows []candidateRow) []string {
 	return out
 }
 
-// candidateRow is one selectable row in the `n` picker.
 type candidateRow struct {
 	node driver.Node
-	tag  string // non-empty for subscription-sourced nodes
+	tag  string
 }
 
-// candidateRows flattens manual nodes plus every subscription's nodes.
 func (p *groupsPage) candidateRows() []candidateRow {
 	out := make([]candidateRow, 0, len(p.candManual)+64)
 	for _, n := range p.candManual {
@@ -785,49 +690,43 @@ func (p *groupsPage) candidateRows() []candidateRow {
 }
 
 func (p groupsPage) View() string {
-	// The page is a master/detail row whose detail side is two stacked
-	// boxes (info on top, sections below), built by PaneRowColumn — the
-	// same grid language as the home page's zones. Load failures and the
-	// empty state stay inside the left box so the layout never collapses to
-	// a bare line.
+
 	left := p.leftLines()
-	leftTitle := fmt.Sprintf("路由组 (%d)", len(p.groups))
+	leftTitle := i18n.T("路由组 (%d)", len(p.groups))
 	if p.err != nil {
-		left = []string{ui.ErrorStyle.Render("✗ 加载路由组失败: " + shortErr(p.err))}
+		left = []string{ui.ErrorStyle.Render(i18n.T("✗ 加载路由组失败: ") + shortErr(p.err))}
 	} else if len(p.groups) == 0 {
 		if p.loading {
-			left = []string{ui.HelpStyle.Render("加载中…")}
+			left = []string{ui.HelpStyle.Render(i18n.T("加载中…"))}
 		} else {
-			left = []string{ui.HelpStyle.Render("无路由组（按 c 创建）")}
+			left = []string{ui.HelpStyle.Render(i18n.T("无路由组（按 c 创建）"))}
 		}
 	}
 	info := p.infoLines()
 	topH, bottomInner := stackedDetail(len(info), p.height)
 	body := p.bodyLines(bottomInner)
-	infoTitle, bodyTitle := "群组", "订阅与节点"
+	infoTitle, bodyTitle := i18n.T("群组"), i18n.T("订阅与节点")
 	if g := p.curGroup(); g != nil {
 		infoTitle = g.Name
 		bodyTitle += p.nodeView.sortTitle()
 		if n := len(p.markedIDs()); n > 0 {
-			bodyTitle += fmt.Sprintf(" · 已选 %d", n)
+			bodyTitle += i18n.T(" · 已选 %d", n)
 		}
 	}
-	// Key hints ride the edge of the box they belong to: the left box lists
-	// group management, the bottom box lists in-list actions (and the active
-	// picker's keys while one is open); page-wide keys stay on the frame.
-	rightFooter := "Enter 开合分区 · space 标记 · x 移除 · / 过滤 · o 排序"
+
+	rightFooter := i18n.T("Enter 开合分区 · space 标记 · x 移除 · / 过滤 · o 排序")
 	switch p.mode {
 	case pickSub:
-		rightFooter = "Enter 挂载 · j/k 移动 · esc 取消"
+		rightFooter = i18n.T("Enter 挂载 · j/k 移动 · esc 取消")
 	case pickNode:
-		rightFooter = "Enter 添加 · space 标记 · esc 取消"
+		rightFooter = i18n.T("Enter 添加 · space 标记 · esc 取消")
 	case pickPolicy:
-		rightFooter = "Enter 确认 · j/k 移动 · esc 取消"
+		rightFooter = i18n.T("Enter 确认 · j/k 移动 · esc 取消")
 	case pickDetach, pickDeleteGroup, pickRemoveNode, pickRemoveNodes:
-		rightFooter = "y 确认 · n/esc 取消"
+		rightFooter = i18n.T("y 确认 · n/esc 取消")
 	}
 	return strings.Join(ui.PaneRowColumn(
-		ui.PaneSpec{Title: leftTitle, Footer: "s/n 挂订阅/节点 · c/R/D/p 组", Lines: left,
+		ui.PaneSpec{Title: leftTitle, Footer: i18n.T("s/n 挂订阅/节点 · c/R/D/p 组"), Lines: left,
 			Focused: p.focus == 0, W: p.leftW, H: p.height},
 		ui.PaneSpec{Title: infoTitle, Lines: info, W: p.rightW, H: topH},
 		ui.PaneSpec{Title: bodyTitle, Footer: rightFooter, Lines: body,
@@ -852,10 +751,10 @@ func (p groupsPage) leftLines() []string {
 		if sel := g.SelectedNode(); sel != nil {
 			cur = " → " + ui.SpaceAfterFlag(sel.Name)
 		} else if g.Policy != "fixed" {
-			cur = " · 自动"
+			cur = i18n.T(" · 自动")
 		}
 		line := cursor + " " + ui.PadRight(g.Name, max0(p.leftW-20)) +
-			ui.HelpStyle.Render(fmt.Sprintf("%3d节点", len(g.Members())))
+			ui.HelpStyle.Render(i18n.T("%3d节点", len(g.Members())))
 		line += ui.Truncate(cur, max0(p.leftW-14))
 		lines = append(lines, ui.HiRow(line, p.leftW-4, i == p.gi))
 	}
@@ -866,27 +765,20 @@ func (p groupsPage) leftLines() []string {
 	return lines
 }
 
-// infoLines is the right column's top box: the selected group's identity
-// card — policy, membership, and which routing profiles reference it (those
-// break silently when the group is renamed or deleted).
 func (p groupsPage) infoLines() []string {
 	g := p.curGroup()
 	if g == nil {
-		return []string{ui.HelpStyle.Render("（无组）")}
+		return []string{ui.HelpStyle.Render(i18n.T("（无组）"))}
 	}
 	lines := []string{
-		ui.SelectedStyle.Render("策略  ") + policyLabel(g),
-		ui.SelectedStyle.Render("成员  ") + fmt.Sprintf("%d（订阅挂载 %d 个，直接挂载 %d 个）",
+		ui.SelectedStyle.Render(i18n.T("策略  ")) + policyLabel(g),
+		ui.SelectedStyle.Render(i18n.T("成员  ")) + i18n.T("%d（订阅挂载 %d 个，直接挂载 %d 个）",
 			len(g.Members()), len(g.Subscriptions), len(g.Nodes)),
 	}
-	// The card states the facts — which profiles reference this group. The
-	// consequence (their rules stop matching) is spelled out where the user
-	// can still back out: the R/D confirmations. A one-glance warning rides
-	// along only while the row has room for it; the names must never be the
-	// part that gets truncated away.
+
 	if profiles := p.refs[g.Name]; len(profiles) > 0 {
-		row := ui.SelectedStyle.Render("引用  ") + ui.HelpStyle.Render(strings.Join(quoteAll(profiles), "、"))
-		warn := ui.HelpStyle.Render(" · 改名/删除将静默失效")
+		row := ui.SelectedStyle.Render(i18n.T("引用  ")) + ui.HelpStyle.Render(strings.Join(quoteAll(profiles), "、"))
+		warn := ui.HelpStyle.Render(i18n.T(" · 改名/删除将静默失效"))
 		if lipgloss.Width(row)+lipgloss.Width(warn) <= p.rightW-4 {
 			row += warn
 		}
@@ -895,8 +787,6 @@ func (p groupsPage) infoLines() []string {
 	return lines
 }
 
-// rowsWindow returns the scroll window bodyLines renders the detail rows
-// with, so rightClick can map a displayed row back to its index.
 func (p groupsPage) rowsWindow(inner int) (start, rowsH int) {
 	head := 0
 	if p.nodeView.prompt() != "" {
@@ -910,12 +800,9 @@ func (p groupsPage) rowsWindow(inner int) (start, rowsH int) {
 	return start, rowsH
 }
 
-// bodyLines is the right column's bottom box: the group's subscription and
-// direct-node sections (or the active picker/confirmation in their place).
-// inner is the box's content height; the row list windows itself to it.
 func (p groupsPage) bodyLines(inner int) []string {
 	if p.mode == pickSub {
-		return p.pickerLines("选择要添加到组的订阅", p.subPickRows(), p.pickCursor, false)
+		return p.pickerLines(i18n.T("选择要添加到组的订阅"), p.subPickRows(), p.pickCursor, false)
 	}
 	if p.mode == pickNode {
 		return p.candidateLines(inner)
@@ -923,13 +810,13 @@ func (p groupsPage) bodyLines(inner int) []string {
 	if p.mode == pickDetach {
 		if r := p.cur(); r != nil && r.gi < len(p.groups) && r.si < len(p.groups[r.gi].Subscriptions) {
 			sub := p.groups[r.gi].Subscriptions[r.si]
-			return ui.BoxLines(true, "确认将订阅 \""+sub.Tag+"\" 从组 \""+
-				p.groups[r.gi].Name+"\" 移除?  (y/n)")
+			return ui.BoxLines(true, i18n.T("确认将订阅 \"")+sub.Tag+i18n.T("\" 从组 \"")+
+				p.groups[r.gi].Name+i18n.T("\" 移除?  (y/n)"))
 		}
 	}
 	if p.mode == pickDeleteGroup {
 		if g := p.curGroup(); g != nil {
-			lines := []string{"确认删除群组 \"" + g.Name + "\"?  (y/n)"}
+			lines := []string{i18n.T("确认删除群组 \"") + g.Name + "\"?  (y/n)"}
 			if note := p.refNote(g.Name); note != "" {
 				lines = append(lines, ui.ErrorStyle.Render(" ⚠ "+note))
 			}
@@ -938,15 +825,15 @@ func (p groupsPage) bodyLines(inner int) []string {
 	}
 	if p.mode == pickRemoveNode {
 		if r := p.cur(); r != nil && r.kind == rowNode {
-			return ui.BoxLines(true, "确认将节点 \""+ui.SpaceAfterFlag(r.node.Name)+"\" 从组中移除?  (y/n)")
+			return ui.BoxLines(true, i18n.T("确认将节点 \"")+ui.SpaceAfterFlag(r.node.Name)+i18n.T("\" 从组中移除?  (y/n)"))
 		}
 	}
 	if p.mode == pickRemoveNodes {
 		nodes := p.markedDirectNodes()
-		lines := []string{fmt.Sprintf("确认将 %d 个节点从组中移除?  (y/n)", len(nodes))}
+		lines := []string{i18n.T("确认将 %d 个节点从组中移除?  (y/n)", len(nodes))}
 		for i, n := range nodes {
 			if i >= 5 {
-				lines = append(lines, ui.HelpStyle.Render("  …等共 "+strconv.Itoa(len(nodes))+" 个"))
+				lines = append(lines, ui.HelpStyle.Render(i18n.T("  …等共 ")+strconv.Itoa(len(nodes))+i18n.T(" 个")))
 				break
 			}
 			lines = append(lines, ui.HelpStyle.Render("  "+ui.SpaceAfterFlag(n.Name)))
@@ -954,7 +841,7 @@ func (p groupsPage) bodyLines(inner int) []string {
 		return ui.BoxLines(true, lines...)
 	}
 	if p.mode == pickPolicy {
-		lines := []string{ui.TitleStyle.Render(" 选择群组策略")}
+		lines := []string{ui.TitleStyle.Render(i18n.T(" 选择群组策略"))}
 		for i, c := range policyChoices {
 			mark, style := "  ", ui.HelpStyle
 			if i == p.pickCursor {
@@ -967,14 +854,14 @@ func (p groupsPage) bodyLines(inner int) []string {
 
 	g := p.curGroup()
 	if g == nil {
-		return []string{ui.HelpStyle.Render("（无组）")}
+		return []string{ui.HelpStyle.Render(i18n.T("（无组）"))}
 	}
 	if len(p.rows) == 0 {
 		if p.nodeView.filter() != "" {
 			return []string{ui.HelpStyle.Render(p.nodeView.prompt()),
-				ui.ErrorStyle.Render(" 没有匹配的节点（/ 重新编辑，框内 esc 清空）")}
+				ui.ErrorStyle.Render(i18n.T(" 没有匹配的节点（/ 重新编辑，框内 esc 清空）"))}
 		}
-		return []string{ui.HelpStyle.Render(" 组为空：按 s 挂订阅 / n 加手动节点")}
+		return []string{ui.HelpStyle.Render(i18n.T(" 组为空：按 s 挂订阅 / n 加手动节点"))}
 	}
 
 	start, rowsH := p.rowsWindow(inner)
@@ -989,16 +876,13 @@ func (p groupsPage) bodyLines(inner int) []string {
 	return append(lines, ui.WithScrollbar(window, p.rightW-4, len(p.rows), start, p.focus == 1)...)
 }
 
-// renderRow wraps the row body with the selected-row highlight: the same
-// condition that draws the ❯ cursor lights the full-width background bar.
 func (p groupsPage) renderRow(g *driver.Group, i int) string {
 	return ui.HiRow(p.renderRowBody(g, i), p.rightW-4, i == p.rc && p.focus == 1)
 }
 
 func (p groupsPage) renderRowBody(g *driver.Group, i int) string {
 	r := &p.rows[i]
-	// The cursor marker is rendered on every row kind (including section
-	// headers) so the actual position is always visible.
+
 	cur := " "
 	if i == p.rc && p.focus == 1 {
 		cur = ui.CursorStyle.Render("❯")
@@ -1007,14 +891,14 @@ func (p groupsPage) renderRowBody(g *driver.Group, i int) string {
 
 	if r.kind == rowSub {
 		s := g.Subscriptions[r.si]
-		label := "▸ 订阅 " + s.Tag
+		label := i18n.T("▸ 订阅 ") + s.Tag
 		if p.subOpen[s.SubscriptionID] {
-			label = "▾ 订阅 " + s.Tag
+			label = i18n.T("▾ 订阅 ") + s.Tag
 		}
 		if s.NameFilterRegex != "" {
-			label += " (过滤: " + s.NameFilterRegex + ")"
+			label += i18n.T(" (过滤: ") + s.NameFilterRegex + ")"
 		}
-		detail := ui.HelpStyle.Render(fmt.Sprintf("%d/%d节点  x 移除", s.MatchedCount, subTotal(p.subs, s.SubscriptionID)))
+		detail := ui.HelpStyle.Render(i18n.T("%d/%d节点  x 移除", s.MatchedCount, subTotal(p.subs, s.SubscriptionID)))
 		return cur + " " + ui.PadRight(headerStyle.Render(label), max0(p.rightW-24)) + detail
 	}
 	if r.kind == rowDirect {
@@ -1022,7 +906,7 @@ func (p groupsPage) renderRowBody(g *driver.Group, i int) string {
 		if p.directOpen {
 			arrow = "▾"
 		}
-		return cur + " " + headerStyle.Render(arrow+" 直接添加的节点 ("+strconv.Itoa(len(g.Nodes))+")")
+		return cur + " " + headerStyle.Render(arrow+i18n.T(" 直接添加的节点 (")+strconv.Itoa(len(g.Nodes))+")")
 	}
 
 	n := r.node
@@ -1037,7 +921,7 @@ func (p groupsPage) renderRowBody(g *driver.Group, i int) string {
 	}
 	name := ui.SpaceAfterFlag(n.Name)
 	if r.manual {
-		name += ui.HelpStyle.Render(" (手动)")
+		name += ui.HelpStyle.Render(i18n.T(" (手动)"))
 	}
 	protoW := 8
 	latW := latCellW(p.rightW - 4)
@@ -1053,16 +937,13 @@ func (p groupsPage) subPickRows() [][2]string {
 	for _, s := range p.pickableSubs(p.curGroup()) {
 		tag := s.Tag
 		if tag == "" {
-			tag = "(未命名)"
+			tag = i18n.T("(未命名)")
 		}
-		out = append(out, [2]string{tag, fmt.Sprintf("%d节点", s.NodeCount)})
+		out = append(out, [2]string{tag, i18n.T("%d节点", s.NodeCount)})
 	}
 	return out
 }
 
-// visibleCandidates applies the shared filter/sort to the add-node picker's
-// rows, mapping the surviving nodes back to their rows (a node is listed
-// once per source; the first occurrence wins).
 func (p *groupsPage) visibleCandidates() []candidateRow {
 	rows := p.candidateRows()
 	nodes := make([]driver.Node, len(rows))
@@ -1084,25 +965,25 @@ func (p *groupsPage) visibleCandidates() []candidateRow {
 }
 
 func (p groupsPage) candidateLines(inner int) []string {
-	title := " 选择要添加到组的节点" + ui.HelpStyle.Render("  (手动 + 各订阅)")
+	title := i18n.T(" 选择要添加到组的节点") + ui.HelpStyle.Render(i18n.T("  (手动 + 各订阅)"))
 	lines := []string{ui.TitleStyle.Render(title)}
 	if p.candBusy {
-		return append(lines, ui.HelpStyle.Render(" 拉取中…"))
+		return append(lines, ui.HelpStyle.Render(i18n.T(" 拉取中…")))
 	}
 	rows := p.visibleCandidates()
 	if len(p.candidateRows()) == 0 {
-		return append(lines, ui.HelpStyle.Render(" （没有可添加的节点）"))
+		return append(lines, ui.HelpStyle.Render(i18n.T(" （没有可添加的节点）")))
 	}
 	if prompt := p.nodeView.prompt(); prompt != "" {
 		lines = append(lines, ui.HelpStyle.Render(prompt))
 	}
 	if len(rows) == 0 {
-		return append(lines, ui.ErrorStyle.Render(" 没有匹配的节点（/ 重新编辑，框内 esc 清空）"))
+		return append(lines, ui.ErrorStyle.Render(i18n.T(" 没有匹配的节点（/ 重新编辑，框内 esc 清空）")))
 	}
 	lines[0] += p.nodeView.countTitle(len(rows), len(p.candidateRows())) +
 		p.nodeView.sortTitle()
 	if n := len(p.pickMarked); n > 0 {
-		lines[0] += ui.OKStyle.Render(fmt.Sprintf("  已选 %d（Enter 全部添加）", n))
+		lines[0] += ui.OKStyle.Render(i18n.T("  已选 %d（Enter 全部添加）", n))
 	}
 	rowsH := max0(inner - len(lines))
 	start := 0
@@ -1124,7 +1005,7 @@ func (p groupsPage) candidateLines(inner int) []string {
 		if r.tag != "" {
 			src = "·" + r.tag
 		} else {
-			src = "·手动"
+			src = i18n.T("·手动")
 		}
 		window = append(window, ui.HiRow(style.Render(mark+ui.PadRight(ui.SpaceAfterFlag(r.node.Name), max0(p.rightW-34)))+tick+
 			ui.HelpStyle.Render(ui.PadRight(src, 16)+r.node.Protocol), p.rightW-4, i == p.pickCursor))
@@ -1135,11 +1016,11 @@ func (p groupsPage) candidateLines(inner int) []string {
 func (p groupsPage) pickerLines(title string, rows [][2]string, cursor int, busy bool) []string {
 	lines := []string{ui.TitleStyle.Render(title)}
 	if busy {
-		lines[0] += ui.HelpStyle.Render("  拉取中…")
+		lines[0] += ui.HelpStyle.Render(i18n.T("  拉取中…"))
 		return lines
 	}
 	if len(rows) == 0 {
-		lines = append(lines, ui.HelpStyle.Render(" （无手动节点：可在 daed 中导入，或从订阅页面管理）"))
+		lines = append(lines, ui.HelpStyle.Render(i18n.T(" （无手动节点：可在 daed 中导入，或从订阅页面管理）")))
 	}
 	for i, r := range rows {
 		mark, style := "  ", ui.HelpStyle
@@ -1152,7 +1033,6 @@ func (p groupsPage) pickerLines(title string, rows [][2]string, cursor int, busy
 	return lines
 }
 
-// subTotal returns a subscription's total node count from the global list.
 func subTotal(subs []driver.Subscription, id string) int {
 	for _, s := range subs {
 		if s.ID == id {
@@ -1169,17 +1049,17 @@ func policyLabel(g *driver.Group) string {
 	switch g.Policy {
 	case "fixed":
 		if i := g.FixedIndex(); i >= 0 && i < len(g.Nodes) {
-			return "固定 → " + ui.SpaceAfterFlag(g.Nodes[i].Name)
+			return i18n.T("固定 → ") + ui.SpaceAfterFlag(g.Nodes[i].Name)
 		}
-		return "固定"
+		return i18n.T("固定")
 	case "min_moving_avg":
-		return "自动 (最小移动平均延迟)"
+		return i18n.T("自动 (最小移动平均延迟)")
 	case "min_avg10":
-		return "自动 (最小平均延迟)"
+		return i18n.T("自动 (最小平均延迟)")
 	case "min":
-		return "自动 (最小最新延迟)"
+		return i18n.T("自动 (最小最新延迟)")
 	case "random":
-		return "随机"
+		return i18n.T("随机")
 	}
 	return g.Policy
 }
