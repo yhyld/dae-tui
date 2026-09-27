@@ -19,7 +19,8 @@ import (
 
 // configsPage: master-detail. Left lists the three profile sections
 // (config / dns / routing) flat; the right pane shows the selected item's
-// content (global fields or DSL text), scrollable.
+// content: the config section renders the field table with a movable
+// cursor (Enter opens the editor), the dns/routing panes are scroll views.
 type configsPage struct {
 	sel   driver.Selections
 	err   error
@@ -40,6 +41,12 @@ type configsPage struct {
 
 	scroll int // right pane line offset
 
+	// fieldCur is the right pane's cursor within the config section's field
+	// table (one row per editable field). The dns/routing panes are plain
+	// scroll views with no per-row cursor, so only the config section has
+	// one; the window follows it the way the lists follow theirs.
+	fieldCur int
+
 	// summaryView shows the parsed structure of a dns/routing profile
 	// instead of its raw DSL (v toggles). Both at once would print every
 	// rule twice for an already-canonical DSL.
@@ -57,11 +64,10 @@ type configsPage struct {
 	validateErr map[string]editRejection
 
 	// modal state
-	mode       int // 0 list, 1 fieldPicker, 2 fieldInput, 3 createInput, 4 renameInput, 5 deleteConfirm, 6 diffConfirm, 7 builtinEditor
-	pickCursor int
-	input      textinput.Model
-	editField  driver.ConfigField
-	fieldErr   string // client-side type rejection of the field input
+	mode      int // 0 list, 2 fieldInput, 3 createInput, 4 renameInput, 5 deleteConfirm, 6 diffConfirm, 7 builtinEditor
+	input     textinput.Model
+	editField driver.ConfigField
+	fieldErr  string // client-side type rejection of the field input
 
 	// builtin DSL editor (mode 7): the in-app alternative to $EDITOR for
 	// dns/routing text. edCtx identifies what is being edited; edErr is the
@@ -184,6 +190,13 @@ func (p *configsPage) rebuild() {
 		p.cur = 0
 	}
 	p.scroll = 0
+	// A refresh re-lands on the same profile: keep the field cursor so a
+	// multi-field editing session does not restart at the top, clamped
+	// against the (possibly changed) field list. Only explicit navigation
+	// (setCursor/switchSection) resets it.
+	if fields, ok := p.curFields(); ok && p.fieldCur >= len(fields) {
+		p.fieldCur = len(fields) - 1
+	}
 }
 
 func (p *configsPage) handleSelections(sel driver.Selections, err error) {
@@ -517,10 +530,15 @@ func (p *configsPage) bodyLines() []string {
 		// The editable surface is the field list; rendering it here keeps
 		// labels a UI concern (the driver supplies keys and values only).
 		if fields := orderedFields(it.Fields); len(fields) > 0 {
-			for _, f := range fields {
+			for i, f := range fields {
+				sel := p.focus == 1 && i == p.fieldCur
+				cur := " "
+				if sel {
+					cur = ui.CursorStyle.Render("❯")
+				}
 				// Values can be long (URL lists); never bleed past the pane.
-				lines = append(lines, ui.Truncate(" "+ui.PadRight(fieldLabel(f), 18)+f.Value,
-					max0(p.rightW-6)))
+				lines = append(lines, ui.HiRow(ui.Truncate(cur+" "+ui.PadRight(fieldLabel(f), 18)+f.Value,
+					max0(p.rightW-6)), p.rightW-4, sel))
 				if warn := p.ifaceWarning(f); warn != "" {
 					lines = append(lines, ui.ErrorStyle.Render("   "+warn))
 				}
@@ -686,13 +704,11 @@ func (p *configsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 						return opDoneMsg{Op: "编辑", Err: errors.New("该配置没有可编辑字段")}
 					}
 				}
-				// Re-opening the picker keeps the cursor where the user left
-				// it: editing several fields in a row must not restart the
-				// hunt through every global field each time.
-				if n := len(orderedFields(it.Fields)); p.pickCursor >= n {
-					p.pickCursor = n - 1
-				}
-				p.mode = 1
+				// The right pane's field table is the one edit surface — the
+				// same list clicks select in. `e` just moves there; Enter on
+				// the cursor opens the editor. (The old separate picker page
+				// was a second, unclickable copy of this list.)
+				p.focus = 1
 				return nil
 			case "dns", "routing":
 				if p.builtin {
@@ -700,6 +716,38 @@ func (p *configsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 				}
 				return p.editInEditor(d, *r, *it)
 			}
+		}
+		return nil
+	}
+
+	// The config section's field table carries a cursor: j/k walk it (the
+	// render window follows), Enter opens the editor for the field under
+	// it. The dns/routing panes are plain scroll views and keep j/k scroll.
+	if fields, ok := p.curFields(); ok {
+		if p.fieldCur >= len(fields) {
+			p.fieldCur = len(fields) - 1
+		}
+		switch msg.String() {
+		case "j", "down":
+			if p.fieldCur < len(fields)-1 {
+				p.fieldCur++
+			}
+		case "k", "up":
+			if p.fieldCur > 0 {
+				p.fieldCur--
+			}
+		case "g":
+			p.fieldCur = 0
+		case "G":
+			p.fieldCur = len(fields) - 1
+		case "enter":
+			f := fields[p.fieldCur]
+			p.editField = f
+			p.fieldErr = ""
+			p.mode = 2
+			return p.openInput("新值 ("+f.Type+")", f.Value)
+		case "tab", "shift+tab", "h", "left", "esc":
+			p.focus = 0
 		}
 		return nil
 	}
@@ -738,9 +786,10 @@ func (p configsPage) View() string {
 	// lists profile management, the right box the content view's keys (and
 	// the open modal's keys); page-wide keys stay on the app frame.
 	rightFooter := "j/k 滚动"
+	if _, ok := p.curFields(); ok {
+		rightFooter = "j/k 选择 · Enter 编辑"
+	}
 	switch p.mode {
-	case 1:
-		rightFooter = "Enter 编辑 · j/k 移动 · esc 取消"
 	case 5:
 		rightFooter = "y 确认 · n/esc 取消"
 	case 6:
@@ -781,51 +830,6 @@ func (p configsPage) rightBox(h int, footer string) []string {
 // modalLines renders the active modal inside the right pane.
 func (p configsPage) modalLines() []string {
 	switch p.mode {
-	case 1: // field picker
-		r := p.curRow()
-		if r == nil {
-			return []string{ui.HelpStyle.Render("（无配置）")}
-		}
-		fields := orderedFields(p.item(*r).Fields)
-		lines := []string{ui.TitleStyle.Render(" 选择要修改的字段") +
-			ui.HelpStyle.Render(fmt.Sprintf("  (%d)", len(fields)))}
-		// Window the picker: a config exposes every global field, far more
-		// than fit on screen (its Enter/esc hints ride the box's footer).
-		rowsH := max0(p.height - 4)
-		start := 0
-		if p.pickCursor >= rowsH {
-			start = p.pickCursor - rowsH + 1
-		}
-		end := min(start+rowsH, len(fields))
-		var window []string
-		for i := start; i < end; i++ {
-			f := fields[i]
-			mark, style := "  ", ui.HelpStyle
-			if i == p.pickCursor {
-				mark, style = "❯ ", ui.CursorStyle
-			}
-			line := style.Render(mark+ui.PadRight(fieldLabel(f), 16)) +
-				ui.HelpStyle.Render(ui.PadRight("["+f.Type+"]", 11)) + f.Value
-			if i == p.pickCursor && f.Default != "" {
-				line += ui.HelpStyle.Render("  默认 " + f.Default)
-			}
-			if warn := p.ifaceWarning(f); warn != "" {
-				line += ui.ErrorStyle.Render("  " + warn)
-			}
-			if i == p.pickCursor {
-				if hint := p.ifaceHint(f); hint != "" {
-					line += ui.HelpStyle.Render("  " + hint)
-				}
-			}
-			// Long values (URL lists) must not bleed past the pane.
-			window = append(window, ui.HiRow(ui.Truncate(line, max0(p.rightW-6)), p.rightW-4, i == p.pickCursor))
-		}
-		window = ui.WithScrollbar(window, p.rightW-4, len(fields), start, p.focus == 1)
-		lines = append(lines, window...)
-		if start > 0 || end < len(fields) {
-			lines = append(lines, ui.HelpStyle.Render(fmt.Sprintf(" … %d-%d / %d，j/k 滚动", start+1, end, len(fields))))
-		}
-		return lines
 	case 5: // delete confirm
 		if r := p.curRow(); r != nil {
 			it := p.item(*r)
@@ -1035,6 +1039,7 @@ func (p *configsPage) switchSection(si int) {
 	}
 	p.sec = si
 	p.scroll = 0
+	p.fieldCur = 0
 	p.cur = p.rowAt(configSections[si], p.secCur[si])
 	if p.cur < 0 {
 		p.cur = p.secRange[si][0]
@@ -1052,51 +1057,101 @@ func (p *configsPage) setCursor(i int) {
 		p.secCur[p.sec] = r.index
 	}
 	p.scroll = 0
+	p.fieldCur = 0
 }
 
-// rightClick opens the field editor whose row the user clicked in the right
-// pane. Only the config section renders one line per editable field; the
-// dns/routing panes are scroll views, so a click there is ignored.
-func (p *configsPage) rightClick(row int) tea.Cmd {
-	if p.mode != 0 || row < 0 {
-		return nil
-	}
+// curFields returns the current profile's editable fields when the cursor
+// sits on the config section: the only right-pane view that renders one row
+// per item, and therefore the only one that carries a cursor.
+func (p configsPage) curFields() ([]driver.ConfigField, bool) {
 	r := p.curRow()
 	if r == nil || r.section != "config" {
-		return nil
+		return nil, false
 	}
 	fields := orderedFields(p.item(*r).Fields)
 	if len(fields) == 0 {
-		return nil
+		return nil, false
+	}
+	return fields, true
+}
+
+// fieldLineOf returns the index, within bodyLines' config-section output,
+// of field i's row: the title line, then one line per field plus an extra
+// interface-warning line after some of them. The cursor-following window
+// and the click mapping both derive from it, so the two stay in sync.
+func (p configsPage) fieldLineOf(fields []driver.ConfigField, i int) int {
+	if i >= len(fields) {
+		i = len(fields) - 1
+	}
+	n := 1 // the title line
+	for j := 0; j < i; j++ {
+		n++
+		if p.ifaceWarning(fields[j]) != "" {
+			n++
+		}
+	}
+	return n
+}
+
+// fieldWindowStart returns the first line rightLines renders the config
+// field table from: the window follows the field cursor by the lists' rule
+// (it starts moving once the cursor passes the first page).
+func (p configsPage) fieldWindowStart(banner, rowsH int, fields []driver.ConfigField) int {
+	line := banner + p.fieldLineOf(fields, p.fieldCur)
+	if line >= rowsH {
+		return line - rowsH + 1
+	}
+	return 0
+}
+
+// rightClick focuses the right pane and, in the config section's field
+// table, parks the field cursor on the clicked row (a warning line counts
+// as its field). Opening the editor stays on Enter: a click is a selection,
+// and the old direct-to-editor mapping threw a form open on every stray
+// click. The dns/routing panes are scroll views with no cursor — a click
+// there only moves focus.
+func (p *configsPage) rightClick(row int) {
+	if p.mode != 0 || row < 0 {
+		return
+	}
+	r := p.curRow()
+	if r == nil {
+		return
+	}
+	rowsH := max0(p.height - 2)
+	if row >= rowsH {
+		return // the box's bottom border or a row below it
+	}
+	p.focus = 1
+	if r.section != "config" {
+		return
+	}
+	fields := orderedFields(p.item(*r).Fields)
+	if len(fields) == 0 {
+		return
 	}
 	// bodyLines renders the title line, then one line per field with an
 	// optional interface-warning line after some of them; rightLines windows
-	// those lines by p.scroll — but it also prepends the 4-line rejection
-	// banner when the last $EDITOR session was refused, and the walk below
-	// must start after it or every field row maps to the wrong field.
-	head := 0
+	// those lines — and prepends the 4-line rejection banner when the last
+	// $EDITOR session was refused, so the walk must start after it.
+	banner := 0
 	if rej := p.validateErr[p.item(*r).ID]; rej.Err != "" {
-		head = 4
+		banner = 4
 	}
-	line := p.scroll + row - 1 - head // -1: the title line
-	if line < 0 {
-		return nil
-	}
+	target := p.fieldWindowStart(banner, rowsH, fields) + row
 	for i := range fields {
-		if line == 0 {
-			f := fields[i]
-			p.editField = f
-			p.fieldErr = ""
-			p.mode = 2
-			p.focus = 1
-			return p.openInput("新值 ("+f.Type+")", f.Value)
+		line := banner + p.fieldLineOf(fields, i)
+		if target == line {
+			p.fieldCur = i
+			return
 		}
-		line--
-		if p.ifaceWarning(fields[i]) != "" {
-			line--
+		// The warning row, when field i has one, belongs to field i.
+		if target == line+1 && p.ifaceWarning(fields[i]) != "" {
+			p.fieldCur = i
+			return
 		}
 	}
-	return nil
+	// Title line, dead space: focus the pane, leave the cursor alone.
 }
 
 // leftFooter is the left column's key hint. The keys work in every section
@@ -1243,13 +1298,15 @@ func (p configsPage) flatLeftBox(h int) []string {
 }
 
 func (p configsPage) rightLines() []string {
-	if p.mode == 1 || p.mode == 5 || p.mode == 6 {
+	if p.mode == 5 || p.mode == 6 {
 		return p.modalLines()
 	}
 	var lines []string
+	banner := 0
 	// A rejected $EDITOR session stays visible until it is superseded.
 	if r := p.curRow(); r != nil {
 		if rej := p.validateErr[p.item(*r).ID]; rej.Err != "" {
+			banner = 4
 			lines = append(lines,
 				ui.ErrorStyle.Render(" ✗ "+sectionName(r.section)+" 校验未通过，未保存"),
 				ui.HelpStyle.Render("  编辑内容保留在 "+
@@ -1261,6 +1318,13 @@ func (p configsPage) rightLines() []string {
 	}
 	lines = append(lines, p.bodyLines()...)
 	rowsH := max0(p.height - 2)
+	// The field table's window follows the field cursor (fieldWindowStart);
+	// the scroll views keep their own offset.
+	if fields, ok := p.curFields(); ok {
+		start := p.fieldWindowStart(banner, rowsH, fields)
+		end := min(start+rowsH, len(lines))
+		return ui.WithScrollbar(lines[start:end], p.rightW-4, len(lines), start, p.focus == 1)
+	}
 	if p.scroll >= len(lines) {
 		p.scroll = len(lines) - 1
 	}

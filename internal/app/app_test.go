@@ -1268,24 +1268,25 @@ func TestHomeNetworkStateWarnsMissingInterface(t *testing.T) {
 func TestConfigsFieldEdit(t *testing.T) {
 	m := newTestModel(t)
 	m, _ = m.Update(key("5"))
-	m, cmd := m.Update(key("e")) // field picker on the config row
-	if v := m.View(); !strings.Contains(v, "选择要修改的字段") {
-		t.Fatalf("field picker missing:\n%s", v)
-	}
+	m, cmd := m.Update(key("e")) // enters the right pane's field table
 	if cmd != nil {
 		t.Fatal("e on config should not fire a cmd directly")
 	}
-	// The cursor row shows the backend default next to the current value.
-	if v := m.View(); !strings.Contains(v, "默认 info") {
-		t.Fatalf("field picker should show the default of the cursor row:\n%s", v)
+	mm := m.(Model)
+	if mm.configs.focus != 1 || mm.configs.mode != 0 {
+		t.Fatalf("e should enter the field table: focus=%d mode=%d", mm.configs.focus, mm.configs.mode)
 	}
 	m, _ = m.Update(key("enter")) // first field (日志级别, preferred order)
 	if v := m.View(); !strings.Contains(v, "新值") {
 		t.Fatalf("field input missing:\n%s", v)
 	}
-	// The edit modal carries the backend documentation for the field.
+	// The edit modal carries the backend documentation and the default the
+	// old picker used to surface on its cursor row.
 	if v := m.View(); !strings.Contains(v, "Log level") {
 		t.Fatalf("field input should show the field description:\n%s", v)
+	}
+	if v := m.View(); !strings.Contains(v, "默认值  info") {
+		t.Fatalf("field input should show the default:\n%s", v)
 	}
 	m, _ = m.Update(key("d"))
 	m, _ = m.Update(key("e"))
@@ -1296,17 +1297,22 @@ func TestConfigsFieldEdit(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("field enter should fire configFieldCmd")
 	}
-	if msg := cmd(); msg != nil {
+	for _, msg := range execCmds(cmd) {
 		m, _ = m.Update(msg)
+	}
+	mm = m.(Model)
+	if mm.configs.mode != 0 || mm.configs.fieldCur != 0 {
+		t.Fatalf("submit should return to the field table on the edited field: mode=%d cur=%d",
+			mm.configs.mode, mm.configs.fieldCur)
 	}
 }
 
 // A field without a Chinese label (a backend key this build does not know)
 // must still be reachable, falling back to the raw key.
-// The field picker windows its rows: a config exposes every global field
-// (31 on daed v2.1.1), far more than fit on screen, and the cursor must
-// stay visible while scrolling.
-func TestConfigsFieldPickerWindows(t *testing.T) {
+// The right pane's field table windows its rows: a config exposes every
+// global field (31 on daed v2.1.1), far more than fit on screen, and the
+// cursor must stay visible while walking to the tail.
+func TestConfigsFieldTableWindows(t *testing.T) {
 	m := newTestModel(t)
 	m, _ = m.Update(key("5"))
 	// Grow the stub's config to a realistic field count.
@@ -1327,30 +1333,25 @@ func TestConfigsFieldPickerWindows(t *testing.T) {
 	m = mm
 
 	m, _ = m.Update(key("e"))
-	v := m.View()
-	if !strings.Contains(v, "(31)") {
-		t.Fatalf("picker should report the field count:\n%s", v)
-	}
-	if !strings.Contains(v, "1-") || !strings.Contains(v, "/ 31") {
-		t.Fatalf("picker should show the window position:\n%s", v)
-	}
 	// Preferred fields lead, so 日志级别 is on the first screen.
-	if !strings.Contains(v, "日志级别") {
-		t.Fatalf("preferred field should lead the picker:\n%s", v)
+	if v := m.View(); !strings.Contains(v, "日志级别") {
+		t.Fatalf("preferred field should lead the field table:\n%s", v)
 	}
 	// Walk to the bottom; the window follows and the cursor stays visible.
 	for i := 0; i < 40; i++ {
 		m, _ = m.Update(key("j"))
 	}
-	v = m.View()
-	if !strings.Contains(v, "❯") {
-		t.Fatalf("cursor must stay visible after scrolling:\n%s", v)
+	mm = m.(Model)
+	if mm.configs.fieldCur != 30 {
+		t.Fatalf("fieldCur = %d, want 30 (clamped at the tail)", mm.configs.fieldCur)
 	}
-	if !strings.Contains(v, "UDP 跳变间隔") { // last preferred field
-		t.Fatalf("scrolled window should reach the tail fields:\n%s", v)
+	tail := "❯ " + fieldLabel(orderedFields(fields)[30])
+	v := mm.View()
+	if !strings.Contains(v, tail) {
+		t.Fatalf("cursor must stay visible on the tail field %q:\n%s", tail, v)
 	}
-	if !strings.Contains(v, "/ 31，j/k 滚动") {
-		t.Fatalf("scroll hint missing:\n%s", v)
+	if strings.Contains(v, "日志级别") {
+		t.Fatalf("the first field should have scrolled out of the window:\n%s", v)
 	}
 }
 
@@ -3588,13 +3589,14 @@ func TestBuiltinEditorValidationKeepsEditorOpen(t *testing.T) {
 	}
 }
 
-// Editing several fields in a row is the common case: the picker must keep
-// its cursor across re-opens and stay open after a field submit, with the
-// cursor still on the field just edited.
-func TestConfigsFieldPickerKeepsCursorAndStaysOpen(t *testing.T) {
+// Editing several fields in a row is the common case: the field table is
+// the only edit surface, a submit (or esc) returns to it in one step with
+// the cursor still on the field just edited, and the session continues
+// from the same list.
+func TestConfigsFieldSubmitReturnsToTable(t *testing.T) {
 	m := newTestModel(t)
 	m, _ = m.Update(key("5"))
-	m, _ = m.Update(key("e")) // picker opens on the config section
+	m, _ = m.Update(key("e")) // enters the right pane's field table
 	// orderedFields puts the preferred fields first: logLevel, lanInterface,
 	// then checkInterval — two j's park on it.
 	m, _ = m.Update(key("j"))
@@ -3617,21 +3619,31 @@ func TestConfigsFieldPickerKeepsCursorAndStaysOpen(t *testing.T) {
 		m, _ = m.Update(msg)
 	}
 	mm = m.(Model)
-	if mm.configs.mode != 1 {
-		t.Fatalf("submit should stay in the picker, mode=%d", mm.configs.mode)
+	if mm.configs.mode != 0 {
+		t.Fatalf("submit should return to the field table, mode=%d", mm.configs.mode)
 	}
-	if mm.configs.pickCursor != 2 {
-		t.Fatalf("picker cursor = %d, want 2 (the field just edited)", mm.configs.pickCursor)
+	if mm.configs.fieldCur != 2 || mm.configs.focus != 1 {
+		t.Fatalf("cursor should stay on the edited field: cur=%d focus=%d",
+			mm.configs.fieldCur, mm.configs.focus)
 	}
-	// Leaving and re-opening must not restart the hunt from the top.
+	// The session continues in the same list: one k reaches the next field,
+	// Enter edits it, and esc is back at the table — no second list, no
+	// second esc.
+	m, _ = m.Update(key("k"))
+	m, _ = m.Update(key("enter"))
+	mm = m.(Model)
+	if mm.configs.mode != 2 || mm.configs.editField.Name != "lanInterface" {
+		t.Fatalf("enter should open the next field's editor, mode=%d field=%s",
+			mm.configs.mode, mm.configs.editField.Name)
+	}
 	m, _ = m.Update(key("esc"))
 	mm = m.(Model)
 	if mm.configs.mode != 0 {
-		t.Fatalf("esc should close the picker, mode=%d", mm.configs.mode)
+		t.Fatalf("esc should close the editor in one step, mode=%d", mm.configs.mode)
 	}
-	m, _ = m.Update(key("e"))
+	m, _ = m.Update(key("j")) // back onto the field just edited
 	if v := m.View(); !strings.Contains(v, "❯ 检查间隔") {
-		t.Fatalf("re-opened picker should keep the cursor position:\n%s", v)
+		t.Fatalf("the cursor should sit on 检查间隔 in the table:\n%s", v)
 	}
 }
 
@@ -4487,8 +4499,9 @@ func TestNodesHandleNodesClampsCursorToVisible(t *testing.T) {
 
 // rightClick walks the field rows bodyLines renders, but rightLines
 // prepends a 4-line banner when the last $EDITOR session was refused —
-// without charging for it, every click above the fold opened the wrong
-// field (or none).
+// without charging for it, every click above the fold landed on the wrong
+// field (or none). A click only parks the field cursor; the editor waits
+// for Enter.
 func TestConfigsRightClickCountsRejectionBanner(t *testing.T) {
 	m := newTestModel(t)
 	m, _ = m.Update(key("5"))
@@ -4504,19 +4517,107 @@ func TestConfigsRightClickCountsRejectionBanner(t *testing.T) {
 		t.Fatalf("banner should render:\n%s", v)
 	}
 	// Screen row 5 (y=10) is the first field row: 4 banner lines + title
-	// above it. It must open logLevel, the first editable field.
-	m, cmd := m.Update(mouseClick(90, 10))
-	if cmd == nil {
-		t.Fatal("clicking the first field row should open its editor")
+	// above it. The click parks the cursor on logLevel without opening
+	// anything.
+	m, _ = m.Update(mouseClick(90, 10))
+	mm = m.(Model)
+	if mm.configs.mode != 0 {
+		t.Fatalf("a click must not open the editor, mode=%d", mm.configs.mode)
 	}
-	if msg := cmd(); msg != nil {
-		m, _ = m.Update(msg)
+	if mm.configs.fieldCur != 0 || mm.configs.focus != 1 {
+		t.Fatalf("click should park the field cursor: cur=%d focus=%d",
+			mm.configs.fieldCur, mm.configs.focus)
 	}
-	if got := m.(Model).configs.editField.Name; got != "logLevel" {
-		t.Fatalf("opened field = %q, want logLevel", got)
+	if v := m.View(); !strings.Contains(v, "❯ 日志级别") {
+		t.Fatalf("the clicked field should carry the cursor:\n%s", v)
+	}
+	m, _ = m.Update(key("enter"))
+	mm = m.(Model)
+	if mm.configs.mode != 2 || mm.configs.editField.Name != "logLevel" {
+		t.Fatalf("enter should open the editor on logLevel, mode=%d field=%q",
+			mm.configs.mode, mm.configs.editField.Name)
 	}
 	if v := m.View(); !strings.Contains(v, "修改 日志级别") {
 		t.Fatalf("field editor should be open:\n%s", v)
+	}
+}
+
+// Clicking a middle field row parks the cursor there and focuses the pane;
+// j/k then walk the fields and Enter opens the editor under the cursor.
+// (The old mapping opened the editor straight away — a stray click threw a
+// form open.)
+func TestConfigsRightClickSelectsField(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("5"))
+	// Field rows start one line below the title, in orderedFields order
+	// (logLevel, lanInterface, checkInterval): y=8 is checkInterval, the
+	// third field.
+	m, _ = m.Update(mouseClick(90, 8))
+	mm := m.(Model)
+	if mm.configs.mode != 0 || mm.configs.fieldCur != 2 || mm.configs.focus != 1 {
+		t.Fatalf("click should select checkInterval: mode=%d cur=%d focus=%d",
+			mm.configs.mode, mm.configs.fieldCur, mm.configs.focus)
+	}
+	m, _ = m.Update(key("k"))
+	if mm = m.(Model); mm.configs.fieldCur != 1 {
+		t.Fatalf("k should move up to lanInterface, cur=%d", mm.configs.fieldCur)
+	}
+	m, _ = m.Update(key("enter"))
+	mm = m.(Model)
+	if mm.configs.mode != 2 || mm.configs.editField.Name != "lanInterface" {
+		t.Fatalf("enter should open the editor on lanInterface, mode=%d field=%q",
+			mm.configs.mode, mm.configs.editField.Name)
+	}
+	// A click on the box's bottom border row or below it is a no-op — it
+	// must not park the cursor on some row outside the window.
+	m, _ = m.Update(key("esc"))
+	mm = m.(Model)
+	bottom := mm.configs.height - 2
+	mm.configs.rightClick(bottom)
+	mm.configs.rightClick(bottom + 1)
+	if mm.configs.fieldCur != 1 {
+		t.Fatalf("click below the content must not move the cursor, cur=%d", mm.configs.fieldCur)
+	}
+}
+
+// fieldLineOf is the shared math of the cursor-following window and the
+// click mapping: an interface-warning line after a field shifts every
+// later field down, and both sides must charge for it.
+func TestConfigsFieldLineOfCountsWarnings(t *testing.T) {
+	p := newConfigsPage(driver.Caps{})
+	p.setInterfaces([]driver.NetworkInterface{{Name: "eth0", Up: true}})
+	fields := []driver.ConfigField{
+		{Name: "logLevel"},
+		{Name: "lanInterface", Value: "eth9"}, // unknown NIC → warning line
+		{Name: "checkInterval"},
+	}
+	for i, want := range []int{1, 2, 4} {
+		if got := p.fieldLineOf(fields, i); got != want {
+			t.Fatalf("fieldLineOf(%d) = %d, want %d", i, got, want)
+		}
+	}
+}
+
+// With more fields than fit the pane, the render window follows the field
+// cursor (the lists' rule), so j/k and G never walk the cursor off screen.
+func TestConfigsFieldWindowFollowsCursor(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("5"))
+	mm := m.(Model)
+	fields := make([]driver.ConfigField, 0, 40)
+	for i := range 40 {
+		fields = append(fields, driver.ConfigField{Name: fmt.Sprintf("f%02d", i),
+			Label: fmt.Sprintf("字段%02d", i), Value: "x", Type: "string"})
+	}
+	mm.configs.sel.Configs[0].Fields = fields
+	mm.configs.focus = 1
+	mm.configs.fieldCur = 39
+	v := mm.View()
+	if !strings.Contains(v, "❯ 字段39") {
+		t.Fatalf("window should follow the cursor to the last field:\n%s", v)
+	}
+	if strings.Contains(v, "字段00") {
+		t.Fatalf("the first field should have scrolled out of the window:\n%s", v)
 	}
 }
 

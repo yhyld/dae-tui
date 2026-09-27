@@ -19,8 +19,6 @@ import (
 // handleKey checks mode != 0 first.
 func (p *configsPage) modalKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	switch p.mode {
-	case 1: // field picker (config global fields)
-		return p.fieldPickerKey(msg, d)
 	case 2: // field input
 		return p.fieldInputKey(msg, d)
 	case 3, 4: // create / rename input
@@ -35,45 +33,12 @@ func (p *configsPage) modalKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	return nil
 }
 
-func (p *configsPage) fieldPickerKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
-	r := p.curRow()
-	if r == nil {
-		p.mode = 0
-		return nil
-	}
-	it := p.item(*r)
-	fields := orderedFields(it.Fields)
-	// The field list can change while the picker is open (the refreshed
-	// selection after a submit); keep the cursor on a real row.
-	if p.pickCursor >= len(fields) {
-		p.pickCursor = max0(len(fields) - 1)
-	}
-	switch msg.String() {
-	case "esc":
-		p.mode = 0
-	case "j", "down":
-		if p.pickCursor < len(fields)-1 {
-			p.pickCursor++
-		}
-	case "k", "up":
-		if p.pickCursor > 0 {
-			p.pickCursor--
-		}
-	case "enter":
-		if p.pickCursor < len(fields) {
-			p.editField = fields[p.pickCursor]
-			p.fieldErr = ""
-			p.mode = 2
-			return p.openInput("新值 ("+p.editField.Type+")", p.editField.Value)
-		}
-	}
-	return nil
-}
-
 func (p *configsPage) fieldInputKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	switch msg.String() {
 	case "esc":
-		p.mode = 1
+		// Back to the field table, one step: the overlay is opened from the
+		// cursor row and returns to it (there is no intermediate picker page).
+		p.mode = 0
 		p.input.Blur()
 		return nil
 	case "enter":
@@ -86,9 +51,8 @@ func (p *configsPage) fieldInputKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			return nil
 		}
 		if val == "" || val == f.Value {
-			// Nothing to submit: back to the picker, which stays open
-			// for the next field.
-			p.mode = 1
+			// Nothing to submit: back to the field table.
+			p.mode = 0
 			p.input.Blur()
 			return nil
 		}
@@ -98,11 +62,11 @@ func (p *configsPage) fieldInputKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			p.fieldErr = err.Error()
 			return nil
 		}
-		// Stay in the picker once the edit lands: multi-field sessions
-		// (checkInterval + checkTolerance + …) are the common case, the
-		// refreshed value shows up on the picker row itself, and esc is
-		// the explicit way out.
-		p.mode = 1
+		// Back to the field table with the cursor still on the edited field:
+		// multi-field sessions (checkInterval + checkTolerance + …) are the
+		// common case — j/k to the next row and Enter again. A refresh keeps
+		// the cursor (rebuild clamps, not resets), so the hunt never restarts.
+		p.mode = 0
 		p.input.Blur()
 		it := p.item(*r)
 		return configFieldCmd(d, it.ID, f, val, "修改 "+fieldLabel(f))

@@ -74,10 +74,10 @@ var helpSections = []helpSection{
 	{"配置页", [][2]string{
 		{"Tab / shift+Tab", "在左栏三个分区盒（全局配置/DNS/路由规则）间循环切换，每盒记住自己的光标"},
 		{"j/k", "在当前分区盒内移动"},
-		{"l/Enter", "进入右栏滚动查看内容（字段列表 / DSL 原文等）；h/esc 返回左栏"},
+		{"l/Enter", "进入右栏查看内容（全局配置=可点选的字段表 / DSL 原文等）；h/esc 返回左栏"},
 		{"Enter", "切换选中的 config/dns/routing"},
 		{"c / R / D", "新建 / 重命名 / 删除（确认）当前分区的条目"},
-		{"e", "config 逐字段修改（全部字段，含默认值与说明，按类型预校验）；DNS/路由默认调 $EDITOR 改 DSL（config.toml 里 editor = \"builtin\" 换内置浮窗编辑器），先后端语法校验、再展示 diff，y 确认后才提交"},
+		{"e", "config 进右栏字段表逐字段修改（j/k 选中、Enter 编辑，浮窗含默认值与说明、按类型预校验）；DNS/路由默认调 $EDITOR 改 DSL（config.toml 里 editor = \"builtin\" 换内置浮窗编辑器），先后端语法校验、再展示 diff，y 确认后才提交"},
 		{"v", "DNS/路由右栏切换：DSL 原文 ↔ 解析后的结构概览（规则清单）"},
 		{"y", "复制当前方案 DSL 到剪贴板（OSC 52）"},
 		{"A (全局)", "重载 (run，需确认)：方案切换、订阅更新、群组改动都要重载才生效；停止代理在首页 s"},

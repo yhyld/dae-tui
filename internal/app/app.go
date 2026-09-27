@@ -887,7 +887,7 @@ func (m Model) click(x, y int) (tea.Model, tea.Cmd) {
 		if cx <= m.configs.leftW {
 			m.configs.leftClick(row)
 		} else {
-			cmd = m.configs.rightClick(row)
+			m.configs.rightClick(row)
 		}
 	}
 	// A double-click acts as Enter — but only on the list pages whose Enter

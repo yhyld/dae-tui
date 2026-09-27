@@ -187,7 +187,7 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   取右——注意 TruncateLeft 会丢弃被跳过区域的转义序列，盒子右侧窄条可能掉色，文字不受影响）。
   浮窗清单：帮助（`helpOpen`，`?` 任何页面）、账户、全局 `A` 确认、首页预设确认+DSL 预览、
   各页输入表单（含内置 DSL 编辑器 mode 7）。留在右栏的：小 y/n 确认（删组/删节点/删订阅/
-  删配置、组内移除）、大列表选择器（加节点、字段选择）、DSL diff 确认。
+  删配置、组内移除）、大列表选择器（加节点、挂订阅、策略）、DSL diff 确认。
 - **内置 DSL 编辑器**（configs mode 7，`config.toml` 的 `editor = "builtin"` 开启）：
   textarea 浮窗，`ctrl+s` → `validateTextCmd(path="")` → `editorValidatedMsg`；校验失败时
   `handleValidated` 检测 `mode==7` 把错误写进 `edErr` 并**保持编辑器打开**；成功进 mode 6，
@@ -218,10 +218,12 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   1 格左边距；`tabClick` 按渲染宽度算
   span），点左栏行选中（外框 1 行 + 页头盒 3 行 + 盒子上边框 1 行，`row = y-5`；各页
   `leftClick` 复算 `leftLines` 的窗口偏移），点外框底边框任意位置打开帮助浮窗（呼出键
-  `? 帮助` 固定在该边框右端且**不参与截断**，页签不要放帮助标识）。右栏行点击只有
-  群组页与订阅页有（`rightClick` 同构：扣信息卡 topH 与过滤提示行再映射窗口，
+  `? 帮助` 固定在该边框右端且**不参与截断**，页签不要放帮助标识）。右栏行点击：群组页
+  与订阅页把光标钉到所点行（`rightClick` 同构：扣信息卡 topH 与过滤提示行再映射窗口，
   **且必须带 `d >= rowsH` 上界守卫**——盒底边框行和盒外行（toast 行）是 no-op，
-  长列表下少了它会把光标移到窗口外的隐藏行；节点页右栏是静态详情无光标，本来就不需要）。
+  长列表下少了它会把光标移到窗口外的隐藏行）；配置页右栏点击=聚焦，全局配置区把字段
+  光标钉到所点行，**编辑浮窗只由 Enter 打开**（点击直接开表单是误触源，已否决）；
+  节点页右栏是静态详情无光标，本来就不需要。
   首页 `click` 映射两个交互区——组行与路由预设行，锚点由 `bodyLines` 随渲染返回
   （`homeAnchors`），click 复用同一份数学不重推；首页扁平行 f 渲染在 `y=4+f-窗口起点`，
   而 row 0 是盒内第一行，所以 **flat = row + 窗口起点 + 1，窗口起点必须走
@@ -418,7 +420,15 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   `leftWindow` 窗口跟随光标），`View` 用 `ui.JoinBoxes` 手工拼左右两列（不走
   `PaneRow`——它会把整块重新包框）；左栏点击映射 `leftClick` 必须与 `leftWindow`
   的窗口数学一致且会激活所点盒子。页面内容高度 <9 行时 `flatLeftBox` 退化为单个
-  扁平盒子（tiny terminal 兜底，否则每盒连一行内容都放不下）。
+  扁平盒子（tiny terminal 兜底，否则每盒连一行内容都放不下）。右栏全局配置区是
+  **字段表 + 字段光标**（`fieldCur`），且它是**唯一的字段编辑面**——旧的字段选择器
+  （原 mode 1）已删，右栏不存在第二份字段列表：j/k/g/G 移动光标（渲染窗口跟随，
+  `fieldWindowStart` 与 `rightClick` 共用同一份行映射 `fieldLineOf`——告警行占一行，
+  两边都要计），点击只钉光标不进表单（编辑浮窗由 Enter 开），`e` 在全局配置区=
+  聚焦右栏字段表。字段编辑浮窗（mode 2）的 esc 与提交都一步回字段表、光标停在
+  原字段——不要让它"返回"某个中间列表；`rebuild`（刷新）对 fieldCur 只钳制不归零，
+  多字段连续编辑的节奏不被刷新打断，归零只属于显式导航（`setCursor`/
+  `switchSection`）。DNS/路由右栏仍是纯滚动视图（`p.scroll`），无光标。
 - **字段输入预校验**（`fields.go: validateFieldValue`）：按 `ConfigField.Type`
   （int/bool/duration/array）在客户端挡掉明显非法的值，错误显示在输入框模态内，
   不提交。语义仍然归后端。
