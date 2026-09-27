@@ -968,8 +968,10 @@ func TestHomeAccountMenuAndLogout(t *testing.T) {
 	m2, _ = m2.Update(selectionsMsg{Sel: mustSel(t)})
 	m = m2
 
-	// P opens the account menu; global hotkeys must not leak through it.
+	// P opens the settings menu; global hotkeys must not leak through it.
+	// Enter on 账户 opens the account menu inside it.
 	m, _ = m.Update(key("P"))
+	m, _ = m.Update(key("enter"))
 	v := m.View()
 	for _, want := range []string{"账户", "admin", "修改密码", "退出登录"} {
 		if !strings.Contains(v, want) {
@@ -1008,8 +1010,10 @@ func TestHomeAccountMenuAndLogout(t *testing.T) {
 		t.Fatalf("password success toast missing:\n%s", v)
 	}
 
-	// Logout: menu → second entry → confirm → y returns to the login form.
+	// Logout: settings menu → account menu → second entry → confirm → y
+	// returns to the login form.
 	m, _ = m.Update(key("P"))
+	m, _ = m.Update(key("enter"))
 	m, _ = m.Update(key("j"))
 	m, _ = m.Update(key("enter"))
 	if v := m.View(); !strings.Contains(v, "确认退出登录") {
@@ -2438,6 +2442,7 @@ func TestHomePasswordRule(t *testing.T) {
 	m2, _ = m2.Update(bootMsg{Users: 1, Status: driver.Status{Version: "v2.1.1", Running: true}})
 	m = m2
 	m, _ = m.Update(key("P"))
+	m, _ = m.Update(key("enter")) // account menu
 	m, _ = m.Update(key("enter")) // password form
 	for _, k := range []string{"o", "l", "d", "p", "w", "1"} {
 		m, _ = m.Update(key(k))
@@ -3457,22 +3462,47 @@ func TestApplyConfirmFloats(t *testing.T) {
 	}
 }
 
-// TestAcctOverlay: P opens the account window over any page, esc closes.
+// TestAcctOverlay: P opens the settings menu over any page; Enter on 账户
+// opens the account window, esc walks back one level, a second esc closes.
 func TestAcctOverlay(t *testing.T) {
 	m := newTestModel(t)
 	m, _ = m.Update(key("2")) // not the home page
 	m, _ = m.Update(key("P"))
+	if v := m.View(); !strings.Contains(v, "设置") || !strings.Contains(v, "账户") {
+		t.Fatalf("settings menu missing:\n%s", v)
+	}
+	m, _ = m.Update(key("enter"))
 	if v := m.View(); !strings.Contains(v, "修改密码") || !strings.Contains(v, "退出登录") {
 		t.Fatalf("account window missing:\n%s", v)
 	}
 	// While it is open, page hotkeys are swallowed.
 	m, _ = m.Update(key("1"))
 	if mm := m.(Model); mm.page != pageTree {
-		t.Fatalf("account overlay should swallow page hotkeys, page=%d", mm.page)
+		t.Fatalf("settings overlay should swallow page hotkeys, page=%d", mm.page)
 	}
 	m, _ = m.Update(key("esc"))
-	if v := m.View(); strings.Contains(v, "退出登录") {
-		t.Fatalf("esc should close the account window:\n%s", v)
+	if v := m.View(); !strings.Contains(v, "设置") || strings.Contains(v, "退出登录") {
+		t.Fatalf("esc should walk back to the settings menu:\n%s", v)
+	}
+	m, _ = m.Update(key("esc"))
+	if v := m.View(); strings.Contains(v, "当前用户") {
+		t.Fatalf("a second esc should close the settings menu:\n%s", v)
+	}
+}
+
+// The settings menu's unimplemented entries (主题/语言/快捷键/关于) render
+// dim and are skipped by the cursor — Enter on them is unreachable.
+func TestSettingsSkipsPendingEntries(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("P"))
+	for _, k := range []string{"j", "j", "j", "j", "k", "k"} {
+		m, _ = m.Update(key(k))
+	}
+	if mm := m.(Model); mm.settings.cur != 0 {
+		t.Fatalf("cursor should stay on the only enabled entry, cur=%d", mm.settings.cur)
+	}
+	if v := m.View(); !strings.Contains(v, "即将支持") {
+		t.Fatalf("pending entries should be marked:\n%s", v)
 	}
 }
 

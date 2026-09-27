@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -48,17 +47,6 @@ type homePage struct {
 
 	confirmSwitch bool
 
-	// account menu (P): password change and logout. daed allows exactly one
-	// user, so the menu only needs those two entries.
-	acct     int // 0 none, 1 menu, 2 password form, 3 logout confirm
-	acctCur  int
-	user     string
-	pwFocus  int // 0 current, 1 new, 2 confirm
-	pwCur    textinput.Model
-	pwNew    textinput.Model
-	pwRepeat textinput.Model
-	pwErr    string
-
 	// routing quick-switch: the selected routing profile plus the presets
 	// that can replace it. Summary/Refs feed the rules digest box (already
 	// fetched by ListSelections — the home page adds no request of its own).
@@ -98,21 +86,7 @@ type homePage struct {
 }
 
 func newHomePage(caps driver.Caps) homePage {
-	p := homePage{lat: map[string]driver.Latency{}, confirmPreset: -1, caps: caps, follow: true}
-	p.pwCur = newPasswordInput("当前密码")
-	p.pwNew = newPasswordInput("新密码 (至少6位, 含字母和数字)")
-	p.pwRepeat = newPasswordInput("确认新密码")
-	return p
-}
-
-func newPasswordInput(placeholder string) textinput.Model {
-	ti := textinput.New()
-	ti.Placeholder = placeholder
-	ti.EchoMode = textinput.EchoPassword
-	ti.EchoCharacter = '•'
-	ti.CharLimit = 128
-	ti.Width = 28
-	return ti
+	return homePage{lat: map[string]driver.Latency{}, confirmPreset: -1, caps: caps, follow: true}
 }
 
 func (p *homePage) setSize(w, h int) {
@@ -528,9 +502,6 @@ func (p *homePage) handleKey(msg tea.KeyMsg, d driver.Driver, running bool) tea.
 	// Any keystroke re-arms cursor-follow scrolling: the keyboard user's
 	// context is the active line, so the window snaps back to it.
 	p.follow = true
-	if p.acct != 0 {
-		return p.acctKey(msg, d)
-	}
 	if p.confirmPreset >= 0 {
 		switch msg.String() {
 		case "y":
@@ -632,115 +603,6 @@ func (p *homePage) handleValidated(msg presetValidatedMsg, d driver.Driver) tea.
 	return configTextCmd(d, msg.Section, msg.ID, msg.Text, msg.Label)
 }
 
-// acctKey drives the account menu (P), the password form and the logout
-// confirmation.
-func (p *homePage) acctKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
-	switch p.acct {
-	case 1: // menu
-		switch msg.String() {
-		case "esc":
-			p.acct = 0
-		case "j", "down":
-			if p.acctCur < 1 {
-				p.acctCur++
-			}
-		case "k", "up":
-			if p.acctCur > 0 {
-				p.acctCur--
-			}
-		case "enter":
-			if p.acctCur == 0 {
-				p.acct = 2
-				p.pwFocus = 0
-				p.pwErr = ""
-				p.pwCur.SetValue("")
-				p.pwNew.SetValue("")
-				p.pwRepeat.SetValue("")
-				p.pwCur.Focus()
-				p.pwNew.Blur()
-				p.pwRepeat.Blur()
-				return textinput.Blink
-			}
-			p.acct = 3
-		}
-		return nil
-
-	case 2: // password form
-		switch msg.String() {
-		case "esc":
-			p.acct = 1
-			p.pwCur.Blur()
-			p.pwNew.Blur()
-			p.pwRepeat.Blur()
-			return nil
-		case "tab", "shift+tab", "up", "down":
-			delta := 1
-			if msg.String() == "shift+tab" || msg.String() == "up" {
-				delta = -1
-			}
-			p.pwFocus = (p.pwFocus + delta + 3) % 3
-			p.setPwFocus()
-			return textinput.Blink
-		case "enter":
-			cur := p.pwCur.Value()
-			nw := p.pwNew.Value()
-			if cur == "" || nw == "" {
-				p.pwErr = "当前密码和新密码不能为空"
-				return nil
-			}
-			if nw != p.pwRepeat.Value() {
-				p.pwErr = "两次输入的新密码不一致"
-				return nil
-			}
-			if !strongEnough(nw) {
-				p.pwErr = "新密码至少 6 位，且需包含字母和数字"
-				return nil
-			}
-			p.pwErr = ""
-			p.acct = 0
-			p.pwCur.Blur()
-			p.pwNew.Blur()
-			p.pwRepeat.Blur()
-			return passwordCmd(d, cur, nw)
-		}
-		var cmd tea.Cmd
-		switch p.pwFocus {
-		case 0:
-			p.pwCur, cmd = p.pwCur.Update(msg)
-		case 1:
-			p.pwNew, cmd = p.pwNew.Update(msg)
-		case 2:
-			p.pwRepeat, cmd = p.pwRepeat.Update(msg)
-		}
-		return cmd
-
-	case 3: // logout confirm
-		switch msg.String() {
-		case "y":
-			p.acct = 0
-			return func() tea.Msg { return logoutMsg{} }
-		case "n", "esc":
-			p.acct = 1
-		}
-		return nil
-	}
-	return nil
-}
-
-func (p *homePage) setPwFocus() {
-	p.pwCur.Blur()
-	p.pwNew.Blur()
-	p.pwRepeat.Blur()
-	switch p.pwFocus {
-	case 0:
-		p.pwCur.Focus()
-	case 1:
-		p.pwNew.Focus()
-	case 2:
-		p.pwRepeat.Focus()
-	}
-}
-
 // logsCmd opens the daed journal in a pager-less follow view. tea.ExecProcess
 // hands the real terminal to the child and restores the TUI afterwards; the
 // view is read-only and local — journalctl lives on this machine, so it only
@@ -834,50 +696,11 @@ func (p *homePage) currentNode(g driver.Group) (label string, style lipgloss.Sty
 	return auto + " · 未测速", ui.HelpStyle
 }
 
-// overlay returns the home page's floating windows: the account menu /
-// password form / logout confirmation and the routing-preset confirmation
-// with its DSL preview. The small proxy on/off confirmation stays inline.
+// overlay returns the home page's floating windows: the routing-preset
+// confirmation with its DSL preview. The small proxy on/off confirmation
+// stays inline; the settings/account windows float from the root model.
 func (p homePage) overlay() *overlaySpec {
 	switch {
-	case p.acct == 1:
-		lines := []string{ui.TitleStyle.Render(" 账户"), "",
-			ui.HelpStyle.Render(" 当前用户  " + p.user), ""}
-		items := []string{"修改密码", "退出登录"}
-		for i, it := range items {
-			mark, style := "  ", ui.HelpStyle
-			if i == p.acctCur {
-				mark, style = "❯ ", ui.CursorStyle
-			}
-			lines = append(lines, style.Render(mark+it))
-		}
-		return &overlaySpec{lines: append(lines,
-			ui.HelpStyle.Render(" j/k 选择  Enter 确认  esc 返回"))}
-	case p.acct == 2:
-		lines := []string{ui.TitleStyle.Render(" 修改密码"), ""}
-		for i, f := range []struct {
-			label string
-			input textinput.Model
-		}{
-			{"当前密码", p.pwCur}, {"新密码", p.pwNew}, {"确认新密码", p.pwRepeat},
-		} {
-			style := ui.HelpStyle
-			if i == p.pwFocus {
-				style = ui.SelectedStyle
-			}
-			lines = append(lines, style.Render(" "+ui.PadRight(f.label, 10))+" "+f.input.View())
-		}
-		if p.pwErr != "" {
-			lines = append(lines, "", ui.ErrorStyle.Render(" ✗ "+p.pwErr))
-		}
-		return &overlaySpec{lines: append(lines, "",
-			ui.HelpStyle.Render(" Tab 切换  Enter 提交  esc 返回"))}
-	case p.acct == 3:
-		return &overlaySpec{destructive: true, lines: []string{
-			"确认退出登录?",
-			"将清除本机保存的密码与 token",
-			"",
-			ui.OKStyle.Render(" y 确认") + "    " + ui.ErrorStyle.Render("n / esc 取消"),
-		}}
 	case p.confirmPreset >= 0 && p.presetErr != nil:
 		return &overlaySpec{destructive: true, lines: []string{
 			ui.ErrorStyle.Render(" ✗ 无法生成: " + shortErr(p.presetErr)),

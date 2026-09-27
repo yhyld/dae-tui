@@ -63,6 +63,10 @@ type Model struct {
 	helpOpen   bool
 	helpScroll int
 
+	// settings is the global settings window (P): menu + account management,
+	// floating over any page like the help overlay.
+	settings settings
+
 	login loginForm
 
 	width, height int
@@ -122,6 +126,7 @@ func New(drv driver.Driver, cfg *config.Config, cfgPath string) Model {
 	m.nodes = newNodesPage(m.caps)
 	m.nodes.hist = m.latHist
 	m.configs = newConfigsPage(m.caps)
+	m.settings = newSettings()
 	// "builtin" swaps the DNS/routing $EDITOR round-trip for the in-app
 	// floating editor (config key: editor).
 	m.configs.builtin = cfg.Editor == "builtin"
@@ -142,15 +147,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// already failed (stored credentials rejected): every poll would keep
 	// failing the same way, so route the user back to the login form
 	// instead of an endless stream of error toasts.
-	if m.phase == phaseMain {
-		if err := msgAuthErr(msg); errors.Is(err, driver.ErrNeedAuth) {
-			m.phase = phaseLogin
-			m.login = newLoginForm(false)
-			m.login.username.SetValue(m.cfg.Username)
-			m.login.err = "登录已失效（凭据被拒绝），请重新登录"
-			return m, m.login.init()
+		if m.phase == phaseMain {
+			if err := msgAuthErr(msg); errors.Is(err, driver.ErrNeedAuth) {
+				m.phase = phaseLogin
+				m.settings.open, m.settings.acct = false, 0
+				m.login = newLoginForm(false)
+				m.login.username.SetValue(m.cfg.Username)
+				m.login.err = "登录已失效（凭据被拒绝），请重新登录"
+				return m, m.login.init()
+			}
 		}
-	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
@@ -244,7 +250,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		// credentials were persisted by the driver's SaveToken hook
-		m.home.user = m.cfg.Username
+		m.settings.user = m.cfg.Username
 		m.enterMain()
 		return m, m.initialLoad()
 
@@ -257,7 +263,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if err := m.drv.Logout(context.Background()); err != nil {
 			m.showErrToast("✗ 退出登录: " + shortErr(err))
 		}
-		m.home.user = ""
+		m.settings.open, m.settings.acct = false, 0
+		m.settings.user = ""
 		m.phase = phaseLogin
 		m.login = newLoginForm(false)
 		return m, m.login.init()
@@ -471,7 +478,8 @@ func msgAuthErr(msg tea.Msg) error {
 func (m *Model) enterMain() {
 	m.phase = phaseMain
 	m.page = pageHome
-	m.home.user = m.cfg.Username
+	m.settings.user = m.cfg.Username
+	m.settings.open, m.settings.acct = false, 0
 }
 
 func (m *Model) initialLoad() tea.Cmd {
@@ -666,10 +674,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.helpScroll = clampHelpScroll(m.helpScroll, helpWinBody(m.height-6))
 		return m, nil
 	}
-	// The account window opens from any page (P is global), so its keys
-	// are routed here before the page sees them.
-	if m.home.acct != 0 {
-		return m, m.home.acctKey(msg, m.drv)
+	// The settings window (P) opens from any page, so its keys are routed
+	// here before the page sees them — same contract the account window
+	// always had.
+	if m.settings.open {
+		return m, m.settings.key(msg, m.drv)
 	}
 	// While a page-level modal/input is open, every keystroke (including
 	// the digit page-switch hotkeys — names, cron expressions and links
@@ -682,9 +691,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.confirmApply = true
 			return m, nil
 		case "P":
-			// The account window floats, so it opens from any page.
-			m.home.acct = 1
-			m.home.acctCur = 0
+			// The settings window floats, so it opens from any page.
+			m.settings.open = true
+			m.settings.cur = 0
 			return m, nil
 		case "1":
 			m.page = pageHome
@@ -736,7 +745,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // anyModal reports whether the current page has a modal or text input
 // open that should receive raw keystrokes.
 func (m Model) anyModal() bool {
-	if m.helpOpen || m.home.acct != 0 {
+	if m.helpOpen || m.settings.open {
 		return true
 	}
 	switch m.page {
@@ -750,7 +759,7 @@ func (m Model) anyModal() bool {
 		return m.configs.mode != 0
 	case pageHome:
 		// A confirmation must be answered before any global hotkey fires.
-		return m.home.confirmSwitch || m.home.confirmPreset >= 0 || m.home.acct != 0
+		return m.home.confirmSwitch || m.home.confirmPreset >= 0
 	}
 	return false
 }
@@ -1205,7 +1214,7 @@ func (m Model) helpKeys() (keys, hint string) {
 	keys = "A 重载  1-5 切换页面  q 退出"
 	switch m.page {
 	case pageHome:
-		keys = "L 日志  P 账户  A 重载  r 刷新"
+		keys = "L 日志  P 设置  A 重载  r 刷新"
 	case pageTree:
 		keys = "Tab 切栏  a 自动策略  t/T 测速  A 重载  r 刷新"
 	case pageSubs:
@@ -1254,9 +1263,12 @@ func overlayBox(spec *overlaySpec, maxW int) string {
 	return strings.Join(ui.BoxLines(spec.destructive, lines...), "\n")
 }
 
-// pageOverlay returns the active floating window, or nil. The account
+// pageOverlay returns the active floating window, or nil. The settings
 // window is checked first: P opens it from any page.
 func (m Model) pageOverlay() *overlaySpec {
+	if ov := m.settings.overlay(); ov != nil {
+		return ov
+	}
 	if ov := m.home.overlay(); ov != nil {
 		return ov
 	}

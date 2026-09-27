@@ -1,2 +1,3 @@
 /dae-tui
 *.test
+.zcode/
