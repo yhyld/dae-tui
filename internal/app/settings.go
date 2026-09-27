@@ -1,6 +1,8 @@
 package app
 
 import (
+	"fmt"
+
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -8,6 +10,7 @@ import (
 	"dae-tui/internal/config"
 	"dae-tui/internal/driver"
 	"dae-tui/internal/i18n"
+	"dae-tui/internal/keymap"
 	"dae-tui/internal/ui"
 )
 
@@ -34,6 +37,9 @@ type settings struct {
 
 	// language picker cursor.
 	langCur int
+
+	// keys viewer scroll offset (the catalog outgrows the window).
+	keysScroll int
 }
 
 const (
@@ -52,6 +58,7 @@ const (
 	subTheme
 	subAbout
 	subLang
+	subKeys
 )
 
 // langEntry is one language picker row. The name is written in the language
@@ -79,7 +86,7 @@ var settingsItems = []settingsItem{
 	{"账户", true},
 	{"主题", true},
 	{"语言", true},
-	{"快捷键", false},
+	{"快捷键", true},
 	{"关于", true},
 }
 
@@ -114,6 +121,8 @@ func (s *settings) key(m *Model, msg tea.KeyMsg) tea.Cmd {
 		return nil
 	case subLang:
 		return m.langKey(msg)
+	case subKeys:
+		return m.keysKey(msg)
 	}
 	switch msg.String() {
 	case "esc":
@@ -148,6 +157,9 @@ func (s *settings) key(m *Model, msg tea.KeyMsg) tea.Cmd {
 						s.langCur = i
 					}
 				}
+			case itemKeys:
+				s.sub = subKeys
+				s.keysScroll = 0
 			case itemAbout:
 				s.sub = subAbout
 			}
@@ -362,6 +374,8 @@ func (s settings) overlay() *overlaySpec {
 		return s.themeOverlay()
 	case subLang:
 		return s.langOverlay()
+	case subKeys:
+		return s.keysOverlay()
 	case subAbout:
 		return s.aboutOverlay()
 	case subAcctMenu:
@@ -494,6 +508,76 @@ func (s settings) langOverlay() *overlaySpec {
 	}
 	return &overlaySpec{lines: append(lines, "",
 		ui.HelpStyle.Render(i18n.T(" j/k 选择  Enter 确认  esc 返回")))}
+}
+
+// keysKey drives the read-only keymap viewer: j/k/g/G scroll the catalog,
+// r re-reads keys.toml (the file is the editor — the viewer names it), esc
+// returns to the settings menu.
+func (m *Model) keysKey(msg tea.KeyMsg) tea.Cmd {
+	s := &m.settings
+	switch tk(keymap.Global, msg.String()) {
+	case "esc":
+		s.sub = subMenu
+	case "j", "down":
+		s.keysScroll++
+	case "k", "up":
+		s.keysScroll--
+	case "g":
+		s.keysScroll = 0
+	case "G":
+		s.keysScroll = len(keyCatalog)
+	case "r":
+		m.reloadKeys()
+	}
+	s.keysScroll = max0(s.keysScroll)
+	return nil
+}
+
+// reloadKeys re-reads keys.toml; the toast reports warnings rather than
+// losing them — a bad binding silently falling back to its default would
+// read as "remap does not work".
+func (m *Model) reloadKeys() {
+	appKeys.Reload(keymap.Path(m.cfgPath))
+	if notes := appKeys.Notes(); len(notes) > 0 {
+		m.showErrToast("✗ " + i18n.T("键位已重载，但有警告: ") + notes[0])
+		return
+	}
+	m.showToast("✓ " + i18n.T("键位已重载"))
+}
+
+// keysOverlay renders the catalog grouped by scope: the live key column
+// (what actually works right now) and the action description. Load notes
+// ride on top — they are why a binding might not have applied.
+func (s settings) keysOverlay() *overlaySpec {
+	const winH = 22
+	lines := []string{ui.TitleStyle.Render(" " + i18n.T("快捷键")), ""}
+	for _, n := range appKeys.Notes() {
+		lines = append(lines, "  "+ui.HelpStyle.Render("⚠ "+ui.Truncate(n, 56)))
+	}
+	lastScope := ""
+	for _, e := range keyCatalog {
+		if e.scope != lastScope {
+			lastScope = e.scope
+			lines = append(lines, "", "  "+ui.SelectedStyle.Render(scopeTitle(e.scope)))
+		}
+		row := "  " + ui.CursorStyle.Render(ui.PadRight(K(e.scope, e.def), 12)) +
+			ui.HelpStyle.Render(i18n.T(e.desc))
+		lines = append(lines, row)
+	}
+	total := len(lines)
+	start := s.keysScroll
+	if start > total-winH {
+		start = max0(total - winH)
+	}
+	end := start + winH
+	if end > total {
+		end = total
+	}
+	body := lines[start:end]
+	body = append(body, "",
+		ui.HelpStyle.Render(i18n.T(" j/k 滚动  r 重载 keys.toml  esc 返回"))+
+			ui.HelpStyle.Render(fmt.Sprintf("  %d-%d/%d", start+1, end, total)))
+	return &overlaySpec{lines: body}
 }
 
 func themeSwatches(t config.Theme) string {

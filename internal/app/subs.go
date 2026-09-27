@@ -10,6 +10,7 @@ import (
 
 	"dae-tui/internal/driver"
 	"dae-tui/internal/i18n"
+	"dae-tui/internal/keymap"
 	"dae-tui/internal/ui"
 )
 
@@ -228,12 +229,16 @@ func (p *subsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		return p.cronKey(msg, d)
 	}
 
-	if cmd, consumed := p.nodeView.handleKey(msg); consumed {
+	if cmd, consumed := p.nodeView.handleKey(msg, keymap.Subs); consumed {
 		p.clampNodeCursor()
 		return cmd
 	}
 
-	switch msg.String() {
+	// Remap layer: the forms and the filter input above stay raw; the
+	// action switch below dispatches through the translated key.
+	key := tk(keymap.Subs, msg.String())
+
+	switch key {
 	case "u":
 		if !p.caps.Subscriptions {
 			return unsupportedCmd(i18n.T("更新订阅"))
@@ -294,7 +299,7 @@ func (p *subsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	}
 
 	if p.focus == 0 {
-		switch msg.String() {
+		switch key {
 		case "j", "down":
 			if p.sel < len(p.subs)-1 {
 				p.sel++
@@ -340,7 +345,7 @@ func (p *subsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	}
 
 	nodes := p.visibleNodes()
-	switch msg.String() {
+	switch key {
 	case "e":
 		if !p.caps.Subscriptions {
 			return unsupportedCmd(i18n.T("编辑订阅"))
@@ -589,13 +594,14 @@ func (p subsPage) View() string {
 		}
 	}
 
-	rightFooter := i18n.T("t/T 测速 · y 复制 · / 过滤 · o 排序")
+	rightFooter := K(keymap.Subs, "t") + "/" + K(keymap.Subs, "T") + " " + i18n.T("测速") +
+		" · " + kb(keymap.Subs, "y", "复制") + " · / " + i18n.T("过滤") + " · " + kb(keymap.Subs, "o", "排序")
 	if p.mode == 2 {
 		rightFooter = i18n.T("y 确认 · n/esc 取消")
 	}
 	return strings.Join(ui.PaneRowColumn(
 		ui.PaneSpec{Title: i18n.T("订阅 (") + strconv.Itoa(len(p.subs)) + ")",
-			Footer: i18n.T("Tab 切栏 · c 定时刷新 · x 删除"), Lines: p.leftLines(),
+			Footer: i18n.T("Tab 切栏 · ") + kb(keymap.Subs, "c", "定时刷新") + " · " + kb(keymap.Subs, "x", "删除"), Lines: p.leftLines(),
 			Focused: p.focus == 0, W: p.leftW, H: p.height},
 		ui.PaneSpec{Title: topTitle, Lines: info, W: p.rightW, H: topH},
 		ui.PaneSpec{Title: bottomTitle, Footer: rightFooter, Lines: body,

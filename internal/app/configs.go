@@ -15,6 +15,7 @@ import (
 
 	"dae-tui/internal/driver"
 	"dae-tui/internal/i18n"
+	"dae-tui/internal/keymap"
 	"dae-tui/internal/ui"
 )
 
@@ -670,7 +671,7 @@ func (p configsPage) View() string {
 
 	rightFooter := i18n.T("j/k 滚动")
 	if _, ok := p.curFields(); ok {
-		rightFooter = i18n.T("j/k 选择 · Enter 编辑")
+		rightFooter = K(keymap.Configs, "j") + "/" + K(keymap.Configs, "k") + " " + i18n.T("选择 · Enter 编辑")
 	}
 	switch p.mode {
 	case 5:
@@ -989,7 +990,11 @@ func (p *configsPage) rightClick(row int) {
 }
 
 // leftFooter is the left column's key strip, translated at render time.
-func leftFooter() string { return i18n.T("Tab 切区 · e 编辑 · c/R/D 管理") }
+func leftFooter() string {
+	return i18n.T("Tab 切区 · ") + kb(keymap.Configs, "e", "编辑") + " · " +
+		K(keymap.Configs, "c") + "/" + K(keymap.Configs, "R") + "/" + K(keymap.Configs, "D") +
+		" " + i18n.T("管理")
+}
 
 func leftShares(h int) (s [3]int) {
 	base, rem := h/3, h%3

@@ -12,6 +12,7 @@ import (
 
 	"dae-tui/internal/driver"
 	"dae-tui/internal/i18n"
+	"dae-tui/internal/keymap"
 	"dae-tui/internal/ui"
 )
 
@@ -482,7 +483,7 @@ func (p *groupsPage) rightClick(row int) {
 func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 
 	if p.mode == pickNone || p.mode == pickNode {
-		if cmd, consumed := p.nodeView.handleKey(msg); consumed {
+		if cmd, consumed := p.nodeView.handleKey(msg, keymap.Groups); consumed {
 			if p.mode == pickNode {
 				if n := len(p.visibleCandidates()); p.pickCursor >= n {
 					p.pickCursor = max0(n - 1)
@@ -497,7 +498,12 @@ func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		return p.pickerKey(msg, d)
 	}
 
-	switch msg.String() {
+	// Remap layer for everything below: the filter input above stays raw,
+	// the picker and the action switches dispatch through the translated
+	// key.
+	key := tk(keymap.Groups, msg.String())
+
+	switch key {
 	case "a":
 		if !p.caps.SwitchNode {
 			return unsupportedCmd(i18n.T("切换策略"))
@@ -519,7 +525,7 @@ func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 
 	if p.focus == 0 {
 		selectGroup := p.selectGroupAt
-		switch msg.String() {
+		switch key {
 		case "j", "down":
 			if p.gi < len(p.groups)-1 {
 				selectGroup(p.gi + 1)
@@ -592,7 +598,7 @@ func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		return nil
 	}
 
-	switch msg.String() {
+	switch key {
 	case "j", "down":
 		if p.rc < len(p.rows)-1 {
 			p.rc++
@@ -714,7 +720,8 @@ func (p groupsPage) View() string {
 		}
 	}
 
-	rightFooter := i18n.T("Enter 开合分区 · space 标记 · x 移除 · / 过滤 · o 排序")
+	rightFooter := i18n.T("Enter 开合分区 · space 标记 · ") + kb(keymap.Groups, "x", "移除") +
+		" · / " + i18n.T("过滤") + " · " + kb(keymap.Groups, "o", "排序")
 	switch p.mode {
 	case pickSub:
 		rightFooter = i18n.T("Enter 挂载 · j/k 移动 · esc 取消")
@@ -726,7 +733,9 @@ func (p groupsPage) View() string {
 		rightFooter = i18n.T("y 确认 · n/esc 取消")
 	}
 	return strings.Join(ui.PaneRowColumn(
-		ui.PaneSpec{Title: leftTitle, Footer: i18n.T("s/n 挂订阅/节点 · c/R/D/p 组"), Lines: left,
+		ui.PaneSpec{Title: leftTitle, Footer: K(keymap.Groups, "s") + "/" + K(keymap.Groups, "n") + " " + i18n.T("挂订阅/节点") +
+			" · " + K(keymap.Groups, "c") + "/" + K(keymap.Groups, "R") + "/" + K(keymap.Groups, "D") +
+			"/" + K(keymap.Groups, "p") + " " + i18n.T("组"), Lines: left,
 			Focused: p.focus == 0, W: p.leftW, H: p.height},
 		ui.PaneSpec{Title: infoTitle, Lines: info, W: p.rightW, H: topH},
 		ui.PaneSpec{Title: bodyTitle, Footer: rightFooter, Lines: body,

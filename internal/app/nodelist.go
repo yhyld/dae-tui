@@ -81,7 +81,10 @@ func newNodeView() nodeView {
 	return nodeView{input: ti}
 }
 
-func (v *nodeView) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
+// handleKey consumes the filter's keys. Open, it captures everything raw
+// (typing must never be remapped); closed, "/" and "o" are page-scope
+// actions and go through the keymap like the rest of the page.
+func (v *nodeView) handleKey(msg tea.KeyMsg, scope string) (tea.Cmd, bool) {
 	if v.open {
 		switch msg.String() {
 		case "esc":
@@ -95,7 +98,7 @@ func (v *nodeView) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 		v.input, cmd = v.input.Update(msg)
 		return cmd, true
 	}
-	switch msg.String() {
+	switch tk(scope, msg.String()) {
 	case "/":
 		v.open = true
 		v.input.SetValue(v.applied)

@@ -17,6 +17,7 @@ import (
 	"dae-tui/internal/config"
 	"dae-tui/internal/driver"
 	"dae-tui/internal/i18n"
+	"dae-tui/internal/keymap"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -1824,24 +1825,24 @@ func TestNodeViewFilterAndSort(t *testing.T) {
 
 	// Filter box keys: / opens, typing filters live, enter keeps, esc clears.
 	v = newNodeView()
-	if _, consumed := v.handleKey(key("j")); consumed {
+	if _, consumed := v.handleKey(key("j"), ""); consumed {
 		t.Fatal("j must not be consumed by the filter")
 	}
-	if cmd, consumed := v.handleKey(key("/")); !consumed || cmd == nil {
+	if cmd, consumed := v.handleKey(key("/"), ""); !consumed || cmd == nil {
 		t.Fatal("/ should open the box (and blink)")
 	}
 	if !v.open {
 		t.Fatal("box should be open")
 	}
 	for _, r := range "hk" {
-		v.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		v.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}}, "")
 	}
 	if v.filter() != "hk" {
 		t.Fatalf("live filter = %q", v.filter())
 	}
 	// While the box is open every key belongs to it: 'o' is typed into the
 	// filter, not a sort toggle.
-	if _, consumed := v.handleKey(key("o")); !consumed {
+	if _, consumed := v.handleKey(key("o"), ""); !consumed {
 		t.Fatal("keys must be consumed by the open box")
 	}
 	if v.sortBy != sortBackend {
@@ -1850,26 +1851,26 @@ func TestNodeViewFilterAndSort(t *testing.T) {
 	if v.filter() != "hko" {
 		t.Fatalf("o should have been typed: %q", v.filter())
 	}
-	v.handleKey(tea.KeyMsg{Type: tea.KeyBackspace})
+	v.handleKey(tea.KeyMsg{Type: tea.KeyBackspace}, "")
 	if v.filter() != "hk" {
 		t.Fatalf("backspace should remove the o: %q", v.filter())
 	}
-	v.handleKey(key("enter"))
+	v.handleKey(key("enter"), "")
 	if v.open || v.filter() != "hk" {
 		t.Fatalf("enter should close and keep: open=%v filter=%q", v.open, v.filter())
 	}
-	v.handleKey(key("/")) // reopen with the text
+	v.handleKey(key("/"), "") // reopen with the text
 	if v.input.Value() != "hk" {
 		t.Fatalf("reopen should prefill: %q", v.input.Value())
 	}
-	v.handleKey(key("esc"))
+	v.handleKey(key("esc"), "")
 	if v.open || v.filter() != "" {
 		t.Fatalf("esc should close and clear: open=%v filter=%q", v.open, v.filter())
 	}
 	// o cycles the sort only while the box is closed.
 	v = newNodeView()
 	for _, want := range []int{sortLatencyAsc, sortLatencyDesc, sortBackend} {
-		v.handleKey(key("o"))
+		v.handleKey(key("o"), "")
 		if v.sortBy != want {
 			t.Fatalf("sortBy = %d, want %d", v.sortBy, want)
 		}
@@ -3491,23 +3492,16 @@ func TestAcctOverlay(t *testing.T) {
 	}
 }
 
-// The settings menu's unimplemented entry (快捷键) renders dim and is
-// skipped by the cursor — Enter on it is unreachable.
-func TestSettingsSkipsPendingEntries(t *testing.T) {
+// All settings entries are live now: the cursor walks the five rows in
+// order with no skips left.
+func TestSettingsMenuWalksAllEntries(t *testing.T) {
 	m := newTestModel(t)
 	m, _ = m.Update(key("P"))
-	m, _ = m.Update(key("j")) // 主题
-	m, _ = m.Update(key("j")) // 语言
-	m, _ = m.Update(key("j")) // must land on 关于, skipping 快捷键
-	if mm := m.(Model); mm.settings.cur != itemAbout {
-		t.Fatalf("cursor should skip the pending entry, cur=%d", mm.settings.cur)
-	}
-	m, _ = m.Update(key("k"))
-	if mm := m.(Model); mm.settings.cur != itemLang {
-		t.Fatalf("moving back should also skip the pending entry, cur=%d", mm.settings.cur)
-	}
-	if v := m.View(); !strings.Contains(v, "即将支持") {
-		t.Fatalf("pending entries should be marked:\n%s", v)
+	for i, want := range []int{itemTheme, itemLang, itemKeys, itemAbout} {
+		m, _ = m.Update(key("j"))
+		if mm := m.(Model); mm.settings.cur != want {
+			t.Fatalf("j #%d should land on entry %d, cur=%d", i+1, want, mm.settings.cur)
+		}
 	}
 }
 
@@ -5022,7 +5016,8 @@ func TestSettingsAbout(t *testing.T) {
 	m, _ = m.Update(key("P"))
 	m, _ = m.Update(key("j")) // 主题
 	m, _ = m.Update(key("j")) // 语言
-	m, _ = m.Update(key("j")) // 关于 (快捷键 is skipped while pending)
+	m, _ = m.Update(key("j")) // 快捷键
+	m, _ = m.Update(key("j")) // 关于
 	m, _ = m.Update(key("enter"))
 	v := m.(Model).View()
 	for _, want := range []string{"dae-tui", "终端管理界面", "schema 冻结"} {
@@ -5076,5 +5071,86 @@ func TestSettingsLanguagePicker(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "config.toml")); err != nil {
 		t.Fatalf("language choice should be saved: %v", err)
+	}
+}
+
+// The remap layer: a keys.toml binding rewrites dispatch (the default key
+// goes dead, the new key does the old job) and the frame help strip names
+// the live binding. Settings → 快捷键 shows the catalog.
+func TestKeyRemap(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "keys.toml")
+	os.WriteFile(path, []byte("[groups]\nj = \"ctrl+n\"\n"), 0o600)
+	m := newTestModelWith(t, stubDriver{})
+	// Assign after New: New loads (a missing) keys.toml itself.
+	oldKeys := appKeys
+	appKeys = keymap.Load(path)
+	t.Cleanup(func() { appKeys = oldKeys })
+	m, _ = m.Update(key("2")) // groups page
+	mm := m.(Model)
+	gi0 := mm.groups.gi
+	// ctrl+n now does what j did.
+	m, _ = mm.Update(key("ctrl+n"))
+	mm = m.(Model)
+	if mm.groups.gi != gi0+1 {
+		t.Fatalf("ctrl+n should move the cursor down, gi=%d", mm.groups.gi)
+	}
+	// j itself is retired in that scope.
+	m, _ = mm.Update(key("j"))
+	if mm := m.(Model); mm.groups.gi != gi0+1 {
+		t.Fatalf("retired j must do nothing, gi=%d", mm.groups.gi)
+	}
+	// Other scopes keep j (the subs page moves its subscription cursor).
+	m, _ = m.(Model).Update(key("3"))
+	m, _ = m.(Model).Update(key("j"))
+	if mm := m.(Model); mm.subs.sel != 1 {
+		t.Fatalf("j still works in the subs scope, sel=%d", mm.subs.sel)
+	}
+}
+
+// The keys viewer lists the catalog and surfaces load notes; r reloads.
+func TestSettingsKeysViewer(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "keys.toml")
+	os.WriteFile(path, []byte("[groups]\nj = \"ctrl+n\"\nD = \"esc\"\n"), 0o600)
+	m := newTestModel(t)
+	// Assign after New: New loads (a missing) keys.toml itself.
+	oldKeys := appKeys
+	appKeys = keymap.Load(path)
+	t.Cleanup(func() { appKeys = oldKeys })
+	m, _ = m.Update(key("P"))
+	m, _ = m.Update(key("j")) // 主题
+	m, _ = m.Update(key("j")) // 语言
+	m, _ = m.Update(key("j")) // 快捷键
+	m, _ = m.Update(key("enter"))
+	mm := m.(Model)
+	v := mm.View()
+	for _, want := range []string{"快捷键", "全局"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("keys viewer missing %q:\n%s", want, v)
+		}
+	}
+	// The catalog outgrows the window: scrolling down reaches the groups
+	// section, where j reads as its live binding ctrl+n.
+	found := false
+	for i := 0; i < len(keyCatalog); i++ {
+		if v = m.(Model).View(); strings.Contains(v, "ctrl+n") {
+			found = true
+			break
+		}
+		m, _ = m.Update(key("j"))
+	}
+	if !found {
+		t.Fatal("scrolling should reach the remapped ctrl+n row")
+	}
+	// The fixed-target binding produced a note on the viewer's top screen
+	// (notes ride above the catalog; the scroll above left them).
+	if top := mm.View(); !strings.Contains(top, "esc") || !strings.Contains(top, "⚠") {
+		t.Fatalf("the rejected esc binding should carry a note:\n%s", top)
+	}
+	// esc walks back to the menu.
+	m, _ = m.Update(key("esc"))
+	if mm := m.(Model); mm.settings.sub != subMenu {
+		t.Fatalf("esc should return to the menu, sub=%d", mm.settings.sub)
 	}
 }

@@ -13,6 +13,7 @@ import (
 
 	"dae-tui/internal/driver"
 	"dae-tui/internal/i18n"
+	"dae-tui/internal/keymap"
 	"dae-tui/internal/ui"
 )
 
@@ -268,12 +269,16 @@ func (p *nodesPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		return nil
 	}
 
-	if cmd, consumed := p.nodeView.handleKey(msg); consumed {
+	if cmd, consumed := p.nodeView.handleKey(msg, keymap.Nodes); consumed {
 		p.clampCursor()
 		return cmd
 	}
 
-	switch msg.String() {
+	// Remap layer: the forms and the filter input above stay raw; the
+	// action switch below dispatches through the translated key.
+	key := tk(keymap.Nodes, msg.String())
+
+	switch key {
 	case "a":
 		p.mode = 1
 		p.ifld = 0
@@ -299,7 +304,7 @@ func (p *nodesPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 
 	if p.focus == 0 {
 		nodes := p.visibleNodes()
-		switch msg.String() {
+		switch key {
 		case "j", "down":
 			if p.sel < len(nodes)-1 {
 				p.sel++
@@ -328,7 +333,7 @@ func (p *nodesPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		return nil
 	}
 
-	switch msg.String() {
+	switch key {
 	case "tab", "h", "left", "esc":
 		p.focus = 0
 	case "e":
@@ -469,7 +474,8 @@ func (p nodesPage) View() string {
 	}
 	return strings.Join(ui.PaneRow(
 		ui.PaneSpec{Title: i18n.T("手动节点") + p.nodeView.countTitle(len(p.visibleNodes()), len(p.nodes)) +
-			p.nodeView.sortTitle(), Footer: i18n.T("x 删除 · / 过滤 · o 排序"), Lines: p.leftLines(),
+			p.nodeView.sortTitle(), Footer: kb(keymap.Nodes, "x", "删除") + " · / " + i18n.T("过滤") +
+			" · " + kb(keymap.Nodes, "o", "排序"), Lines: p.leftLines(),
 			Focused: p.focus == 0, W: p.leftW, H: p.height},
 		ui.PaneSpec{Title: rvTitle, Footer: rightFooter, Lines: p.rightLines(),
 			Focused: p.focus == 1, W: p.rightW, H: p.height},

@@ -12,6 +12,7 @@ import (
 
 	"dae-tui/internal/driver"
 	"dae-tui/internal/i18n"
+	"dae-tui/internal/keymap"
 	"dae-tui/internal/ui"
 )
 
@@ -419,10 +420,15 @@ func (p *homePage) handleLatencies(lats []driver.Latency) {
 }
 
 func (p *homePage) handleKey(msg tea.KeyMsg, d driver.Driver, running bool) tea.Cmd {
-
+	// Any keystroke re-arms cursor-follow scrolling: the keyboard user's
+	// context is the active line, so the window snaps back to it.
 	p.follow = true
+	// The remap layer: the switches below keep reading their default key
+	// names; tk rewrites what the user pressed (home has no text inputs,
+	// so the whole function dispatches through the translated name).
+	key := tk(keymap.Home, msg.String())
 	if p.confirmPreset >= 0 {
-		switch msg.String() {
+		switch key {
 		case "y":
 			idx := p.confirmPreset
 			if p.presetErr != nil {
@@ -444,7 +450,7 @@ func (p *homePage) handleKey(msg tea.KeyMsg, d driver.Driver, running bool) tea.
 		return nil
 	}
 	if p.confirmSwitch {
-		switch msg.String() {
+		switch key {
 		case "y":
 			p.confirmSwitch = false
 			return runToggleCmd(d, running)
@@ -455,7 +461,7 @@ func (p *homePage) handleKey(msg tea.KeyMsg, d driver.Driver, running bool) tea.
 	}
 
 	if p.groupFocus {
-		switch msg.String() {
+		switch key {
 		case "tab", "esc", "h", "left":
 			p.groupFocus = false
 			return nil
@@ -477,7 +483,7 @@ func (p *homePage) handleKey(msg tea.KeyMsg, d driver.Driver, running bool) tea.
 			return nil
 		}
 	}
-	switch msg.String() {
+	switch key {
 	case "s":
 		p.confirmSwitch = true
 	case "L":
@@ -654,9 +660,9 @@ func (p homePage) bodyLines(status driver.Status) ([]string, int, homeAnchors) {
 				Focused: rightFocused, W: rw})
 	}
 
-	onOff := i18n.T("s 停止")
+	onOff := K(keymap.Home, "s") + " " + i18n.T("停止")
 	if !status.Running {
-		onOff = i18n.T("s 启动")
+		onOff = K(keymap.Home, "s") + " " + i18n.T("启动")
 	}
 	if twoCol {
 		addZone(pairedRow(i18n.T("代理"), onOff, p.proxyRows(status, homeRoutingW-4),
@@ -694,9 +700,9 @@ func (p homePage) bodyLines(status driver.Status) ([]string, int, homeAnchors) {
 	}
 	env := append(p.subLines(), append(p.dnsLines(envW), p.netLines(envW)...)...)
 	if twoCol && len(env) > 0 {
-		addZone(pairedRow(i18n.T("环境"), "", env, i18n.T("路由"), i18n.T("Enter 切换 · g 换组"), routingBody, !p.groupFocus))
+		addZone(pairedRow(i18n.T("环境"), "", env, i18n.T("路由"), i18n.T("Enter 切换 · ")+K(keymap.Home, "g")+" "+i18n.T("换组"), routingBody, !p.groupFocus))
 	} else {
-		addZone(ui.TitledBoxFooter(i18n.T("路由"), i18n.T("Enter 切换 · g 换组"), !p.groupFocus, routingBoxW, routingBody))
+		addZone(ui.TitledBoxFooter(i18n.T("路由"), i18n.T("Enter 切换 · ")+K(keymap.Home, "g")+" "+i18n.T("换组"), !p.groupFocus, routingBoxW, routingBody))
 		if len(env) > 0 {
 			addZone(ui.TitledBox(i18n.T("环境"), false, full, env))
 		}

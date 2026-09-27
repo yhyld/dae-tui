@@ -12,6 +12,7 @@ import (
 	"dae-tui/internal/config"
 	"dae-tui/internal/driver"
 	"dae-tui/internal/i18n"
+	"dae-tui/internal/keymap"
 	"dae-tui/internal/ui"
 )
 
@@ -106,6 +107,7 @@ func New(drv driver.Driver, cfg *config.Config, cfgPath string) Model {
 	m.configs = newConfigsPage(m.caps)
 	m.settings = newSettings()
 	m.theme, _ = config.ResolveTheme(cfg.Theme, cfg.Accent, cfg.Border, cfg.Dim)
+	loadKeys(cfgPath)
 
 	m.configs.builtin = cfg.Editor == "builtin"
 	return m
@@ -539,7 +541,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case phaseFatal:
-		switch msg.String() {
+		switch tk(keymap.Global, msg.String()) {
 		case "ctrl+c", "q", "esc":
 			return m, tea.Quit
 		case "r":
@@ -606,7 +608,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if !m.anyModal() {
-		switch msg.String() {
+		switch tk(keymap.Global, msg.String()) {
 		case "q":
 			return m, tea.Quit
 		case "A":
@@ -1027,19 +1029,34 @@ func (m Model) toastLine() string {
 	return " " + ui.Truncate(m.toast, m.width-3)
 }
 
+// helpKeys composes the frame's key strip from the keymap, so it always
+// names the keys that actually work under a remap.
 func (m Model) helpKeys() (keys, hint string) {
-	keys = i18n.T("A 重载  1-5 切换页面  q 退出")
+	gA := kb(keymap.Global, "A", "重载")
+	gR := kb(keymap.Global, "r", "刷新")
 	switch m.page {
 	case pageHome:
-		keys = i18n.T("L 日志  P 设置  A 重载  r 刷新")
+		keys = kb(keymap.Home, "L", "日志") + "  " + kb(keymap.Global, "P", "设置") +
+			"  " + gA + "  " + gR
 	case pageTree:
-		keys = i18n.T("Tab 切栏  a 自动策略  t/T 测速  A 重载  r 刷新")
+		keys = i18n.T("Tab 切栏") + "  " + kb(keymap.Groups, "a", "自动策略") +
+			"  " + K(keymap.Groups, "t") + "/" + K(keymap.Groups, "T") + " " + i18n.T("测速") +
+			"  " + gA + "  " + gR
 	case pageSubs:
-		keys = i18n.T("u 更新  e 编辑  n 新增  y 复制链接  A 重载  r 刷新")
+		keys = kb(keymap.Subs, "u", "更新") + "  " + kb(keymap.Subs, "e", "编辑") +
+			"  " + kb(keymap.Subs, "n", "新增") + "  " + kb(keymap.Subs, "y", "复制链接") +
+			"  " + gA + "  " + gR
 	case pageNodes:
-		keys = i18n.T("a 导入  e 编辑  y 复制  t/T 测速  Tab 切栏  A 重载  r 刷新")
+		keys = kb(keymap.Nodes, "a", "导入") + "  " + kb(keymap.Nodes, "e", "编辑") +
+			"  " + kb(keymap.Nodes, "y", "复制") + "  " + K(keymap.Nodes, "t") + "/" +
+			K(keymap.Nodes, "T") + " " + i18n.T("测速") + "  " + i18n.T("Tab 切栏") +
+			"  " + gA + "  " + gR
 	case pageConfigs:
-		keys = i18n.T("v 概览/原文  y 复制 DSL  l/Enter 详情  A 重载  r 刷新")
+		keys = kb(keymap.Configs, "v", "概览/原文") + "  " + kb(keymap.Configs, "y", "复制 DSL") +
+			"  " + K(keymap.Configs, "l") + "/Enter " + i18n.T("详情") + "  " + gA + "  " + gR
+	default:
+		keys = kb(keymap.Global, "A", "重载") + "  " + K(keymap.Global, "1") + "-" +
+			K(keymap.Global, "5") + " " + i18n.T("切换页面") + "  " + kb(keymap.Global, "q", "退出")
 	}
 
 	hint = i18n.T("? 帮助")

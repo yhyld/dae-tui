@@ -295,6 +295,16 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   不能写 `tea.Batch(...)`——那返回的是 Cmd 不是消息**），最后一个回复清零
   `refreshing`，顶栏 `spinSuffix` 期间显示"刷新中"；回复丢了的兜底是 tickMsg 里的
   `refreshStale()`（15s），没有独立定时器。
+- **键位重映射（`internal/keymap` + `app/keybinds.go`）**：动作以"作用域+默认键"标识
+  （如 groups/j），keys.toml（config.toml 同目录）按节覆盖默认键；**分发 switch 仍读
+  默认键名**——`tk(scope, pressed)` 在各页分发点把按键改写回规范名，改走的默认键返回
+  dead 字符串。钩子位置必须避开文本输入捕获分支（subs/nodes 的表单与过滤框、configs
+  的 modalKey 都吃原始按键）；nodeView 关闭态的 `/`、`o` 走 `tk`，打开态原文输入。
+  `esc/enter/tab/shift+tab/方向键/ctrl+c` 是固定键，加载时拒绝作为新键位；同作用域
+  冲突双方都拒绝并记入 notes。外框键位条与页脚经 `K(scope, def)`/`kb()` 拼装，显示的
+  永远是当前生效键位。滚轮发 `K(scope,"j"/"k")` 而不是字面 j/k，否则重映射后滚轮失灵。
+  appKeys 是包级变量（页面是值类型拿不到 Model），New 里 loadKeys、查看器里 r 重载；
+  测试要覆盖它必须在 New 之后赋值。
 - **i18n（`internal/i18n`）**：中文文案**本身就是 key**——zh 模式 `T()` 原样返回 key（所以断言中文字面量的测试全部照旧），en 模式查 `en` 表、缺失回退 key，en 目录可以滞后于代码。两条铁律：**渲染期文本在 View/render 路径里调 T**（设置里切语言下一帧即生效，语言选择器在 `settings.go` 的 langKey）；**禁止把 T() 结果存进长寿命结构体字段**（包级表如 helpSections/tabLabels/presetLabels 存中文 key、渲染时翻译；toast 等瞬态消息允许构造时翻译，切语言后残留几秒可接受）。`config.toml` 的 `lang = "en"` 切英文，main.go 启动 `i18n.SetLang` 一次。driver 层错误是技术诊断信息，**不翻译**。en 表 key 与 T() 调用点的一致性靠"半合法即降级"兜底，别为对齐而硬编码两份清单。
 - **i18n（`internal/i18n`）**：中文文案**本身就是 key**——zh 模式 `T()` 原样返回 key（所以断言中文字面量的测试全部照旧），en 模式查 `en` 表、缺失回退 key，en 目录可以滞后于代码。两条铁律：**渲染期文本在 View/render 路径里调 T**（设置里切语言下一帧即生效，语言选择器在 `settings.go` 的 langKey）；**禁止把 T() 结果存进长寿命结构体字段**（包级表如 helpSections/tabLabels/presetLabels 存中文 key、渲染时翻译；toast 等瞬态消息允许构造时翻译，切语言后残留几秒可接受）。`config.toml` 的 `lang = "en"` 切英文，main.go 启动 `i18n.SetLang` 一次。driver 层错误是技术诊断信息，**不翻译**。en 表 key 与 T() 调用点的一致性靠"缺失即回退中文"兜底，别为对齐而维护第二份清单。
 - **`Model.View()` 末尾的硬钳制不能删**：body 行数超过 `height-6`（外框 2 行 + 页头盒
