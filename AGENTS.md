@@ -167,7 +167,17 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   `ui.PaneRow` 按宽度截断每行、按高度补齐空行并**钳制溢出**（超出 `H-2` 的行丢弃，
   绝不能把盒子的底边框顶出页面）。盒内容行数正好是各页一直预留的 `height-2`，页面
   窗口计算不用动。
-- **一次性动作反馈走 `opDoneMsg` toast**（根模型 4 秒自动消失），不要写进 `pickErr` 这类
+- **选中行高亮一律走 `ui.HiRow`，禁止外层 `Background()` 包裹**：行本身是样式文本，
+  每个内嵌样式都以 `ESC[0m` 收尾，外层背景会在第一个内嵌 reset 处被清掉——HiRow 在
+  截断补齐后把每个内嵌 reset 后面重新断言一次背景（`reassertBG`）。调用点 = 画 `❯`
+  光标的同一处，宽度 = 盒内宽（W-4），背景条必须通长到 w（HiRow 自己补齐）。取色必须
+  走 lipgloss（`selBGOpen` 从 Render 剥出 SGR），手写裸转义会绕过 profile 检测、在测试/
+  管道里漏出乱码。
+- **列表滚动条 `ui.WithScrollbar` 只在溢出时画**（total > 窗口行数）：盒内容右缘 1 列，
+  thumb 位置按 start/total 比例。调用方只对"窗口行"应用，pickErr 等附加行必须在它
+  **之后** append（否则它们被截掉一列）；不溢出的列表保持原样，窄列表不多列。
+- **一次性动作反馈走 `opDoneMsg` toast**（成功 4 秒、失败 8 秒自动消失——失败 toast 走
+  `showErrToast`，错误里的路径/行列号 4 秒读不完），不要写进 `pickErr` 这类
   常驻面板字段——它会留到重启才消失，看起来像坏了的状态。`pickErr` 只留给"选择器打开
   期间拉取失败"这种与当前模态绑定的错误，并在 groups/subs 刷新时清空。
 - **浮窗与面板的分工——决策和填表用浮窗，浏览和对比用面板**。各页实现 `overlay() *overlaySpec`
@@ -190,7 +200,14 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   面板补齐到满高，下方追加的内容第一个被硬钳制裁掉。
 - 首页有跟随滚动：`bodyLines()` 返回行列表+活动行，`View` 让窗口跟随活动行（`follow`
   在任何按键后重新启用；滚轮 `scrollBy` 暂时关闭跟随）。帮助是浮窗，内容用 `helpScroll`
-  （j/k/G）在盒内滚动，`clampHelpScroll` 的窗口数来自 `helpWinBody`。
+  （j/k/G）在盒内滚动，`clampHelpScroll` 的窗口数来自 `helpWinBody`；帮助内容是
+  `helpSections` 表驱动（渲染与 `helpSectionStart` 同源），`?` 打开即定位到当前页的
+  小节（测试断言的是新行为，别改回"从顶开"）。
+- **强调色只有一处入口**：`config.toml` 的 `accent`（ANSI-256 序号或 `#rrggbb`）经
+  `ui.ApplyTheme` 在启动时应用——它会重建 `TitleStyle`/`TabActive`/`SelectedStyle`/
+  `CursorStyle` 这四个 init 时从 `Accent` 派生的包级样式，并重推 `SelBG`
+  （`selBGFromAccent`：主题色按 `selAccentMix` 掺进暗灰底，选中条因此跟着 accent 走）；**新增样式要么 init 后可被
+  ApplyTheme 重建，要么在调用时读 `ui.Accent` 变量**，禁止把颜色烤进 init 字符串。
 - **鼠标已启用**（`tea.WithMouseCellMotion`）：滚轮 = 3×j/k（帮助浮窗/首页直接滚偏移），
   点页签切页（页签嵌在页头盒上边框：`y=1`、列从 `x-5` 起——页头盒与页面盒子共享同一
   1 格左边距；`tabClick` 按渲染宽度算
@@ -207,6 +224,11 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   调整从不持久化，直接拿 `p.scroll` 会在首页放不下、键盘导航滚过视图后整体错行；
   预设行**只移光标不触发确认**（切换会整替路由 DSL，误点不能直接武装），twoCol 时
   预设行右于页缝、缝左（环境盒）与缝本身的点击不算。`anyModal()` 时鼠标全部忽略——弹窗期间误点比不点更糟。
+  **双击 = Enter**（同格 400ms 内第二次按下，`click()` 里检测）：只在 groups/subs/nodes
+  三页生效——它们的 Enter 是导航性的（切焦点/开合分区）；configs 左栏的 Enter 直接
+  切换生效方案、首页预设的 Enter 会武装 DSL 替换，这两处双击必须保持"只选中"
+  （`TestConfigsDoubleClickStaysSelection` 兜底）。合成的 Enter 是 cmd 里的
+  `tea.KeyMsg`，测试要执行 cmd 再喂回 Update。
   鼠标 handler 是**值接收者**（与 `handleKey` 一致），别改成指针接收者，否则
   `tea.Model` 的动态类型在键盘/鼠标两条路径上不一致。
 - 每个内容页都是**左列表 + 右详情**：左栏 `j/k` 移动，`Tab/l/Enter` 把焦点切到右栏，

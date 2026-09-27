@@ -798,7 +798,7 @@ func (p groupsPage) View() string {
 		if p.loading {
 			left = []string{ui.HelpStyle.Render("加载中…")}
 		} else {
-			left = []string{ui.HelpStyle.Render("无路由组（在 daed 中创建组后刷新）")}
+			left = []string{ui.HelpStyle.Render("无路由组（按 c 创建）")}
 		}
 	}
 	info := p.infoLines()
@@ -856,8 +856,10 @@ func (p groupsPage) leftLines() []string {
 		}
 		line := cursor + " " + ui.PadRight(g.Name, max0(p.leftW-20)) +
 			ui.HelpStyle.Render(fmt.Sprintf("%3d节点", len(g.Members())))
-		lines = append(lines, line+ui.Truncate(cur, max0(p.leftW-14)))
+		line += ui.Truncate(cur, max0(p.leftW-14))
+		lines = append(lines, ui.HiRow(line, p.leftW-4, i == p.gi))
 	}
+	lines = ui.WithScrollbar(lines, p.leftW-4, len(p.groups), start, p.focus == 0)
 	if p.pickErr != "" {
 		lines = append(lines, "", ui.ErrorStyle.Render("✗ "+p.pickErr))
 	}
@@ -948,7 +950,7 @@ func (p groupsPage) bodyLines(inner int) []string {
 			if i == p.pickCursor {
 				mark, style = "❯ ", ui.CursorStyle
 			}
-			lines = append(lines, style.Render(mark+c.label))
+			lines = append(lines, ui.HiRow(style.Render(mark+c.label), p.rightW-4, i == p.pickCursor))
 		}
 		return lines
 	}
@@ -970,13 +972,20 @@ func (p groupsPage) bodyLines(inner int) []string {
 	if prompt := p.nodeView.prompt(); prompt != "" {
 		lines = append(lines, ui.HelpStyle.Render(prompt))
 	}
+	var window []string
 	for i := start; i < len(p.rows) && i < start+rowsH; i++ {
-		lines = append(lines, p.renderRow(g, i))
+		window = append(window, p.renderRow(g, i))
 	}
-	return lines
+	return append(lines, ui.WithScrollbar(window, p.rightW-4, len(p.rows), start, p.focus == 1)...)
 }
 
+// renderRow wraps the row body with the selected-row highlight: the same
+// condition that draws the ❯ cursor lights the full-width background bar.
 func (p groupsPage) renderRow(g *driver.Group, i int) string {
+	return ui.HiRow(p.renderRowBody(g, i), p.rightW-4, i == p.rc && p.focus == 1)
+}
+
+func (p groupsPage) renderRowBody(g *driver.Group, i int) string {
 	r := &p.rows[i]
 	// The cursor marker is rendered on every row kind (including section
 	// headers) so the actual position is always visible.
@@ -1090,6 +1099,7 @@ func (p groupsPage) candidateLines(inner int) []string {
 	if p.pickCursor >= rowsH {
 		start = p.pickCursor - rowsH + 1
 	}
+	var window []string
 	for i := start; i < len(rows) && i < start+rowsH; i++ {
 		r := rows[i]
 		mark, style := "  ", ui.HelpStyle
@@ -1106,10 +1116,10 @@ func (p groupsPage) candidateLines(inner int) []string {
 		} else {
 			src = "·手动"
 		}
-		lines = append(lines, style.Render(mark+ui.PadRight(ui.SpaceAfterFlag(r.node.Name), max0(p.rightW-34)))+tick+
-			ui.HelpStyle.Render(ui.PadRight(src, 16)+r.node.Protocol))
+		window = append(window, ui.HiRow(style.Render(mark+ui.PadRight(ui.SpaceAfterFlag(r.node.Name), max0(p.rightW-34)))+tick+
+			ui.HelpStyle.Render(ui.PadRight(src, 16)+r.node.Protocol), p.rightW-4, i == p.pickCursor))
 	}
-	return lines
+	return append(lines, ui.WithScrollbar(window, p.rightW-4, len(rows), start, true)...)
 }
 
 func (p groupsPage) pickerLines(title string, rows [][2]string, cursor int, busy bool) []string {
@@ -1126,7 +1136,8 @@ func (p groupsPage) pickerLines(title string, rows [][2]string, cursor int, busy
 		if i == cursor {
 			mark, style = "❯ ", ui.CursorStyle
 		}
-		lines = append(lines, style.Render(mark+ui.PadRight(r[0], 28))+ui.HelpStyle.Render(r[1]))
+		lines = append(lines, ui.HiRow(style.Render(mark+ui.PadRight(r[0], 28))+
+			ui.HelpStyle.Render(r[1]), p.rightW-4, i == cursor))
 	}
 	return lines
 }

@@ -161,3 +161,34 @@ func TestAppFrameHelpEdge(t *testing.T) {
 		t.Fatalf("tiny frame bottom is not 12 cells: %q", tiny)
 	}
 }
+
+// The scrollbar only draws when the list overflows its window, then every
+// row comes back exactly w cells wide with the indicator in the last cell.
+func TestWithScrollbar(t *testing.T) {
+	rows := []string{"a", "bb", "中文行"}
+	if got := WithScrollbar(rows, 10, 3, 0, false); len(got) != 3 || got[0] != "a" {
+		t.Fatalf("no-overflow list must pass through, got %q", got)
+	}
+
+	out := WithScrollbar(rows, 10, 10, 0, false)
+	if len(out) != 3 {
+		t.Fatalf("len = %d, want 3", len(out))
+	}
+	for i, l := range out {
+		if w := lipgloss.Width(l); w != 10 {
+			t.Fatalf("row %d is %d cells, want 10", i, w)
+		}
+	}
+	// window 3 / total 10: thumb is 1 row; start 0 → row 0, start 7 → row 2.
+	if !strings.HasSuffix(out[0], "▐") || strings.HasSuffix(out[1], "▐") {
+		t.Fatalf("thumb misplaced at start 0: %q / %q", out[0], out[1])
+	}
+	out = WithScrollbar(rows, 10, 10, 7, true)
+	if strings.HasSuffix(out[0], "▐") || !strings.HasSuffix(out[2], "▐") {
+		t.Fatalf("thumb misplaced at start 7: %q / %q", out[0], out[2])
+	}
+	// The content keeps its text; only the column is added.
+	if !strings.Contains(out[2], "中文行") {
+		t.Fatalf("content lost: %q", out[2])
+	}
+}

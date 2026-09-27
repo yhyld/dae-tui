@@ -434,8 +434,8 @@ func TestHomePageSwitchAndCurrentNodes(t *testing.T) {
 			t.Fatalf("home missing %q:\n%s", want, v)
 		}
 	}
-	// o asks for confirmation, y fires the toggle, esc cancels.
-	m, _ = m.Update(key("o"))
+	// s asks for confirmation, y fires the toggle, esc cancels.
+	m, _ = m.Update(key("s"))
 	if v := m.View(); !strings.Contains(v, "确认停止代理") {
 		t.Fatalf("switch confirmation missing:\n%s", v)
 	}
@@ -446,7 +446,7 @@ func TestHomePageSwitchAndCurrentNodes(t *testing.T) {
 	if msg := cmd(); msg != nil {
 		m, _ = m.Update(msg)
 	}
-	m, _ = m.Update(key("o"))
+	m, _ = m.Update(key("s"))
 	m, _ = m.Update(key("n")) // decline
 	if v := m.View(); strings.Contains(v, "确认") {
 		t.Fatalf("confirmation should be gone:\n%s", v)
@@ -2779,8 +2779,17 @@ func TestHomeCurrentNodeHasNoMilliseconds(t *testing.T) {
 func TestHelpDescribesLatencyModel(t *testing.T) {
 	m := newTestModel(t)
 	m, _ = m.Update(key("?"))
+	// ? opens at the current page's section (首页 here) — the latency-model
+	// note lives there; the 全局 rows are one g-scroll away.
 	v := m.View()
-	for _, want := range []string{"测速按需触发", "每 3 秒轮询当前页可见节点", "≈ 已测最优节点"} {
+	for _, want := range []string{"≈ 已测最优节点", "路由快速切换"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("help missing %q:\n%s", want, v)
+		}
+	}
+	m, _ = m.Update(key("g")) // back to the top: the 全局 section
+	v = m.View()
+	for _, want := range []string{"测速按需触发", "每 3 秒轮询当前页可见节点"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("help missing %q:\n%s", want, v)
 		}
@@ -2930,8 +2939,10 @@ func TestHelpOverlay(t *testing.T) {
 	m, _ = m.Update(key("2")) // start somewhere with content under the box
 	m, _ = m.Update(key("?"))
 	v := m.View()
-	if !strings.Contains(v, "全局") {
-		t.Fatalf("help should open at the top:\n%s", v)
+	// ? opens at the current page's section (群组页 here) rather than the
+	// top — the section for the page you are on is the likely question.
+	if !strings.Contains(v, "群组页") {
+		t.Fatalf("help should open at the current page's section:\n%s", v)
 	}
 	if strings.Contains(v, "关于") {
 		t.Fatalf("help tail should be below the fold:\n%s", v)
@@ -4384,5 +4395,99 @@ func TestNodesImportReportSurvivesListFailure(t *testing.T) {
 	joined := strings.Join(p.rightLines(), "\n")
 	if !strings.Contains(joined, "unsupported protocol") {
 		t.Fatalf("the error should render in full on its own line:\n%s", joined)
+	}
+}
+
+// --- double-click ---
+
+// Two presses on the same cell within the window act as Enter: on the groups
+// page the second click switches focus to the right column, exactly like the
+// key does.
+func TestDoubleClickActsAsEnter(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("2"))
+	m, _ = m.Update(mouseClick(10, 5)) // first press: select the row only
+	mm := m.(Model)
+	if mm.groups.focus != 0 {
+		t.Fatalf("single click must not switch focus, focus=%d", mm.groups.focus)
+	}
+	m, cmd := m.Update(mouseClick(10, 5)) // second press: the double
+	if cmd == nil {
+		t.Fatal("the double-click should produce the synthesized Enter cmd")
+	}
+	if msg := cmd(); msg != nil {
+		m, _ = m.Update(msg)
+	}
+	mm = m.(Model)
+	if mm.groups.focus != 1 {
+		t.Fatalf("double-click should act as Enter (focus right), focus=%d", mm.groups.focus)
+	}
+}
+
+// The configs left column's Enter switches the live profile, so a
+// double-click there stays a selection: no selectCmd may fire.
+func TestConfigsDoubleClickStaysSelection(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("5"))
+	m, _ = m.Update(mouseClick(10, 5)) // record
+	_, cmd := m.Update(mouseClick(10, 5))
+	if cmd != nil {
+		t.Fatalf("configs double-click must not synthesize Enter, got cmd %v", cmd)
+	}
+}
+
+// --- toast lifetimes ---
+
+// Success notices clear after 4s; failures stay for 8 — error text with
+// paths and line numbers needs longer to read.
+func TestToastLifetimes(t *testing.T) {
+	m := newTestModel(t)
+	mm := m.(Model)
+	mm.showToast("✓ ok")
+	mm.toastAt = time.Now().Add(-5 * time.Second)
+	mm = updateTick(mm, tickMsg{n: 1})
+	if mm.toast != "" {
+		t.Fatalf("success toast should clear after 4s, got %q", mm.toast)
+	}
+	mm.showErrToast("✗ 坏了")
+	mm.toastAt = time.Now().Add(-5 * time.Second)
+	mm = updateTick(mm, tickMsg{n: 1})
+	if mm.toast == "" {
+		t.Fatal("error toast should outlive 4s")
+	}
+	mm.toastAt = time.Now().Add(-9 * time.Second)
+	mm = updateTick(mm, tickMsg{n: 1})
+	if mm.toast != "" {
+		t.Fatalf("error toast should clear after 8s, got %q", mm.toast)
+	}
+}
+
+// updateTick feeds a tick through Update and hands the Model back.
+func updateTick(m Model, msg tickMsg) Model {
+	m2, _ := m.Update(msg)
+	return m2.(Model)
+}
+
+// helpSectionStart must point at the section title of each page and stay
+// inside the content.
+func TestHelpSectionStart(t *testing.T) {
+	if helpSectionStart(pageHome) <= 0 {
+		t.Fatal("首页 section offset should skip the 全局 section")
+	}
+	lines := helpLines()
+	for _, page := range []int{pageHome, pageTree, pageSubs, pageNodes, pageConfigs} {
+		off := helpSectionStart(page)
+		if off < 0 || off >= len(lines) {
+			t.Fatalf("page %d offset %d out of range (%d lines)", page, off, len(lines))
+		}
+	}
+	// Offsets increase with page number (sections are in tab order).
+	last := -1
+	for _, page := range []int{pageHome, pageTree, pageSubs, pageNodes, pageConfigs} {
+		if off := helpSectionStart(page); off <= last {
+			t.Fatalf("page %d offset %d not after previous %d", page, off, last)
+		} else {
+			last = off
+		}
 	}
 }

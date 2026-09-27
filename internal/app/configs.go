@@ -788,6 +788,7 @@ func (p configsPage) modalLines() []string {
 			start = p.pickCursor - rowsH + 1
 		}
 		end := min(start+rowsH, len(fields))
+		var window []string
 		for i := start; i < end; i++ {
 			f := fields[i]
 			mark, style := "  ", ui.HelpStyle
@@ -808,8 +809,10 @@ func (p configsPage) modalLines() []string {
 				}
 			}
 			// Long values (URL lists) must not bleed past the pane.
-			lines = append(lines, ui.Truncate(line, max0(p.rightW-6)))
+			window = append(window, ui.HiRow(ui.Truncate(line, max0(p.rightW-6)), p.rightW-4, i == p.pickCursor))
 		}
+		window = ui.WithScrollbar(window, p.rightW-4, len(fields), start, p.focus == 1)
+		lines = append(lines, window...)
 		if start > 0 || end < len(fields) {
 			lines = append(lines, ui.HelpStyle.Render(fmt.Sprintf(" … %d-%d / %d，j/k 滚动", start+1, end, len(fields))))
 		}
@@ -1120,8 +1123,10 @@ func (p configsPage) rowAt(section string, index int) int {
 // itemLine renders one left-column profile row: cursor marker, selected
 // mark, name.
 func (p configsPage) itemLine(section string, i int) string {
+	row := p.rowAt(section, i)
+	selected := row == p.cur && p.focus == 0
 	cursor := "  "
-	if row := p.rowAt(section, i); row == p.cur && p.focus == 0 {
+	if selected {
 		cursor = ui.CursorStyle.Render("❯")
 	}
 	it := itemsOf(p.sel, section)[i]
@@ -1129,7 +1134,7 @@ func (p configsPage) itemLine(section string, i int) string {
 	if it.Selected {
 		mark = ui.OKStyle.Render("● ")
 	}
-	return cursor + " " + mark + ui.PadRight(it.Name, max0(p.leftW-12))
+	return ui.HiRow(cursor+" "+mark+ui.PadRight(it.Name, max0(p.leftW-12)), p.leftW-4, selected)
 }
 
 // leftLinesExtra counts the non-item lines heading the first box (caps and
@@ -1176,6 +1181,11 @@ func (p configsPage) leftBoxes(h int) []string {
 	for si, section := range configSections {
 		items := itemsOf(p.sel, section)
 		rowsH := shares[si] - 2
+		focused := p.focus == 0 && si == p.sec
+		footer := ""
+		if focused {
+			footer = leftFooter
+		}
 		lines := make([]string, 0, rowsH)
 		if si == 0 {
 			if !p.caps.ConfigMgmt {
@@ -1185,16 +1195,15 @@ func (p configsPage) leftBoxes(h int) []string {
 				lines = append(lines, ui.ErrorStyle.Render("✗ "+shortErr(p.err)))
 			}
 		}
-		for i := p.leftWindow(si, rowsH); i < len(items) && len(lines) < rowsH; i++ {
-			lines = append(lines, p.itemLine(section, i))
+		start := p.leftWindow(si, rowsH)
+		var itemRows []string
+		for i := start; i < len(items) && len(itemRows) < rowsH-len(lines); i++ {
+			itemRows = append(itemRows, p.itemLine(section, i))
 		}
+		itemRows = ui.WithScrollbar(itemRows, p.leftW-4, len(items), start, focused)
+		lines = append(lines, itemRows...)
 		for len(lines) < rowsH {
 			lines = append(lines, "")
-		}
-		focused := p.focus == 0 && si == p.sec
-		footer := ""
-		if focused {
-			footer = leftFooter
 		}
 		title := fmt.Sprintf("%s %d", sectionTitles[section], len(items))
 		out = append(out, ui.TitledBoxFooter(title, footer, focused, p.leftW, lines)...)

@@ -467,7 +467,7 @@ func (p *homePage) handleKey(msg tea.KeyMsg, d driver.Driver, running bool) tea.
 		}
 	}
 	switch msg.String() {
-	case "o":
+	case "s":
 		p.confirmSwitch = true
 	case "L":
 		return logsCmd()
@@ -836,9 +836,9 @@ func (p homePage) bodyLines(status driver.Status) ([]string, int, homeAnchors) {
 	}
 
 	// --- zone row 1: proxy state (left) | traffic (right) ---
-	onOff := "o 停止"
+	onOff := "s 停止"
 	if !status.Running {
-		onOff = "o 启动"
+		onOff = "s 启动"
 	}
 	if twoCol {
 		addZone(pairedRow("代理", onOff, p.proxyRows(status, homeRoutingW-4),
@@ -912,6 +912,11 @@ func (p homePage) bodyLines(status driver.Status) ([]string, int, homeAnchors) {
 			}
 		}
 		groupRows = append(groupRows, row)
+	}
+	// The cursor row rides a full-width highlight; the interactive anchor
+	// math is untouched (highlight is decoration, not layout).
+	if p.groupFocus && p.groupCursor >= 0 && p.groupCursor < len(groupRows) {
+		groupRows[p.groupCursor] = ui.HiRow(groupRows[p.groupCursor], cw, true)
 	}
 	groupFooter := "Tab 切到组列表 · Enter 跳群组页"
 	if p.groupFocus {
@@ -1067,12 +1072,28 @@ func (p homePage) trafficRows(w int) []string {
 	total := ui.HelpStyle.Render("累计 ") + green.Render("↑ "+ui.Bytes(s.UpTotal)) +
 		ui.HelpStyle.Render(" · ") + yellow.Render("↓ "+ui.Bytes(s.DownTotal)) +
 		ui.HelpStyle.Render(" · 自 daed 启动")
+	// The charts carry no axes, so name their time scale and peak: the
+	// series is the backend's runtimeOverview window — Traffic(ctx, 10, 60)
+	// in msgs.go — 60 samples across 10 seconds.
+	scale := ui.HelpStyle.Render(fmt.Sprintf("近 10s · 峰值 ↑%s ↓%s",
+		ui.Rate(maxF(s.UpSeries)), ui.Rate(maxF(s.DownSeries))))
 
 	rows := []string{rates}
 	for _, l := range strings.Split(charts, "\n") {
 		rows = append(rows, " "+l)
 	}
-	return append(rows, " "+counters, " "+total)
+	return append(rows, " "+scale, " "+counters, " "+total)
+}
+
+// maxF is the largest sample (0 for an empty series).
+func maxF(series []float64) float64 {
+	m := 0.0
+	for _, v := range series {
+		if v > m {
+			m = v
+		}
+	}
+	return m
 }
 
 // routingLines renders the 路由 zone's content: the current profile and
@@ -1111,8 +1132,9 @@ func (p homePage) routingLines(w int) (body []string, presetStart int) {
 		if i == p.presetCursor {
 			style = ui.CursorStyle
 		}
-		body = append(body, " "+cursor+" "+mark+style.Render(ui.PadRight(presetLabel(preset.ID), 14))+
-			ui.HelpStyle.Render(presetDescs[preset.ID]))
+		row := " " + cursor + " " + mark + style.Render(ui.PadRight(presetLabel(preset.ID), 14)) +
+			ui.HelpStyle.Render(presetDescs[preset.ID])
+		body = append(body, ui.HiRow(row, w, i == p.presetCursor))
 	}
 	switch {
 	case p.routingMode != "":

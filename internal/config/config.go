@@ -25,6 +25,11 @@ type Config struct {
 	// editor installed and keeps the TUI on screen).
 	Editor string `toml:"editor"`
 
+	// Accent overrides the UI accent color (titles, cursor, active tab):
+	// an ANSI-256 index ("0"-"255") or a "#rrggbb" hex string. Empty or
+	// invalid keeps the default. Read once at startup.
+	Accent string `toml:"accent"`
+
 	// mu serializes mutations + saves: driver hooks persist new tokens and
 	// credentials from background request goroutines while the UI's logout
 	// clears the session on the tea goroutine. Unexported, so the struct

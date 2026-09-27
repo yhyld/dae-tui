@@ -68,6 +68,15 @@ type Model struct {
 	width, height int
 	toast         string
 	toastAt       time.Time
+	toastDur      time.Duration
+	// Last body-row click, for double-click detection. Position, page and
+	// time all have to repeat; modals, the tab strip and the help edge
+	// never record (click returns before reaching the recorder), so a
+	// double can't leak into a modal.
+	lastClickPage int
+	lastClickX    int
+	lastClickY    int
+	lastClickAt   time.Time
 	ticks         int
 	spin          int  // spinner frame counter for the latency-test indicator
 	spinning      bool // a spinnerMsg chain is alive (guards against stacking chains)
@@ -80,6 +89,11 @@ type Model struct {
 const (
 	minTermW = 60
 	minTermH = 12
+
+	// doubleClickWindow is how fast a second press on the same cell counts
+	// as a double-click (the desktop convention is ~500ms; 400 feels
+	// snappier and leaves less room for accidental doubles).
+	doubleClickWindow = 400 * time.Millisecond
 )
 
 // errUnsupported is the toast a gated key produces on a backend whose
@@ -145,7 +159,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		m.ticks = msg.n
-		if !m.toastAt.IsZero() && time.Since(m.toastAt) > 4*time.Second {
+		if !m.toastAt.IsZero() && time.Since(m.toastAt) > m.toastDur {
 			m.toast, m.toastAt = "", time.Time{}
 		}
 		var cmds []tea.Cmd
@@ -225,10 +239,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Forget the session locally: daed's JWT stays valid until it
 		// expires, but this machine must stop replaying the credentials.
 		if err := m.cfg.ClearSession(m.cfgPath); err != nil {
-			m.showToast("✗ 清除本机凭据失败: " + shortErr(err))
+			m.showErrToast("✗ 清除本机凭据失败: " + shortErr(err))
 		}
 		if err := m.drv.Logout(context.Background()); err != nil {
-			m.showToast("✗ 退出登录: " + shortErr(err))
+			m.showErrToast("✗ 退出登录: " + shortErr(err))
 		}
 		m.home.user = ""
 		m.phase = phaseLogin
@@ -348,7 +362,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case opDoneMsg:
 		if msg.Err != nil {
-			m.showToast("✗ " + msg.Op + ": " + shortErr(msg.Err))
+			m.showErrToast("✗ " + msg.Op + ": " + shortErr(msg.Err))
 		} else {
 			m.showToast("✓ " + msg.Op)
 		}
@@ -367,7 +381,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.OK {
 			m.showToast("✓ 已复制到剪贴板 (OSC 52)")
 		} else {
-			m.showToast("✗ 复制失败：当前输出不是终端")
+			m.showErrToast("✗ 复制失败：当前输出不是终端")
 		}
 		return m, nil
 
@@ -516,8 +530,16 @@ func (m *Model) layout() {
 	m.configs.setSize(leftW, rightW, ch)
 }
 
+// showToast shows a transient success notice for the standard 4 seconds.
 func (m *Model) showToast(s string) {
-	m.toast, m.toastAt = s, time.Now()
+	m.toast, m.toastAt, m.toastDur = s, time.Now(), 4*time.Second
+}
+
+// showErrToast is the failure variant: error text (DSL line numbers, the
+// kept temp-file path, per-link import failures) routinely needs longer
+// than 4s to read, so it stays for 8.
+func (m *Model) showErrToast(s string) {
+	m.toast, m.toastAt, m.toastDur = s, time.Now(), 8*time.Second
 }
 
 // stackedDetail heights for a right column split into a small info box and
@@ -656,7 +678,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "?":
 			m.helpOpen = true
-			m.helpScroll = 0
+			m.helpScroll = clampHelpScroll(helpSectionStart(m.page), helpWinBody(m.height-6))
 			return m, nil
 		case "r":
 			return m, m.forceRefresh()
@@ -791,15 +813,23 @@ func (m Model) click(x, y int) (tea.Model, tea.Cmd) {
 	if y == m.height-1 {
 		// The frame's bottom edge — the help keys riding it — doubles as
 		// the overlay's entry point: its trailing "? 帮助" names the key,
-		// the click opens it.
+		// the click opens it (at the current page's section, like ?).
 		m.helpOpen = true
-		m.helpScroll = 0
+		m.helpScroll = clampHelpScroll(helpSectionStart(m.page), helpWinBody(m.height-6))
 		return m, nil
 	}
 	if y < 5 || cx < 0 {
 		return m, nil
 	}
 	row := y - 5
+	// Double-click detection: a second press on the same cell of the same
+	// page within the window. Only body-row clicks get here, so modals can
+	// never see the synthesized Enter.
+	now := time.Now()
+	dbl := m.page == m.lastClickPage && x == m.lastClickX && y == m.lastClickY &&
+		now.Sub(m.lastClickAt) < doubleClickWindow
+	m.lastClickPage, m.lastClickX, m.lastClickY, m.lastClickAt = m.page, x, y, now
+	var cmd tea.Cmd
 	switch m.page {
 	case pageHome:
 		m.home.click(row, cx, m.status)
@@ -813,9 +843,10 @@ func (m Model) click(x, y int) (tea.Model, tea.Cmd) {
 		if cx <= m.subs.leftW {
 			// Selecting a subscription also (re)fetches its node list: the
 			// right column shows the nodes without a separate expand step.
-			return m, m.subs.leftClick(row, m.drv)
+			cmd = m.subs.leftClick(row, m.drv)
+		} else {
+			m.subs.rightClick(row)
 		}
-		m.subs.rightClick(row)
 	case pageNodes:
 		if cx <= m.nodes.leftW {
 			m.nodes.leftClick(row)
@@ -824,10 +855,18 @@ func (m Model) click(x, y int) (tea.Model, tea.Cmd) {
 		if cx <= m.configs.leftW {
 			m.configs.leftClick(row)
 		} else {
-			return m, m.configs.rightClick(row)
+			cmd = m.configs.rightClick(row)
 		}
 	}
-	return m, nil
+	// A double-click acts as Enter — but only on the list pages whose Enter
+	// is navigational (switch focus, expand a section). The configs left
+	// column's Enter switches the live profile and the home preset's Enter
+	// arms a whole-DSL replace, so there a double-click stays a selection:
+	// activation stays on the keyboard wherever a keypress changes state.
+	if dbl && (m.page == pageTree || m.page == pageSubs || m.page == pageNodes) {
+		cmd = tea.Batch(cmd, func() tea.Msg { return tea.KeyMsg{Type: tea.KeyEnter} })
+	}
+	return m, cmd
 }
 
 // tabClick switches to the tab whose rendered span contains column cx

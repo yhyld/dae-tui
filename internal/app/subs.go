@@ -651,6 +651,7 @@ func (p subsPage) leftLines() []string {
 	if p.sel >= rowsH {
 		start = p.sel - rowsH + 1
 	}
+	var list []string
 	for i := start; i < len(p.subs) && i < start+rowsH; i++ {
 		s := p.subs[i]
 		cursor := " "
@@ -669,15 +670,16 @@ func (p subsPage) leftLines() []string {
 		case st == "":
 			st, stStyle = "—", ui.HelpStyle
 		}
-		lines = append(lines, cursor+" "+ui.PadRight(s.Tag, max0(p.leftW-26))+
-			stStyle.Render(ui.Truncate(st, 10))+
-			ui.HelpStyle.Render(" "+strconv.Itoa(s.NodeCount)+"节点"))
+		row := cursor + " " + ui.PadRight(s.Tag, max0(p.leftW-26)) +
+			stStyle.Render(ui.Truncate(st, 10)) +
+			ui.HelpStyle.Render(" "+strconv.Itoa(s.NodeCount)+"节点")
+		list = append(list, ui.HiRow(row, p.leftW-4, i == p.sel))
 		if failed && s.Info != "" {
-			lines = append(lines, "    "+ui.ErrorStyle.Render(
+			list = append(list, "    "+ui.ErrorStyle.Render(
 				ui.Truncate(firstLine(s.Info), max0(p.leftW-8))))
 		}
 	}
-	return lines
+	return append(lines, ui.WithScrollbar(list, p.leftW-4, len(p.subs), start, p.focus == 0)...)
 }
 
 // leftClick selects the row-th displayed subscription, mirroring leftLines'
@@ -835,6 +837,7 @@ func (p subsPage) bodyLines(inner int) []string {
 	if p.nc >= rowsH {
 		start = p.nc - rowsH + 1
 	}
+	var window []string
 	for i := start; i < len(nodes) && i < start+rowsH; i++ {
 		n := nodes[i]
 		cursor := " "
@@ -842,11 +845,12 @@ func (p subsPage) bodyLines(inner int) []string {
 			cursor = ui.CursorStyle.Render("❯")
 		}
 		nameW := max0(p.rightW - 17 - latCellW(p.rightW-4))
-		lines = append(lines, cursor+" "+ui.PadRight(ui.SpaceAfterFlag(n.Name), nameW)+
-			ui.HelpStyle.Render(ui.PadRight(n.Protocol, 8))+
-			latencyCell(p.lat, n.ID, latCellW(p.rightW-4)))
+		row := cursor + " " + ui.PadRight(ui.SpaceAfterFlag(n.Name), nameW) +
+			ui.HelpStyle.Render(ui.PadRight(n.Protocol, 8)) +
+			latencyCell(p.lat, n.ID, latCellW(p.rightW-4))
+		window = append(window, ui.HiRow(row, p.rightW-4, i == p.nc && p.focus == 1))
 	}
-	return lines
+	return append(lines, ui.WithScrollbar(window, p.rightW-4, len(nodes), start, p.focus == 1)...)
 }
 
 func onOff(b bool) string {

@@ -570,8 +570,8 @@ func (p nodesPage) modalLines() []string {
 			if i == p.pickCursor {
 				mark, style = "❯ ", ui.CursorStyle
 			}
-			lines = append(lines, style.Render(mark+ui.PadRight(g.Name, 24))+
-				ui.HelpStyle.Render(strconv.Itoa(len(g.Nodes))+"节点"))
+			lines = append(lines, ui.HiRow(style.Render(mark+ui.PadRight(g.Name, 24))+
+				ui.HelpStyle.Render(strconv.Itoa(len(g.Nodes))+"节点"), p.rightW-4, i == p.pickCursor))
 		}
 		return lines
 	}
@@ -598,17 +598,19 @@ func (p nodesPage) leftLines() []string {
 	if p.sel >= rowsH {
 		start = p.sel - rowsH + 1
 	}
+	var list []string
 	for i := start; i < len(nodes) && i < start+rowsH; i++ {
 		n := nodes[i]
 		cursor := " "
 		if i == p.sel {
 			cursor = ui.CursorStyle.Render("❯")
 		}
-		lines = append(lines, cursor+" "+ui.PadRight(ui.SpaceAfterFlag(n.Name), max0(p.leftW-17-latCellW(p.leftW-4)))+
-			ui.HelpStyle.Render(ui.PadRight(n.Protocol, 8))+
-			latencyCell(p.lat, n.ID, latCellW(p.leftW-4)))
+		row := cursor + " " + ui.PadRight(ui.SpaceAfterFlag(n.Name), max0(p.leftW-17-latCellW(p.leftW-4))) +
+			ui.HelpStyle.Render(ui.PadRight(n.Protocol, 8)) +
+			latencyCell(p.lat, n.ID, latCellW(p.leftW-4))
+		list = append(list, ui.HiRow(row, p.leftW-4, i == p.sel))
 	}
-	return lines
+	return append(lines, ui.WithScrollbar(list, p.leftW-4, len(nodes), start, p.focus == 0)...)
 }
 
 // leftClick selects the row-th displayed node, mirroring leftLines' prefix

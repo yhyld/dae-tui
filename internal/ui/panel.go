@@ -36,7 +36,7 @@ func titledBox(title, right, footer string, focused bool, w int, lines []string)
 		w = 12
 	}
 	inner := w - 4 // beside each border column sits one padding space
-	border := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	border := lipgloss.NewStyle().Foreground(BorderCol)
 	tstyle := lipgloss.NewStyle().Foreground(DimText)
 	if focused {
 		// The focused box lights title and border alike: with every zone
@@ -201,6 +201,44 @@ func JoinBoxes(left, right []string) []string {
 	return out
 }
 
+// WithScrollbar appends a one-cell scrollbar column to a windowed list's
+// rows: each row is truncated/padded to w-1 so the indicator rides the
+// box's right content edge (titledBox then pads nothing — rows come back
+// exactly w cells wide). Nothing is drawn until the list overflows its
+// window — a scrollbar on content that already fits is noise. total is the
+// full list's row count and start the window's first row; apply this to
+// the window rows only, before appending trailing lines (errors, prompts).
+func WithScrollbar(rows []string, w, total, start int, focused bool) []string {
+	if w < 2 || len(rows) == 0 || total <= len(rows) {
+		return rows
+	}
+	win := len(rows)
+	thumbH := win * win / total
+	if thumbH < 1 {
+		thumbH = 1
+	}
+	thumbAt := start * win / total
+	if thumbAt > win-thumbH {
+		thumbAt = win - thumbH
+	}
+	if thumbAt < 0 {
+		thumbAt = 0
+	}
+	st := BorderDim
+	if focused {
+		st = lipgloss.NewStyle().Foreground(Accent)
+	}
+	out := make([]string, len(rows))
+	for i, r := range rows {
+		bar := " "
+		if i >= thumbAt && i < thumbAt+thumbH {
+			bar = st.Render("▐")
+		}
+		out[i] = PadRight(Truncate(r, w-1), w-1) + bar
+	}
+	return out
+}
+
 // AppFrame renders the application's outer rounded frame — exactly w×h
 // cells, every inner line padded and truncated to w-2 — with the help
 // keys embedded in the bottom edge, the same text-in-border language as
@@ -211,7 +249,7 @@ func AppFrame(w, h int, keys, hint string, lines []string) string {
 		w = 8
 	}
 	inner := w - 2
-	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	dim := lipgloss.NewStyle().Foreground(BorderCol)
 	var b strings.Builder
 	b.WriteString(dim.Render("╭"+strings.Repeat("─", max0(inner))+"╮") + "\n")
 	for i := 0; i < max0(h-2); i++ {
