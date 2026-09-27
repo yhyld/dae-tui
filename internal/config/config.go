@@ -38,6 +38,13 @@ type Config struct {
 	Border string `toml:"border"`
 	Dim    string `toml:"dim"`
 
+	// Theme selects a named color scheme from the built-ins or a
+	// theme/*.toml file (config.Theme). When set it wins over the inline
+	// Accent/Border/Dim above, which remain the fallback for slots the
+	// theme leaves empty. Read once at startup; switched live from the
+	// settings window (which rewrites this field and saves).
+	Theme string `toml:"theme"`
+
 	// mu serializes mutations + saves: driver hooks persist new tokens and
 	// credentials from background request goroutines while the UI's logout
 	// clears the session on the tea goroutine. Unexported, so the struct

@@ -4951,3 +4951,64 @@ func TestSubsCopyFollowsTheInfoBox(t *testing.T) {
 		t.Fatalf("right-pane y copied %q, want 节点链接", msg.What)
 	}
 }
+
+// The theme picker previews on the cursor (ApplyTheme is global and
+// idempotent), restores on esc and persists on enter.
+func TestSettingsThemePicker(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{Endpoint: "http://127.0.0.1:2023/graphql"}
+	var m tea.Model = New(stubDriver{}, cfg, filepath.Join(dir, "config.toml"))
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	m, _ = m.Update(bootMsg{Users: 1, Status: driver.Status{Version: "v2.1.1", Running: true}})
+
+	restore := func() { ui.ApplyTheme(ui.DefaultAccent, ui.DefaultBorder, ui.DefaultDim) }
+	defer restore()
+	border0 := ui.BorderCol
+
+	// P → 主题 → picker: builtins are listed and the cursor parks on the
+	// config's active theme (默认 here).
+	m, _ = m.Update(key("P"))
+	m, _ = m.Update(key("j"))
+	m, _ = m.Update(key("enter"))
+	if v := m.View(); !strings.Contains(v, "浅色") || !strings.Contains(v, "j/k 预览") {
+		t.Fatalf("theme picker missing:\n%s", v)
+	}
+	if mm := m.(Model); mm.settings.themes[mm.settings.themeCur].Name != "默认" {
+		t.Fatalf("cursor should park on the active theme, cur=%d",
+			mm.settings.themeCur)
+	}
+	// j previews 浅色: the border color moves, esc restores the original.
+	m, _ = m.Update(key("j"))
+	if ui.BorderCol == border0 {
+		t.Fatal("preview should recolor the borders")
+	}
+	m, _ = m.Update(key("esc"))
+	if ui.BorderCol != border0 {
+		t.Fatal("esc should restore the previous theme")
+	}
+	// Reopen, preview 浅色, enter: saved to config.toml and kept active.
+	m, _ = m.Update(key("P"))
+	m, _ = m.Update(key("j"))
+	m, _ = m.Update(key("enter"))
+	m, _ = m.Update(key("j"))
+	m, cmd := m.Update(key("enter"))
+	if cmd != nil {
+		m, _ = m.Update(cmd())
+	}
+	mm := m.(Model)
+	if mm.cfg.Theme != "浅色" || mm.theme.Border != "250" {
+		t.Fatalf("enter should persist the theme: %+v", mm.theme)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "config.toml")); err != nil {
+		t.Fatalf("theme choice should be saved: %v", err)
+	}
+	// esc after a save must not un-save it: the picker's esc restores the
+	// theme active when the picker opened — which is now 浅色.
+	m, _ = mm.Update(key("P"))
+	m, _ = mm.Update(key("j"))
+	mm = m.(Model)
+	if got := mm.settings.themes[mm.settings.themeCur].Name; got != "浅色" {
+		t.Fatalf("reopened picker should park on the saved theme, got %q", got)
+	}
+	restore()
+}

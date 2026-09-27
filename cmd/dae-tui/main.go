@@ -47,8 +47,13 @@ func main() {
 		fatal("加载配置失败: %v", err)
 	}
 	// The theme must be in place before anything renders — including the
-	// probe path, whose output is plain text anyway.
-	ui.ApplyTheme(cfg.Accent, cfg.Border, cfg.Dim)
+	// probe path, whose output is plain text anyway. A named theme wins
+	// over the inline colors; an unfound name falls back to them loudly.
+	theme, found := config.ResolveTheme(cfg.Theme, cfg.Accent, cfg.Border, cfg.Dim)
+	if cfg.Theme != "" && !found {
+		fmt.Fprintf(os.Stderr, "警告: 主题 %q 未找到（内置或 ~/.config/dae-tui/theme/），使用内联颜色\n", cfg.Theme)
+	}
+	ui.ApplyTheme(theme.Accent, theme.Border, theme.Dim)
 
 	// Credential persistence goes through Config's locked mutators: these
 	// hooks fire on background request goroutines (silent re-auth) while

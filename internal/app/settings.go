@@ -3,23 +3,25 @@ package app
 import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
+	"dae-tui/internal/config"
 	"dae-tui/internal/driver"
 	"dae-tui/internal/ui"
 )
 
 // settings is the global settings window (P): a menu floating over any page.
-// Account management moved here from the home page (P used to open it
-// directly); the other entries (theme / language / keys / about) are slots
-// that fill in as they land — disabled ones are skipped by the cursor and
-// rendered dim with a 即将支持 note.
+// Each menu entry opens a sub-window (sub* below); account management moved
+// here from the home page (P used to open it directly), the rest fill in as
+// they land — disabled entries render dim and are skipped by the cursor.
 type settings struct {
 	open bool
 	cur  int
 
-	// The account sub-window, the old homePage.acct state machine: 1 menu,
-	// 2 password form, 3 logout confirm. 0 shows the settings menu itself.
-	acct    int
+	// Which sub-window is up: subMenu shows the menu itself.
+	sub int
+
+	// account sub-window state (the old homePage.acct machine).
 	acctCur int
 	user    string
 	pwFocus int // 0 current, 1 new, 2 confirm
@@ -27,7 +29,34 @@ type settings struct {
 	pwNew   textinput.Model
 	pwRepeat textinput.Model
 	pwErr   string
+
+	// theme picker state: the candidate list is resolved (concrete colors,
+	// builtins then user files) when the picker opens, so new files show up
+	// without a restart. themeActive is the config's current theme name —
+	// the ● marker; esc restores what was on screen when the picker opened.
+	themes     []config.Theme
+	themeNotes []string
+	themeCur   int
+	themeActive string
 }
+
+// Settings menu entries.
+const (
+	itemAccount = iota
+	itemTheme
+	itemLang
+	itemKeys
+	itemAbout
+)
+
+// Settings sub-windows.
+const (
+	subMenu = iota
+	subAcctMenu
+	subPwForm
+	subLogoutConfirm
+	subTheme
+)
 
 // settingsItem is one settings menu row; disabled rows render dim and are
 // skipped by the cursor.
@@ -38,7 +67,7 @@ type settingsItem struct {
 
 var settingsItems = []settingsItem{
 	{"账户", true},
-	{"主题", false},
+	{"主题", true},
 	{"语言", false},
 	{"快捷键", false},
 	{"关于", false},
@@ -62,11 +91,14 @@ func newPasswordInput(placeholder string) textinput.Model {
 	return ti
 }
 
-// key routes the settings window's keys. The account sub-window keeps its
-// own state machine; the menu itself only needs j/k/enter/esc.
-func (s *settings) key(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
-	if s.acct != 0 {
-		return s.acctKey(msg, d)
+// key routes the settings window's keys. Sub-windows keep their own state
+// machines; the menu itself only needs j/k/enter/esc.
+func (s *settings) key(m *Model, msg tea.KeyMsg) tea.Cmd {
+	switch s.sub {
+	case subAcctMenu, subPwForm, subLogoutConfirm:
+		return s.acctKey(msg, m.drv)
+	case subTheme:
+		return m.themeKey(msg)
 	}
 	switch msg.String() {
 	case "esc":
@@ -88,23 +120,111 @@ func (s *settings) key(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	case "enter":
 		if s.cur < len(settingsItems) && settingsItems[s.cur].enabled {
 			switch s.cur {
-			case 0: // account
-				s.acct, s.acctCur = 1, 0
+			case itemAccount:
+				s.sub = subAcctMenu
+				s.acctCur = 0
+			case itemTheme:
+				m.openThemePicker()
 			}
 		}
 	}
 	return nil
 }
 
+// cfgThemeDir returns the theme directory; ok=false when the OS config path
+// is unavailable (the picker then just shows the built-ins).
+func (m *Model) cfgThemeDir() (string, bool) {
+	dir, err := config.ThemeDir()
+	return dir, err == nil
+}
+
+// openThemePicker rebuilds the candidate list from the built-ins and the
+// theme dir, every entry resolved to concrete colors over the config's
+// inline values (what a partial theme file inherits). It parks the cursor
+// on the theme config.toml currently names.
+func (m *Model) openThemePicker() {
+	s := &m.settings
+	s.sub = subTheme
+	s.themes = nil
+	s.themeNotes = nil
+	var user []config.Theme
+	if dir, ok := m.cfgThemeDir(); ok {
+		var notes []string
+		var err error
+		user, notes, err = config.LoadThemes(dir)
+		if err != nil {
+			notes = append(notes, "读取主题目录失败: "+err.Error())
+		}
+		s.themeNotes = notes
+	}
+	for _, t := range append(config.BuiltinThemes(), user...) {
+		s.themes = append(s.themes, t.Resolved(m.cfg.Accent, m.cfg.Border, m.cfg.Dim))
+	}
+	s.themeActive = m.cfg.Theme
+	if s.themeActive == "" {
+		s.themeActive = "默认"
+	}
+	s.themeCur = 0
+	for i, t := range s.themes {
+		if t.Name == s.themeActive {
+			s.themeCur = i
+			break
+		}
+	}
+}
+
+// themeKey drives the theme picker: j/k previews immediately (ApplyTheme
+// rebuilds every derived style and is cheap), enter persists the choice to
+// config.toml, esc restores the theme that was active when the picker
+// opened. The whole UI repaints under the preview on the next frame — the
+// fastest color swatch there is.
+func (m *Model) themeKey(msg tea.KeyMsg) tea.Cmd {
+	s := &m.settings
+	switch msg.String() {
+	case "esc":
+		ui.ApplyTheme(m.theme.Accent, m.theme.Border, m.theme.Dim)
+		s.sub = subMenu
+	case "j", "down":
+		if s.themeCur < len(s.themes)-1 {
+			s.themeCur++
+			m.previewTheme()
+		}
+	case "k", "up":
+		if s.themeCur > 0 {
+			s.themeCur--
+			m.previewTheme()
+		}
+	case "enter":
+		if s.themeCur < 0 || s.themeCur >= len(s.themes) {
+			return nil
+		}
+		t := s.themes[s.themeCur]
+		m.cfg.Theme = t.Name
+		if err := m.cfg.Save(m.cfgPath); err != nil {
+			m.showErrToast("✗ 保存主题: " + shortErr(err))
+			return nil
+		}
+		m.theme = t
+		m.showToast("✓ 主题: " + t.Name)
+		s.sub = subMenu
+	}
+	return nil
+}
+
+func (m *Model) previewTheme() {
+	t := m.settings.themes[m.settings.themeCur]
+	ui.ApplyTheme(t.Accent, t.Border, t.Dim)
+}
+
 // acctKey drives the account menu, the password form and the logout
 // confirmation. esc from the account menu returns to the settings menu
-// (s.acct = 0), esc from the settings menu itself closes it.
+// (s.sub = subMenu), esc from the settings menu itself closes it.
 func (s *settings) acctKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
-	switch s.acct {
-	case 1: // menu
+	switch s.sub {
+	case subAcctMenu: // menu
 		switch msg.String() {
 		case "esc":
-			s.acct = 0
+			s.sub = subMenu
 		case "j", "down":
 			if s.acctCur < 1 {
 				s.acctCur++
@@ -115,7 +235,7 @@ func (s *settings) acctKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			}
 		case "enter":
 			if s.acctCur == 0 {
-				s.acct = 2
+				s.sub = subPwForm
 				s.pwFocus = 0
 				s.pwErr = ""
 				s.pwCur.SetValue("")
@@ -126,14 +246,14 @@ func (s *settings) acctKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 				s.pwRepeat.Blur()
 				return textinput.Blink
 			}
-			s.acct = 3
+			s.sub = subLogoutConfirm
 		}
 		return nil
 
-	case 2: // password form
+	case subPwForm: // password form
 		switch msg.String() {
 		case "esc":
-			s.acct = 1
+			s.sub = subAcctMenu
 			s.pwCur.Blur()
 			s.pwNew.Blur()
 			s.pwRepeat.Blur()
@@ -162,7 +282,7 @@ func (s *settings) acctKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 				return nil
 			}
 			s.pwErr = ""
-			s.acct = 0
+			s.sub = subMenu
 			s.pwCur.Blur()
 			s.pwNew.Blur()
 			s.pwRepeat.Blur()
@@ -179,13 +299,13 @@ func (s *settings) acctKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		}
 		return cmd
 
-	case 3: // logout confirm
+	case subLogoutConfirm: // logout confirm
 		switch msg.String() {
 		case "y":
-			s.acct = 0
+			s.sub = subMenu
 			return func() tea.Msg { return logoutMsg{} }
 		case "n", "esc":
-			s.acct = 1
+			s.sub = subAcctMenu
 		}
 		return nil
 	}
@@ -206,11 +326,14 @@ func (s *settings) setPwFocus() {
 	}
 }
 
-// overlay renders the settings menu and the account windows. They float over
+// overlay renders the settings menu and its sub-windows. They float over
 // any page, so pageOverlay checks this before the page's own overlays.
 func (s settings) overlay() *overlaySpec {
-	switch {
-	case s.open && s.acct == 0:
+	switch s.sub {
+	case subMenu:
+		if !s.open {
+			return nil
+		}
 		lines := []string{ui.TitleStyle.Render(" 设置"), "",
 			ui.HelpStyle.Render(" 当前用户  " + s.user), ""}
 		for i, it := range settingsItems {
@@ -226,7 +349,9 @@ func (s settings) overlay() *overlaySpec {
 		}
 		return &overlaySpec{lines: append(lines,
 			"", ui.HelpStyle.Render(" j/k 选择  Enter 确认  esc 关闭"))}
-	case s.acct == 1:
+	case subTheme:
+		return s.themeOverlay()
+	case subAcctMenu:
 		lines := []string{ui.TitleStyle.Render(" 账户"), "",
 			ui.HelpStyle.Render(" 当前用户  " + s.user), ""}
 		items := []string{"修改密码", "退出登录"}
@@ -239,7 +364,7 @@ func (s settings) overlay() *overlaySpec {
 		}
 		return &overlaySpec{lines: append(lines,
 			ui.HelpStyle.Render(" j/k 选择  Enter 确认  esc 返回"))}
-	case s.acct == 2:
+	case subPwForm:
 		lines := []string{ui.TitleStyle.Render(" 修改密码"), ""}
 		for i, f := range []struct {
 			label string
@@ -258,7 +383,7 @@ func (s settings) overlay() *overlaySpec {
 		}
 		return &overlaySpec{lines: append(lines, "",
 			ui.HelpStyle.Render(" Tab 切换  Enter 提交  esc 返回"))}
-	case s.acct == 3:
+	case subLogoutConfirm:
 		return &overlaySpec{destructive: true, lines: []string{
 			"确认退出登录?",
 			"将清除本机保存的密码与 token",
@@ -267,4 +392,42 @@ func (s settings) overlay() *overlaySpec {
 		}}
 	}
 	return nil
+}
+
+// themeOverlay is the theme picker: one row per theme with the ● marker on
+// the theme config.toml currently names and three color swatches per row —
+// the preview repaints the whole UI anyway, the swatches say which row is
+// which at a glance. Unreadable files show up as dim notes below the list.
+func (s settings) themeOverlay() *overlaySpec {
+	lines := []string{ui.TitleStyle.Render(" 主题"), ""}
+	for i, t := range s.themes {
+		mark, style := "  ", ui.HelpStyle
+		if i == s.themeCur {
+			mark, style = "❯ ", ui.CursorStyle
+		}
+		row := style.Render(mark+t.Name)
+		if t.Name == s.themeActive {
+			row += ui.OKStyle.Render(" ●")
+		}
+		row += "  " + themeSwatches(t)
+		lines = append(lines, row)
+	}
+	for _, n := range s.themeNotes {
+		lines = append(lines, "  "+ui.HelpStyle.Render("⚠ "+n))
+	}
+	return &overlaySpec{lines: append(lines, "",
+		ui.HelpStyle.Render(" j/k 预览  Enter 使用  esc 取消"))}
+}
+
+// themeSwatches renders the three theme colors as small blocks (accent,
+// border, dim), so the list reads even on terminals that make the subtle
+// frame-color difference hard to see.
+func themeSwatches(t config.Theme) string {
+	block := func(c string) string {
+		if c == "" {
+			return ui.HelpStyle.Render("··")
+		}
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(c)).Render("██")
+	}
+	return block(t.Accent) + block(t.Border) + block(t.Dim)
 }

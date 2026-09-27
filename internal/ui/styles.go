@@ -11,17 +11,26 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
+// The built-in palette. Theme resolution (config package) cascades down to
+// these as the floor, so ApplyTheme always receives concrete colors — it
+// treats "" as "keep the current value" and must never see it.
+const (
+	DefaultAccent = "62" // soft blue
+	DefaultBorder = "238"
+	DefaultDim    = "245"
+)
+
 var (
 	// Base colors.
-	Accent  = lipgloss.Color("62")  // soft blue
+	Accent  = lipgloss.Color(DefaultAccent)
 	Green   = lipgloss.Color("42")  // good latency
 	Yellow  = lipgloss.Color("214") // medium latency
 	Red     = lipgloss.Color("203") // high latency
 	Gray    = lipgloss.Color("241") // dead / unknown
-	DimText = lipgloss.Color("245")
+	DimText = lipgloss.Color(DefaultDim)
 
 	// BorderCol is the unfocused box/frame edge; BorderDim renders it.
-	BorderCol = lipgloss.Color("238")
+	BorderCol = lipgloss.Color(DefaultBorder)
 	// TabDim is the inactive tab's gray — darker than DimText on purpose:
 	// the active tab stays text-on-a-line (bold + accent + underline), so
 	// the active/inactive contrast has to come from brightness, not from a

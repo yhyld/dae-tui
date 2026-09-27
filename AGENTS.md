@@ -182,10 +182,10 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   常驻面板字段——它会留到重启才消失，看起来像坏了的状态。`pickErr` 只留给"选择器打开
   期间拉取失败"这种与当前模态绑定的错误，并在 groups/subs 刷新时清空。
 - **浮窗与面板的分工——决策和填表用浮窗，浏览和对比用面板**。各页实现 `overlay() *overlaySpec`
-  （表单/对话框），根模型 `pageOverlay()` 收集（账户窗口优先，`P` 已是全局键，任何页面可开），
+  （表单/对话框），根模型 `pageOverlay()` 收集（设置浮窗最优先，`P` 已是全局键，任何页面可开），
   `ui.Overlay` 负责 ANSI 感知地居中叠到页面画面上（`Truncate` 取左 + 补 reset、`TruncateLeft`
   取右——注意 TruncateLeft 会丢弃被跳过区域的转义序列，盒子右侧窄条可能掉色，文字不受影响）。
-  浮窗清单：帮助（`helpOpen`，`?` 任何页面）、账户、全局 `A` 确认、首页预设确认+DSL 预览、
+  浮窗清单：帮助（`helpOpen`，`?` 任何页面）、设置（`settings.open`，`P` 任何页面，含账户/主题等子窗口）、全局 `A` 确认、首页预设确认+DSL 预览、
   各页输入表单（含内置 DSL 编辑器 mode 7）。留在右栏的：小 y/n 确认（删组/删节点/删订阅/
   删配置、组内移除）、大列表选择器（加节点、挂订阅、策略）、DSL diff 确认。
 - **内置 DSL 编辑器**（configs mode 7，`config.toml` 的 `editor = "builtin"` 开启）：
@@ -193,8 +193,9 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   `handleValidated` 检测 `mode==7` 把错误写进 `edErr` 并**保持编辑器打开**；成功进 mode 6，
   `diffState.Builtin` 标记来源，diff 里按 `n`/esc 回到编辑器（内容不丢），按 `y` 直接提交。
   $EDITOR 路径（默认）不变：临时文件在"应用后/内容未变"才删。
-- **浮窗期间按键归属**：`helpOpen` 与 `home.acct != 0` 计入 `anyModal()`，且两者的按键在
-  根模型 `handleKey` 顶部优先分发（账号窗口在任何页面都能开，esc 不能被所在页吃掉）；
+- **浮窗期间按键归属**：`helpOpen` 与 `settings.open`（设置浮窗，含账户/主题子窗口）
+  计入 `anyModal()`，且其按键在根模型 `handleKey` 顶部优先分发（任何页面可开，esc 不能
+  被所在页吃掉）；
   鼠标滚轮在 helpOpen 时滚帮助、其余模态期间忽略。
 - 模态渲染在右栏内部的（上面的"留在右栏"清单）用 `ui.BoxLines(destructive, lines...)`
   （红框=破坏性），列表型选择器保持裸行；不能 `body += "\n" + box` 追加在双栏下方——
@@ -205,7 +206,11 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   `helpSections` 表驱动（渲染与 `helpSectionStart` 同源），`?` 打开即定位到当前页的
   小节（测试断言的是新行为，别改回"从顶开"）。
 - **主题色只有一处入口**：`config.toml` 的 `accent` / `border` / `dim`（均为 ANSI-256
-  序号或 `#rrggbb`）经 `ui.ApplyTheme(accent, border, dim)` 在启动时应用——每个值独立
+  序号或 `#rrggbb`）与 `theme`（命名主题：内置 `默认`/`浅色` + `theme/*.toml` 文件，
+  名字=文件名主干；主题优先于内联三色，缺省槽位按 主题→内联→`ui.Default*` 级联成
+  具体色值——ApplyTheme 把 "" 当"保持现值"，绝不能让它收到空串）经
+  `ui.ApplyTheme(accent, border, dim)` 应用；启动时 main.go 解析一次，设置浮窗
+  （`settings.go` 的 theme picker）运行时预览/切换并回写 config.toml。它会重建——每个值独立
   解析（`parseColor`，空/非法保持默认，半合法的配置照样主题化能解析的部分）。它会重建
   `TitleStyle`/`TabStyle`/`TabActive`/`HelpStyle`/`SelectedStyle`/`CursorStyle`/`BorderDim`
   这些 init 时从三者派生的包级样式，并重推 `SelBG`
@@ -275,8 +280,9 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
 - 批量导入框（手动节点页 `a`）是 bubbles 的 **textarea**（每行一条链接；ctrl+s 或切到
   标签框后 enter 提交，框内 enter 是换行）。导入结果走 `importDoneMsg`：成功数进 toast，
   失败明细渲染在右栏（`importFail`）——一行 toast 说不完逐条报错。
-- 首页 `P` 是账户状态机（`homePage.acct`：0 无 / 1 菜单 / 2 改密码 / 3 退出确认），
-  已计入 `anyModal()`；退出登录由根模型处理（`logoutMsg`：清 cfg + 存盘 + `drv.Logout` +
+- `P` 是设置浮窗（`settings.go`：sub 0 菜单 / 1 账户菜单 / 2 改密码 / 3 退出确认，
+  之后是主题选择器等子窗口），已计入 `anyModal()`；esc 在子窗口逐级返回、在菜单关闭。
+  账户状态机已从 homePage 迁入根模型；退出登录由根模型处理（`logoutMsg`：清 cfg + 存盘 + `drv.Logout` +
   回 `phaseLogin`），页面自己不能改 phase。首页 `L` 是 daed 日志视图（`tea.ExecProcess`
   跑 `journalctl -u daed -n 200 --no-pager -f`，只读、仅本机有效），退出即回到 TUI。
 - 全局 `r` 是**全量刷新**：所有列表 + status + traffic + 当前页延迟轮询一次性重拉，

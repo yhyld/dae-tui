@@ -38,6 +38,11 @@ type Model struct {
 	cfg     *config.Config
 	cfgPath string
 
+	// theme is the resolved active color scheme: what the settings
+	// window's theme picker restores on esc, and the floor every other
+	// preview falls back to. main.go applied the same resolution at startup.
+	theme config.Theme
+
 	// caps is the backend's feature set, read once at startup. Pages gate
 	// their keys on it so a less capable driver degrades with feedback
 	// instead of leaving keys that silently do nothing.
@@ -127,6 +132,7 @@ func New(drv driver.Driver, cfg *config.Config, cfgPath string) Model {
 	m.nodes.hist = m.latHist
 	m.configs = newConfigsPage(m.caps)
 	m.settings = newSettings()
+	m.theme, _ = config.ResolveTheme(cfg.Theme, cfg.Accent, cfg.Border, cfg.Dim)
 	// "builtin" swaps the DNS/routing $EDITOR round-trip for the in-app
 	// floating editor (config key: editor).
 	m.configs.builtin = cfg.Editor == "builtin"
@@ -150,7 +156,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.phase == phaseMain {
 			if err := msgAuthErr(msg); errors.Is(err, driver.ErrNeedAuth) {
 				m.phase = phaseLogin
-				m.settings.open, m.settings.acct = false, 0
+				m.settings.open, m.settings.sub = false, subMenu
 				m.login = newLoginForm(false)
 				m.login.username.SetValue(m.cfg.Username)
 				m.login.err = "登录已失效（凭据被拒绝），请重新登录"
@@ -263,7 +269,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if err := m.drv.Logout(context.Background()); err != nil {
 			m.showErrToast("✗ 退出登录: " + shortErr(err))
 		}
-		m.settings.open, m.settings.acct = false, 0
+		m.settings.open, m.settings.sub = false, subMenu
 		m.settings.user = ""
 		m.phase = phaseLogin
 		m.login = newLoginForm(false)
@@ -479,7 +485,7 @@ func (m *Model) enterMain() {
 	m.phase = phaseMain
 	m.page = pageHome
 	m.settings.user = m.cfg.Username
-	m.settings.open, m.settings.acct = false, 0
+	m.settings.open, m.settings.sub = false, subMenu
 }
 
 func (m *Model) initialLoad() tea.Cmd {
@@ -676,9 +682,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	// The settings window (P) opens from any page, so its keys are routed
 	// here before the page sees them — same contract the account window
-	// always had.
+	// always had. It gets the model itself: the theme picker reads and
+	// saves the config.
 	if m.settings.open {
-		return m, m.settings.key(msg, m.drv)
+		return m, m.settings.key(&m, msg)
 	}
 	// While a page-level modal/input is open, every keystroke (including
 	// the digit page-switch hotkeys — names, cron expressions and links
