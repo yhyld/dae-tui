@@ -1154,12 +1154,17 @@ func (p *configsPage) leftClick(row int) {
 		return
 	}
 	shares := leftShares(p.height)
+	// row is a content row (the boxes' shared top border sits at row -1, the
+	// root's y<5 guard already ate it), so the body row the three-box stack
+	// is laid out in is row+1; each box then charges its own top border back
+	// before mapping onto items.
+	b := row + 1
 	for si, section := range configSections {
-		if row >= shares[si] {
-			row -= shares[si]
+		if b >= shares[si] {
+			b -= shares[si]
 			continue
 		}
-		within := row - 1 // the box's top border
+		within := b - 1 // the box's top border
 		rowsH := shares[si] - 2
 		if within < 0 || within >= rowsH {
 			return // top border, bottom border or footer edge

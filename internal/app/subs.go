@@ -694,6 +694,9 @@ func (p *subsPage) leftClick(row int, d driver.Driver) tea.Cmd {
 		return nil
 	}
 	rowsH := max0(p.height - 2)
+	if row >= rowsH {
+		return nil // border row or dead space below the list
+	}
 	start := 0
 	if p.sel >= rowsH {
 		start = p.sel - rowsH + 1

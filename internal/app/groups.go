@@ -499,9 +499,14 @@ func (p groupsPage) overlay() *overlaySpec {
 }
 
 // leftClick selects the row-th displayed group, mirroring leftLines' window
-// math so the click lands on the row the user saw.
+// math so the click lands on the row the user saw. Border rows hold no
+// groups: a click on them must not fall through to the hidden row just
+// outside the window.
 func (p *groupsPage) leftClick(row int) {
 	rowsH := max0(p.height - 2)
+	if row < 0 || row >= rowsH {
+		return
+	}
 	start := 0
 	if p.gi >= rowsH {
 		start = p.gi - rowsH + 1
@@ -513,18 +518,30 @@ func (p *groupsPage) leftClick(row int) {
 	p.selectGroupAt(i)
 }
 
-// rightClick puts the right-pane cursor on the row-th displayed detail row,
-// mirroring bodyLines' scroll window so the click lands on the row the user
-// saw.
+// rightClick puts the right-pane cursor on the clicked detail row. row
+// counts the column's content rows from the info box's first line (the
+// column's top border row is row -1), so everything the stacked layout
+// renders above the data rows — the info box including its borders (topH),
+// the bottom box's top border and the filter prompt — must be subtracted
+// before mapping through the same window bodyLines renders with. The info
+// box is display-only: clicks there do nothing.
 func (p *groupsPage) rightClick(row int) {
 	if p.mode != pickNone {
 		return
 	}
-	p.focus = 1
-	_, inner := stackedDetail(len(p.infoLines()), p.height)
-	start, _ := p.rowsWindow(inner)
-	i := start + row
+	topH, inner := stackedDetail(len(p.infoLines()), p.height)
+	head := 0
+	if p.nodeView.prompt() != "" {
+		head = 1
+	}
+	d := row - topH - head // data row within the bottom box's window
+	start, rowsH := p.rowsWindow(inner)
+	if d < 0 || d >= rowsH {
+		return // info box, box edges, prompt line or dead space below
+	}
+	i := start + d
 	if i >= 0 && i < len(p.rows) {
+		p.focus = 1
 		p.rc = i
 	}
 }

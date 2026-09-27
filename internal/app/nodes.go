@@ -626,6 +626,9 @@ func (p *nodesPage) leftClick(row int) {
 		return
 	}
 	rowsH := max0(p.height - 2 - prefix)
+	if row >= rowsH {
+		return // border row or dead space below the list
+	}
 	start := 0
 	if p.sel >= rowsH {
 		start = p.sel - rowsH + 1

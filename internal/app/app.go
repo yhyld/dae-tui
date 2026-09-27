@@ -757,10 +757,17 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 // click maps a cell-coordinate press onto the UI. Frame rows: 0 is the top
 // border, 1 the header box's tab edge, 2 the status line, 3 the header
-// box's bottom border, 4+ the body; in a dual-box page the body starts
-// with the boxes' top borders (row 4) and list rows start at 5. Column 0
-// is the frame's left border, column 1 the page-wide margin; the boxes
-// start at column 2, the tabs at column 5.
+// box's bottom border, 4 the page body's first line — the boxes' shared
+// top border on box-layout pages. Pages receive row = y-5: the index of
+// the clicked line counting from the first line inside the boxes (row 0 is
+// the first content line, border rows live at row -1 and page height-2).
+// That contract is easy to get wrong — configs.leftClick once shifted the
+// whole column by one row, and groups.rightClick kept mapping clicks
+// through the info box it never subtracted — so every page mapper must
+// re-derive its own stack (stacked detail boxes, section boxes, prefix
+// lines) from this row, treat border rows as no-ops, and stay in sync with
+// the renderer it mirrors. Column 0 is the frame's left border, column 1
+// the page-wide margin; the boxes start at column 2, the tabs at column 5.
 func (m Model) click(x, y int) (tea.Model, tea.Cmd) {
 	if m.anyModal() || m.confirmApply {
 		return m, nil

@@ -3077,24 +3077,117 @@ func TestMouseSelectsRows(t *testing.T) {
 func TestMouseSelectsConfigRows(t *testing.T) {
 	m := newTestModel(t)
 	m, _ = m.Update(key("5"))
-	// At 120×36 the page body is 30 rows: three boxes of 10, stacked from
-	// body row 0 (frame y=5). The DNS box spans body rows 10-19, its
-	// content starts at body row 11 (y=16): 默认DNS, then 备用DNS.
-	m2, _ := m.Update(mouseClick(5, 16))
+	// At 120×36 the page body is 30 rows (y=4..33): three boxes of 10. The
+	// DNS box spans body rows 10-19 (y=14-23), its content starts at body
+	// row 11 (y=15): 默认DNS, then 备用DNS.
+	m2, _ := m.Update(mouseClick(5, 15))
 	mm := m2.(Model)
 	if mm.configs.cur != 1 {
 		t.Fatalf("click on 默认DNS should park the cursor there, cur=%d", mm.configs.cur)
 	}
-	m3, _ := m2.Update(mouseClick(5, 17))
+	m3, _ := m2.Update(mouseClick(5, 16))
 	mm = m3.(Model)
 	if mm.configs.cur != 2 {
 		t.Fatalf("click on 备用DNS should park the cursor there, cur=%d", mm.configs.cur)
 	}
-	// The routing box's top border (body row 20, y=25) is a no-op.
-	m4, _ := m3.Update(mouseClick(5, 25))
+	// Border rows are no-ops: the DNS box's bottom border (body row 19,
+	// y=23) and the routing box's top border (body row 20, y=24).
+	m4, _ := m3.Update(mouseClick(5, 23))
 	mm = m4.(Model)
 	if mm.configs.cur != 2 {
 		t.Fatalf("click on a box border must not move the cursor, cur=%d", mm.configs.cur)
+	}
+	m5, _ := m4.Update(mouseClick(5, 24))
+	mm = m5.(Model)
+	if mm.configs.cur != 2 {
+		t.Fatalf("click on a box border must not move the cursor, cur=%d", mm.configs.cur)
+	}
+}
+
+// The groups right column stacks the group's info card above the node list;
+// a click must skip the whole info box (display-only, no click target) and
+// the list's top border before mapping onto the detail rows, and the list's
+// border rows must not select the hidden rows just outside the window.
+func TestMouseSelectsGroupNodes(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("2"))
+	m, _ = m.Update(key("tab")) // focus the right column
+	m, _ = m.Update(key("enter"))
+	// g1 (proxy) with the subscription section expanded: rows are the 机场A
+	// header, 东京-01, SG-03, then the direct section's header. Its info card
+	// carries 策略/成员/引用, so the info box is 5 rows (y=4-8), the list's
+	// top border y=9 and the data rows start at y=10.
+	mm := m.(Model)
+	if mm.groups.focus != 1 {
+		t.Fatal("tab should focus the right column")
+	}
+	if len(mm.groups.rows) != 4 {
+		t.Fatalf("expected 4 detail rows (sub header, 2 nodes, direct header), got %d", len(mm.groups.rows))
+	}
+	// Clicking the info box (its first content line, y=5) must do nothing.
+	m2, _ := m.Update(mouseClick(60, 5))
+	mm = m2.(Model)
+	if mm.groups.rc != 0 || mm.groups.focus != 1 {
+		t.Fatalf("click on the info box must be a no-op, rc=%d focus=%d", mm.groups.rc, mm.groups.focus)
+	}
+	// The box edges between info box and list (y=8, y=9) are no-ops too.
+	m2, _ = m2.Update(mouseClick(60, 8))
+	m2, _ = m2.Update(mouseClick(60, 9))
+	mm = m2.(Model)
+	if mm.groups.rc != 0 {
+		t.Fatalf("click on a box edge must be a no-op, rc=%d", mm.groups.rc)
+	}
+	// 东京-01 is the first node row (y=11): the cursor must land on it.
+	m2, _ = m2.Update(mouseClick(60, 11))
+	mm = m2.(Model)
+	if mm.groups.rc != 1 {
+		t.Fatalf("click on 东京-01 should park the cursor there, rc=%d", mm.groups.rc)
+	}
+	// SG-03 one row below (y=12).
+	m3, _ := m2.Update(mouseClick(60, 12))
+	mm = m3.(Model)
+	if mm.groups.rc != 2 {
+		t.Fatalf("click on SG-03 should park the cursor there, rc=%d", mm.groups.rc)
+	}
+}
+
+// Clicking a left list's bottom border must not select the first row hidden
+// below the scroll window. The e2e fixture has too few groups to scroll, so
+// this drives groupsPage directly with a window that has hidden rows.
+func TestMouseLeftBorderClickNoop(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("2"))
+	// The groups box spans body rows 0-29 (y=4-33); its bottom border is
+	// y=33 and the boxes' top border y=4.
+	m2, _ := m.Update(mouseClick(5, 33))
+	mm := m2.(Model)
+	if mm.groups.gi != 0 {
+		t.Fatalf("click on the left box's bottom border must be a no-op, gi=%d", mm.groups.gi)
+	}
+	m3, _ := m2.Update(mouseClick(5, 4))
+	mm = m3.(Model)
+	if mm.groups.gi != 0 {
+		t.Fatalf("click on the boxes' top border must be a no-op, gi=%d", mm.groups.gi)
+	}
+}
+
+func TestGroupsLeftClickBorderGuard(t *testing.T) {
+	p := newGroupsPage(driver.Caps{SwitchNode: true})
+	p.height = 10 // content rows 0-7
+	for i := 0; i < 12; i++ {
+		p.groups = append(p.groups, driver.Group{ID: fmt.Sprintf("g%d", i), Name: fmt.Sprintf("g%d", i)})
+	}
+	p.selectGroupAt(9) // the window shows groups 2..9
+	if p.gi != 9 {
+		t.Fatalf("setup: gi=%d", p.gi)
+	}
+	p.leftClick(8) // the box's bottom border row
+	if p.gi != 9 {
+		t.Fatalf("border click must not leave the window, gi=%d", p.gi)
+	}
+	p.leftClick(0) // first visible row
+	if p.gi != 2 {
+		t.Fatalf("click on the first visible row should select group 2, gi=%d", p.gi)
 	}
 }
 
