@@ -56,6 +56,7 @@ type Model struct {
 
 	helpOpen   bool
 	helpScroll int
+	logs       logsViewer
 
 	settings settings
 
@@ -156,6 +157,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		if m.refreshStale() {
 			m.refreshing, m.refreshLeft = false, 0
+			m.showErrToast(i18n.T("✗ 刷新超时（部分回复未返回）"))
 		}
 		var cmds []tea.Cmd
 		cmds = append(cmds, tickCmd(msg.n))
@@ -253,8 +255,51 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.groups.rebuild()
 		return m, nil
 
-	case logsDoneMsg:
-		return m, reenableMouse()
+	case logsSpawnMsg:
+		if msg.err != nil {
+			m.logs.loading, m.logs.following = false, false
+			m.logs.err = shortErr(msg.err)
+			if !m.logs.open {
+				m.showErrToast(i18n.T("✗ 打开日志: ") + shortErr(msg.err))
+			}
+			return m, nil
+		}
+		m.logs.open, m.logs.following, m.logs.loading = true, true, false
+		m.logs.stopped, m.logs.err = false, ""
+		if msg.fresh {
+			m.logs.lines, m.logs.scroll = nil, 0
+		}
+		// A double L races two spawns; the one that lands second replaces
+		// the proc, so the loser's child would stream into a channel nobody
+		// reads ever again. Kill on replace (idempotent — r already did).
+		m.logs.kill()
+		m.logs.proc = msg.proc
+		return m, logsWaitCmd(msg.proc.lines)
+
+	case logsLineMsg:
+
+		// Stale chain (a killed or restarted follower): swallow and let it
+		// die instead of re-arming.
+		if !m.logs.open || m.logs.proc == nil || msg.lines != m.logs.proc.lines {
+			return m, nil
+		}
+		win := logsWinBody(m.height - 6)
+		atBottom := m.logs.scroll >= logsMaxScroll(len(m.logs.lines), win)
+		m.logs.appendLine(msg.line)
+		if m.logs.following && atBottom {
+			m.logs.scroll = logsMaxScroll(len(m.logs.lines), win)
+		}
+		return m, logsWaitCmd(msg.lines)
+
+	case logsStoppedMsg:
+
+		// Only a stop from the live chain while we still believe we are
+		// following marks the follower as exited-on-its-own; an echo from a
+		// chain we killed ourselves (pause, reload) is not news.
+		if m.logs.open && m.logs.following && m.logs.proc != nil && msg.lines == m.logs.proc.lines {
+			m.logs.following, m.logs.loading, m.logs.stopped = false, false, true
+		}
+		return m, nil
 
 	case statusMsg:
 		if msg.Err == nil {
@@ -268,6 +313,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshLeft--
 			if m.refreshLeft <= 0 {
 				m.refreshing, m.refreshLeft = false, 0
+				// r gives no other completion signal: without a toast the
+				// indicator just vanishes and looks like a dead key.
+				m.showToast(i18n.T("✓ 已刷新"))
 			}
 		}
 		return m, nil
@@ -607,6 +655,37 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.settings.key(&m, msg)
 	}
 
+	if m.logs.open {
+		switch msg.String() {
+		case "esc", "q":
+			m.logs.open, m.logs.following = false, false
+			m.logs.kill()
+			return m, nil
+		case "j", "down":
+			m.logs.scroll += 3
+		case "k", "up":
+			m.logs.scroll -= 3
+		case "g":
+			m.logs.scroll = 0
+		case "G":
+			m.logs.scroll = len(m.logs.lines)
+		case "f":
+			if m.logs.following || m.logs.loading {
+				m.logs.following, m.logs.loading = false, false
+				m.logs.kill()
+				return m, nil
+			}
+			m.logs.loading = true
+			return m, logsSpawnCmd(0, false)
+		case "r":
+			m.logs.loading = true
+			m.logs.kill()
+			return m, logsSpawnCmd(logsHistoryLines, true)
+		}
+		m.logs.scroll = clampLogsScroll(m.logs.scroll, len(m.logs.lines), logsWinBody(m.height-6))
+		return m, nil
+	}
+
 	if !m.anyModal() {
 		switch tk(keymap.Global, msg.String()) {
 		case "q":
@@ -664,7 +743,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) anyModal() bool {
-	if m.helpOpen || m.settings.open {
+	if m.helpOpen || m.settings.open || m.logs.open {
 		return true
 	}
 	switch m.page {
@@ -694,6 +773,15 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	switch msg.Button {
 	case tea.MouseButtonWheelUp, tea.MouseButtonWheelDown:
 		if m.confirmApply {
+			return m, nil
+		}
+		if m.logs.open {
+			if msg.Button == tea.MouseButtonWheelDown {
+				m.logs.scroll += 3
+			} else {
+				m.logs.scroll -= 3
+			}
+			m.logs.scroll = clampLogsScroll(m.logs.scroll, len(m.logs.lines), logsWinBody(m.height-6))
 			return m, nil
 		}
 		if m.helpOpen {
@@ -896,6 +984,9 @@ func (m Model) View() string {
 	}
 	if m.helpOpen {
 		body = ui.Overlay(body, helpOverlayBox(cw-1, avail, m.helpScroll), cw-1, avail)
+	}
+	if m.logs.open {
+		body = ui.Overlay(body, logsOverlayBox(cw-1, avail, &m.logs), cw-1, avail)
 	}
 	pageLines := strings.Split(body, "\n")
 	if len(pageLines) > avail {

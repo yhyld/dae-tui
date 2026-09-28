@@ -144,6 +144,44 @@ func TestResolveTheme(t *testing.T) {
 	}
 }
 
+// Builtins must survive the real theme pipeline: a typo'd color applies as
+// "keep the current value" and would render whatever theme was active
+// before. 默认 must stay slot-empty (it means "the inline colors"), and
+// 默认/浅色 keep their leading positions — the settings test previews 浅色
+// with a single j from 默认.
+func TestBuiltinThemesResolve(t *testing.T) {
+	themes := BuiltinThemes()
+	if len(themes) < 2 || themes[0].Name != "默认" || themes[1].Name != "浅色" {
+		t.Fatalf("默认/浅色 must lead the builtin list: %+v", themes)
+	}
+	if themes[0].Accent != "" || themes[0].Border != "" || themes[0].Dim != "" {
+		t.Fatalf("默认 must leave every slot empty: %+v", themes[0])
+	}
+	if themes[1].Border != "250" || themes[1].Dim != "240" {
+		t.Fatalf("浅色 must keep the light-terminal neutrals: %+v", themes[1])
+	}
+	seen := map[string]bool{}
+	reset := func() { ui.ApplyTheme(ui.DefaultAccent, ui.DefaultBorder, ui.DefaultDim) }
+	defer reset()
+	for _, th := range themes {
+		if seen[th.Name] {
+			t.Fatalf("duplicate builtin theme name: %q", th.Name)
+		}
+		seen[th.Name] = true
+		reset()
+		ui.ApplyTheme(th.Accent, th.Border, th.Dim)
+		if th.Accent != "" && string(ui.Accent) != th.Accent {
+			t.Fatalf("%s: accent %q did not parse (got %q)", th.Name, th.Accent, ui.Accent)
+		}
+		if th.Border != "" && string(ui.BorderCol) != th.Border {
+			t.Fatalf("%s: border %q did not parse (got %q)", th.Name, th.Border, ui.BorderCol)
+		}
+		if th.Dim != "" && string(ui.DimText) != th.Dim {
+			t.Fatalf("%s: dim %q did not parse (got %q)", th.Name, th.Dim, ui.DimText)
+		}
+	}
+}
+
 func TestLoadThemes(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, body string) {

@@ -193,10 +193,10 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   `handleValidated` 检测 `mode==7` 把错误写进 `edErr` 并**保持编辑器打开**；成功进 mode 6，
   `diffState.Builtin` 标记来源，diff 里按 `n`/esc 回到编辑器（内容不丢），按 `y` 直接提交。
   $EDITOR 路径（默认）不变：临时文件在"应用后/内容未变"才删。
-- **浮窗期间按键归属**：`helpOpen` 与 `settings.open`（设置浮窗，含账户/主题子窗口）
-  计入 `anyModal()`，且其按键在根模型 `handleKey` 顶部优先分发（任何页面可开，esc 不能
-  被所在页吃掉）；
-  鼠标滚轮在 helpOpen 时滚帮助、其余模态期间忽略。
+- **浮窗期间按键归属**：`helpOpen`、`settings.open`（设置浮窗，含账户/主题子窗口）与
+  `logs.open`（日志浮窗）计入 `anyModal()`，且其按键在根模型 `handleKey` 顶部优先分发
+  （任何页面可开，esc 不能被所在页吃掉）；
+  鼠标滚轮在 helpOpen 时滚帮助、logs.open 时滚日志，其余模态期间忽略。
 - 模态渲染在右栏内部的（上面的"留在右栏"清单）用 `ui.BoxLines(destructive, lines...)`
   （红框=破坏性），列表型选择器保持裸行；不能 `body += "\n" + box` 追加在双栏下方——
   面板补齐到满高，下方追加的内容第一个被硬钳制裁掉。
@@ -206,7 +206,9 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   `helpSections` 表驱动（渲染与 `helpSectionStart` 同源），`?` 打开即定位到当前页的
   小节（测试断言的是新行为，别改回"从顶开"）。
 - **主题色只有一处入口**：`config.toml` 的 `accent` / `border` / `dim`（均为 ANSI-256
-  序号或 `#rrggbb`）与 `theme`（命名主题：内置 `默认`/`浅色` + `theme/*.toml` 文件，
+  序号或 `#rrggbb`）与 `theme`（命名主题：内置 `默认`/`浅色` + 九个色系主题
+  （北欧/夜航/布丁/玫瑰/青竹/石青/暖橙/水墨/晨光，accent 刻意避开延迟色阶的
+  绿/黄/红）+ `theme/*.toml` 文件，
   名字=文件名主干；主题优先于内联三色，缺省槽位按 主题→内联→`ui.Default*` 级联成
   具体色值——ApplyTheme 把 "" 当"保持现值"，绝不能让它收到空串）经
   `ui.ApplyTheme(accent, border, dim)` 应用；启动时 main.go 解析一次，设置浮窗
@@ -285,16 +287,28 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   账户状态机已从 homePage 迁入根模型；未实现的菜单项 enabled=false（光标跳过、置灰
   加「即将支持」，实现一项开一项）。版本来源：main.go 的 `version` 变量吃 ldflags
   `-X main.version=`，缺省回退 `debug.ReadBuildInfo` 的 vcs 修订号；`app.Version`
-  只读展示。盲文徽标是 `settings.go` 的 `aboutLogo` 占位，待正式设计后替换；退出登录由根模型处理（`logoutMsg`：清 cfg + 存盘 + `drv.Logout` +
-  回 `phaseLogin`），页面自己不能改 phase。首页 `L` 是 daed 日志视图（`tea.ExecProcess`
-  跑 `journalctl -u daed -n 200 --no-pager -f`，只读、仅本机有效），退出即回到 TUI。
+  只读展示。盲文徽标已是正式设计：`settings.go` 的 `aboutLogoFrame`（框层：圆角框+
+  虚线轴，强调色常规字重）+ `aboutLogoBars`（柱层：六根 2 点柱子，强调色加粗）=
+  30×20 点阵上的「框内流量柱」——首页流量火花图的微缩（15 字符宽 × 5 行，柱profile
+  5,9,11,10,9,5 单峰近对称，柱底悬在轴上方一行，与 Sparkline 同语法）；`aboutLogoLines()`
+  渲染时按格合并两层（含柱点的格整格加粗 accent，其余常规 accent——全图同一主题色，
+  层级靠字重与形状密度，别再退回暗灰框：238 在真实终端上几乎看不见），样式渲染期读取
+  所以主题预览能换色。
+  另五版候选（六边形/盾牌/波浪/节点/宝石）与点阵图在 `logo_test.go` 的目录里，换版=粘贴
+  两层 braille（单色候选全进 `aboutLogoBars`、`aboutLogoFrame` 留空行），
+  `TestAboutLogoIsKnownCandidate` 比对两层兜底防半 paste；
+  退出登录由根模型处理（`logoutMsg`：清 cfg + 存盘 + `drv.Logout` +
+  回 `phaseLogin`），页面自己不能改 phase。首页 `L` 是 daed 日志视图：**应用内浮窗**
+  （`app/logs.go`，journalctl 作普通子进程流式输出，不再 `tea.ExecProcess` 接管终端），
+  j/k 滚动、f 跟随开关、r 重载、q/esc 关闭；跟随中贴底、上滚即脱钩；仅本机有效。
 - 全局 `r` 是**全量刷新**：所有列表 + status + traffic + 当前页延迟轮询一次性重拉，
   不是只刷当前页——各页共享组/订阅/方案数据（首页显示组、群组页显示订阅标签、首页
   路由区来自 selections），只刷当前页会让切过去后的视图是旧的。每个请求都用
   `countRefreshCmd` 包了一层 `refreshDoneMsg`（**消息必须是 `tea.BatchMsg{c, done}`，
   不能写 `tea.Batch(...)`——那返回的是 Cmd 不是消息**），最后一个回复清零
-  `refreshing`，顶栏 `spinSuffix` 期间显示"刷新中"；回复丢了的兜底是 tickMsg 里的
-  `refreshStale()`（15s），没有独立定时器。
+  `refreshing` 并弹 `✓ 已刷新` toast（完成无提示会被当成死键），顶栏 `spinSuffix`
+  期间显示"刷新中"；回复丢了的兜底是 tickMsg 里的 `refreshStale()`（15s，清零并弹
+  超时 toast），没有独立定时器。
 - **键位重映射（`internal/keymap` + `app/keybinds.go`）**：动作以"作用域+默认键"标识
   （如 groups/j），keys.toml（config.toml 同目录）按节覆盖默认键；**分发 switch 仍读
   默认键名**——`tk(scope, pressed)` 在各页分发点把按键改写回规范名，改走的默认键返回
@@ -429,6 +443,9 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
 - **首页组行跳转**：`Tab` 在路由选择器与组列表间切焦点（`home.groupFocus`），组行
   `Enter` 发 `gotoGroupMsg{ID}`，根模型开群组页、选中该组并聚焦右栏（`focus=1`）。
   焦点在组列表时只吞导航键，`o/P/L/g` 等仍走原路径。
+  **全页恰好一个光标**：`routingLines` 的预设行光标/高亮以 `!p.groupFocus` 门控
+  （组行光标以 `p.groupFocus` 门控，两侧对称）——聚焦组列表时预设行只留 ● 状态标记，
+  同时亮两个 ❯ 会被读成"选中没切走"（`TestHomeSingleCursorAcrossFocus` 兜底）。
 - **订阅页节点缓存**：`subsMsg` **不再**清空 `subNodes`；只有 `u`（更新）把对应 ID 记入
   `stale`，下次 `handleSubs` 时删那一条（并顺带清理已删除订阅的残留），根模型随后
   `ensureNodes` 重取。节点列表常驻右栏下盒，`ensureNodes` 只看缓存与 loading——j/k
@@ -464,11 +481,19 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   不提交。语义仍然归后端。
 - **`tea.ExecProcess` 出来必须补 `reenableMouse()`**（`app.go`）：bubbletea v1.3 的
   ReleaseTerminal 会关掉鼠标上报，RestoreTerminal 只恢复 altscreen/括号粘贴/焦点上报、
-  **不恢复鼠标**——不加这条，$EDITOR 或日志视图退出后点击/滚轮全部静默失效。目前挂在
-  `editorDoneMsg` 和 `logsDoneMsg` 两个分支，新增 ExecProcess 调用点要同样处理。
-- **日志视图**：首页 `L` 用 `tea.ExecProcess` 跑 `journalctl -u daed -n 200 --no-pager -f`。
-  本地 exec，远程隧道场景天然不可用（LookPath 失败时 toast 说明）。测试里**不要**执行
-  这个 cmd——它会一直 follow 不退出。
+  **不恢复鼠标**——不加这条，$EDITOR 退出后点击/滚轮全部静默失效。目前挂在
+  `editorDoneMsg` 分支（日志视图已改为应用内浮窗、不再 ExecProcess），新增 ExecProcess
+  调用点要同样处理。
+- **日志视图（`app/logs.go`）**：首页 `L` 打开**应用内浮窗**——journalctl 是普通子进程
+  （`journalctl -u daed -n 300 --no-pager -f`，stdout/stderr 合并进同一条管道），读行
+  goroutine 经 channel 流式喂给 `logsWaitCmd` 链（每行一个 msg，handler 重挂下一条）。
+  键位：j/k/g/G 滚动、`f` 跟随开关（暂停=SIGTERM 子进程，恢复=`-n 0` 续流不重放历史）、
+  `r` 重载（杀掉重来、缓冲清空）、q/esc 关闭；跟随中贴底自动滚，上滚即脱钩。缓冲上限
+  `logsMaxBuffer` 环形丢头。**消息必须带链路标识**（`logsLineMsg.lines`/`logsStoppedMsg.lines`
+  与 `m.logs.proc.lines` 比对）：换链后旧链的回声直接吞掉，不能清掉新链的 following。
+  本地 exec，远程隧道场景天然不可用（LookPath 失败时 toast 说明）。测试 seam：
+  `startLogsProc` 是包级 var，`logs_test.go` 的 `withFakeLogs` 换成手喂 channel 的假进程，
+  绝不在测试里跑真 journalctl。
 - **CLI 子命令**（`main.go`）：`-cmd status|test`，`test` 支持 `-g 组名` / `-n id,id`。
   刻意没有 `-cmd switch`：fixed 组改组是破坏性操作，理由见"已知限制"。
 
@@ -487,7 +512,8 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   `lastAddNodeIDs`（AddGroupNodes 的 ids）、`lastLatencyIDs`（Latencies 的 ids 参数）。
   要检查一批 cmd 里到底发了哪些请求：`cmd().(tea.BatchMsg)` 后逐个执行、按消息类型
   断言（见 `TestNoStartupLatencyTest` / `TestForceRefreshReloadsEverything`）。
-  执行 `tea.ExecProcess` 的 cmd（首页 `L`）**不能**在测试里跑——journalctl -f 不会退出。
+  执行 `tea.ExecProcess` 的 cmd（$EDITOR）**不能**在测试里跑；日志浮窗走
+  `startLogsProc` seam、假进程随便跑。
   一个 cmd 可能是 `tea.Batch`（如 editorDoneMsg 顺带 reenableMouse）：用 `execCmds` 展开、
   `firstMsgOf[T]` 取目标消息，别对 `cmd()` 直接做单类型断言。
 

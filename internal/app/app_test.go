@@ -2641,17 +2641,6 @@ func TestClipboardCopyFeedback(t *testing.T) {
 	}
 }
 
-// L launches the journal viewer. The command itself is not executed here:
-// on a machine with journalctl it would attach to the log stream and never
-// return, which is exactly what it does in the TUI.
-func TestLogsViewerLaunches(t *testing.T) {
-	m := newTestModel(t)
-	m, cmd := m.Update(key("L"))
-	if cmd == nil {
-		t.Fatal("L should launch the journal viewer (or report journalctl missing)")
-	}
-}
-
 // Latency data is polled for what the current page shows — never the whole
 // instance. The home page polls nothing: its per-group estimate runs on
 // accumulated data rather than paying for every member of every group.
@@ -2915,12 +2904,16 @@ func TestForceRefreshReloadsEverything(t *testing.T) {
 	if done != len(batch) {
 		t.Fatalf("every request should report refreshDoneMsg: %d of %d", done, len(batch))
 	}
-	// The last reply clears the indicator.
+	// The last reply clears the indicator and confirms via toast: without
+	// it the indicator just vanishes and r looks like a dead key.
 	for i := 0; i < done; i++ {
 		m, _ = m.Update(refreshDoneMsg{})
 	}
 	if mm = m.(Model); mm.refreshing {
 		t.Fatal("刷新中 should clear once every reply landed")
+	}
+	if v := mm.View(); !strings.Contains(v, "✓ 已刷新") {
+		t.Fatalf("refresh completion should toast:\n%s", v)
 	}
 }
 
@@ -3380,23 +3373,16 @@ func TestGroupsAttachAllSubsToast(t *testing.T) {
 	}
 }
 
-// TestMouseReenabledAfterExec: both tea.ExecProcess exits ($EDITOR and the
-// journal viewer) must re-arm mouse reporting — bubbletea disables it before
-// handing the terminal to the child and does not restore it afterwards.
+// TestMouseReenabledAfterExec: the remaining tea.ExecProcess exit ($EDITOR —
+// the log viewer now streams in-app) must re-arm mouse reporting — bubbletea
+// disables it before handing the terminal to the child and does not restore
+// it afterwards.
 func TestMouseReenabledAfterExec(t *testing.T) {
 	m := newTestModel(t)
 
-	m2, cmd := m.Update(logsDoneMsg{})
-	if cmd == nil {
-		t.Fatal("logsDoneMsg should re-enable the mouse")
-	}
-	if got := fmt.Sprintf("%T", cmd()); !strings.Contains(got, "MouseCellMotion") {
-		t.Fatalf("logsDoneMsg cmd = %s, want a mouse re-enable msg", got)
-	}
-
 	tmp := filepath.Join(t.TempDir(), "x.dns")
 	os.WriteFile(tmp, []byte("upstream {}"), 0o600)
-	_, cmd = m2.Update(editorDoneMsg{Path: tmp, Section: "dns", ID: "d1", Old: "upstream {}"})
+	_, cmd := m.Update(editorDoneMsg{Path: tmp, Section: "dns", ID: "d1", Old: "upstream {}"})
 	if cmd == nil {
 		t.Fatal("editorDoneMsg should fire validation and re-enable the mouse")
 	}
@@ -4048,6 +4034,36 @@ func TestHomeClickSelectsGroupAndPreset(t *testing.T) {
 	mm = m4.(Model)
 	if mm.home.presetCursor != 2 {
 		t.Fatalf("env-box click moved the preset cursor to %d", mm.home.presetCursor)
+	}
+}
+
+// The home page owns exactly one cursor: focusing the group list (Tab or a
+// click) must dim the routing picker's cursor row — the ● state mark stays,
+// the ❯/highlight follows the keyboard. Two lit cursors read as a stuck
+// selection.
+func TestHomeSingleCursorAcrossFocus(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("1"))
+	mm := m.(Model)
+	if n := strings.Count(mm.View(), "❯"); n != 1 {
+		t.Fatalf("routing focus should carry exactly one cursor, got %d:\n%s", n, mm.View())
+	}
+
+	m2, _ := m.Update(key("tab"))
+	mm = m2.(Model)
+	if !mm.home.groupFocus {
+		t.Fatal("fixture expects Tab to enter the group list")
+	}
+	v := mm.View()
+	if n := strings.Count(v, "❯"); n != 1 {
+		t.Fatalf("group focus should carry exactly one cursor, got %d:\n%s", n, v)
+	}
+	// The preset rows keep their state marks but lose the cursor highlight:
+	// the highlighted (background-bar) row is the group row, not a preset.
+	if i := strings.Index(v, "❯"); i >= 0 && strings.Contains(v[:max0(i)], "●") && strings.Contains(v[max0(i):], "●") {
+		// both a ● before and after the cursor means the cursor sits between
+		// preset rows — i.e. it never left the picker
+		t.Fatalf("the cursor should have left the preset picker:\n%s", v)
 	}
 }
 

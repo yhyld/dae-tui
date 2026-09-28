@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -72,11 +73,83 @@ var langEntries = []struct{ name, code string }{
 	{"English", "en"},
 }
 
-var aboutLogo = []string{
-	"⠀⠀⠀⣀⣴⣦⣀⠀⠀⠀",
-	"⠀⣴⣾⣿⣿⣿⣿⣷⣦⠀",
-	"⠀⠈⠙⠿⣿⣿⠿⠋⠁⠀",
-	"⠀⠀⠀⠀⠈⠁⠀⠀⠀⠀",
+// aboutLogo is the About window's mark: the home page's traffic chart
+// miniaturized on a 30x20 dot grid (15 cells x 5 rows) — six bar columns
+// over a dotted axis inside a rounded frame. Frame and axis take the
+// accent at normal weight and the columns the accent bold: the mark reads
+// in the theme's brand color end to end — a dim gray frame washed out to
+// near-invisible on real terminals — while the data still leads through
+// weight and density. Six candidates were designed (catalog with dot maps
+// in logo_test.go); to swap, paste another candidate's braille —
+// single-tone candidates go entirely in aboutLogoBars with an all-blank
+// aboutLogoFrame — TestAboutLogoIsKnownCandidate keeps the file honest.
+var (
+	// aboutLogoFrame is the furniture layer: frame edges, 3-dot-radius
+	// corner arcs and the dotted axis, rendered in the accent at normal
+	// weight.
+	aboutLogoFrame = []string{
+		"⠀⢀⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⡀⠀",
+		"⠀⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢸⠀",
+		"⠀⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢸⠀",
+		"⠀⡇⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⢸⠀",
+		"⠀⠈⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠁⠀",
+	}
+	// aboutLogoBars is the data layer: the six columns, bottoms one dot
+	// row above the axis — the sparkline's grammar, bars rise from just
+	// over the reference line — rendered bold in the accent.
+	aboutLogoBars = []string{
+		"⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+		"⠀⠀⠀⠀⣤⠀⣿⠀⣶⠀⣤⠀⠀⠀⠀",
+		"⠀⠀⣤⠀⣿⠀⣿⠀⣿⠀⣿⠀⣤⠀⠀",
+		"⠀⠀⠿⠀⠿⠀⠿⠀⠿⠀⠿⠀⠿⠀⠀",
+		"⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+	}
+)
+
+// brailleBase is U+2800, the all-dots-off braille cell.
+const brailleBase = 0x2800
+
+// aboutLogoLines renders the two logo layers as indented overlay lines. A
+// cell holding any bar dot is emitted whole in the bold accent style with
+// both layers' dots merged — bars sit on the axis, so those cells carry
+// furniture dots too and the bar has to win; every other lit cell takes
+// the accent at normal weight. Styles are read at render time so the
+// theme picker's live preview repaints the mark with the new accent.
+func aboutLogoLines() []string {
+	lines := make([]string, 0, len(aboutLogoBars))
+	for i, bars := range aboutLogoBars {
+		var frame string
+		if i < len(aboutLogoFrame) {
+			frame = aboutLogoFrame[i]
+		}
+		lines = append(lines, "    "+mergeLogoLayers(frame, bars))
+	}
+	return lines
+}
+
+// mergeLogoLayers overlays the data layer onto the furniture layer, cell
+// by cell. The layers are otherwise dot-disjoint; only the axis row
+// shares cells with the bar bottoms.
+func mergeLogoLayers(dim, accent string) string {
+	plain := lipgloss.NewStyle().Foreground(ui.Accent)
+	d, a := []rune(dim), []rune(accent)
+	var sb strings.Builder
+	for i := range a {
+		dm := 0
+		if i < len(d) {
+			dm = int(d[i]) - brailleBase
+		}
+		am := int(a[i]) - brailleBase
+		switch {
+		case am != 0:
+			sb.WriteString(ui.TitleStyle.Render(string(rune(brailleBase + (dm | am)))))
+		case dm != 0:
+			sb.WriteString(plain.Render(string(rune(brailleBase + dm))))
+		default:
+			sb.WriteRune(brailleBase)
+		}
+	}
+	return sb.String()
 }
 
 var Version = "dev"
@@ -427,9 +500,7 @@ func (s settings) overlay() *overlaySpec {
 
 func (s settings) aboutOverlay() *overlaySpec {
 	lines := []string{""}
-	for _, l := range aboutLogo {
-		lines = append(lines, "    "+ui.TitleStyle.Render(l))
-	}
+	lines = append(lines, aboutLogoLines()...)
 	lines = append(lines, "",
 		"    "+ui.SelectedStyle.Render("dae-tui "+s.version),
 		"    "+ui.HelpStyle.Render(i18n.T("dae 网络代理的终端管理界面")),

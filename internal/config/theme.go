@@ -34,11 +34,25 @@ func ThemeDir() (string, error) {
 // BuiltinThemes ship with the binary so the picker has content before any
 // user file exists. 默认 leaves every slot empty — resolved over the
 // config's inline colors, i.e. exactly the pre-theme-file behavior; 浅色
-// retunes the neutrals for a light terminal.
+// retunes the neutrals for a light terminal and stays at index 1 (the
+// settings test previews it with one j from 默认). The rest cover one color
+// family each and fill all three slots, so they render the same whatever
+// the inline tuning says; their accents stay clear of the latency ramp hues
+// (green 42 / yellow 214 / red 203) so delay colors never read as
+// "selected".
 func BuiltinThemes() []Theme {
 	return []Theme{
 		{Name: "默认"},
 		{Name: "浅色", Border: "250", Dim: "240"},
+		{Name: "北欧", Accent: "#88c0d0", Border: "#4c566a", Dim: "#7b88a1"}, // Nord
+		{Name: "夜航", Accent: "#7aa2f7", Border: "#292e42", Dim: "#565f89"}, // Tokyo Night
+		{Name: "布丁", Accent: "#cba6f7", Border: "#45475a", Dim: "#9399b2"}, // Catppuccin Mocha
+		{Name: "玫瑰", Accent: "#ebbcba", Border: "#403d52", Dim: "#908caa"}, // Rosé Pine
+		{Name: "青竹", Accent: "#a7c080", Border: "#4b565c", Dim: "#859289"}, // Everforest
+		{Name: "石青", Accent: "#56b6c2", Border: "#3e4451", Dim: "#5c6370"}, // One Dark
+		{Name: "暖橙", Accent: "#fe8019", Border: "#504945", Dim: "#928374"}, // Gruvbox
+		{Name: "水墨", Accent: "#e4e4e4", Border: "#4e4e4e", Dim: "#808080"}, // monochrome ink
+		{Name: "晨光", Accent: "#268bd2", Border: "#93a1a1", Dim: "#657b83"}, // Solarized Light
 	}
 }
 

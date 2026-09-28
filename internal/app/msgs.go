@@ -32,8 +32,6 @@ type logoutMsg struct{}
 
 type gotoGroupMsg struct{ ID string }
 
-type logsDoneMsg struct{}
-
 type statusMsg struct {
 	Status driver.Status
 	Err    error

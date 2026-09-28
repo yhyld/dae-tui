@@ -1,9 +1,7 @@
 package app
 
 import (
-	"errors"
 	"fmt"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -487,7 +485,7 @@ func (p *homePage) handleKey(msg tea.KeyMsg, d driver.Driver, running bool) tea.
 	case "s":
 		p.confirmSwitch = true
 	case "L":
-		return logsCmd()
+		return logsSpawnCmd(logsHistoryLines, true)
 	case "tab":
 		if len(p.groups) > 0 {
 			p.groupFocus = true
@@ -521,16 +519,6 @@ func (p *homePage) handleValidated(msg presetValidatedMsg, d driver.Driver) tea.
 		return func() tea.Msg { return opDoneMsg{Op: i18n.T("切换路由"), Err: msg.Err} }
 	}
 	return configTextCmd(d, msg.Section, msg.ID, msg.Text, msg.Label)
-}
-
-func logsCmd() tea.Cmd {
-	if _, err := exec.LookPath("journalctl"); err != nil {
-		return func() tea.Msg {
-			return opDoneMsg{Op: i18n.T("查看日志"), Err: errors.New(i18n.T("未找到 journalctl（daed 需以 systemd 服务运行在本机）"))}
-		}
-	}
-	c := exec.Command("journalctl", "-u", "daed", "-n", "200", "--no-pager", "-f")
-	return tea.ExecProcess(c, func(err error) tea.Msg { return logsDoneMsg{} })
 }
 
 const homeTwoColMin = 96
@@ -952,8 +940,12 @@ func (p homePage) routingLines(w int) (body []string, presetStart int) {
 	}
 	presetStart = len(body)
 	for i, preset := range p.presets {
+		// The cursor rides the routing box only while that box has focus;
+		// with focus on the group list the row keeps just its ● state mark
+		// so the page never shows two cursors.
+		onCursor := i == p.presetCursor && !p.groupFocus
 		cursor := " "
-		if i == p.presetCursor {
+		if onCursor {
 			cursor = ui.CursorStyle.Render("❯")
 		}
 		mark := "  "
@@ -961,12 +953,12 @@ func (p homePage) routingLines(w int) (body []string, presetStart int) {
 			mark = ui.OKStyle.Render("● ")
 		}
 		style := ui.HelpStyle
-		if i == p.presetCursor {
+		if onCursor {
 			style = ui.CursorStyle
 		}
 		row := " " + cursor + " " + mark + style.Render(ui.PadRight(presetLabel(preset.ID), 14)) +
 			ui.HelpStyle.Render(i18n.T(presetDescs[preset.ID]))
-		body = append(body, ui.HiRow(row, w, i == p.presetCursor))
+		body = append(body, ui.HiRow(row, w, onCursor))
 	}
 	switch {
 	case p.routingMode != "":
