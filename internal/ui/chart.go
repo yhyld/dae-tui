@@ -8,7 +8,7 @@ import (
 
 // Sparkline renders series as a braille-dot chart, width x height cells
 // (each cell packs 2x4 dots). Empty series renders a dim placeholder.
-func Sparkline(series []float64, width, height int, style lipgloss.Style, emptyLabel string) string {
+func Sparkline(series []float64, width, height int, style lipgloss.Style) string {
 	if height <= 0 {
 		return ""
 	}

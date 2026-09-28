@@ -93,8 +93,15 @@ func (stubDriver) ImportNodes(_ context.Context, links []string, tag string) ([]
 	}
 	return out, nil
 }
-func (stubDriver) RemoveNodes(_ context.Context, nodeIDs []string) error { return nil }
-func (stubDriver) TagNode(_ context.Context, id, tag string) error       { return nil }
+// lastRemoveNodeIDs records what RemoveNodes was last asked to delete, so
+// the modal target lock can be told from cursor-drift submissions.
+var lastRemoveNodeIDs []string
+
+func (stubDriver) RemoveNodes(_ context.Context, nodeIDs []string) error {
+	lastRemoveNodeIDs = append([]string(nil), nodeIDs...)
+	return nil
+}
+func (stubDriver) TagNode(_ context.Context, id, tag string) error { return nil }
 func (stubDriver) UpdateNode(_ context.Context, id, newLink string) error {
 	return nil
 }
@@ -2182,6 +2189,73 @@ func TestLatencyTestProgress(t *testing.T) {
 	if v := m.View(); strings.Contains(v, "测速中") {
 		t.Fatalf("progress indicator should be gone:\n%s", v)
 	}
+}
+
+// A backend that keeps erroring must not pin the testing flag: the window
+// ends on schedule even when latenciesMsg carries an error, otherwise the
+// root model's tick re-fires the poll every second forever (and the
+// "测速中" indicator never clears). Regression test for the groups page
+// ordering bug; subs/nodes share the same law via the unified signature.
+func TestLatencyTestWindowEndsOnErrors(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("2"))
+	m, cmd := m.Update(key("t"))
+	if cmd == nil {
+		t.Fatal("t should fire a test")
+	}
+	m, _ = m.Update(cmd())
+	if !m.(Model).groups.testing {
+		t.Fatal("groups page should be in testing state")
+	}
+	// Inside the window an error keeps waiting — the backend may recover.
+	m, _ = m.Update(latenciesMsg{Err: errors.New("backend down")})
+	if !m.(Model).groups.testing {
+		t.Fatal("an error inside the window should keep testing alive")
+	}
+	// Past the window the same error must still end it.
+	mm := m.(Model)
+	mm.groups.testStart = time.Now().Add(-time.Hour)
+	m = mm
+	m, _ = m.Update(latenciesMsg{Err: errors.New("backend down")})
+	if m.(Model).groups.testing {
+		t.Fatal("the window must end even when every poll errors")
+	}
+	if v := m.View(); strings.Contains(v, "测速中") {
+		t.Fatalf("progress indicator should be gone:\n%s", v)
+	}
+}
+
+// A latency poll re-sorts the visible node list under an open modal; the
+// confirm must act on the node the user opened the modal for, not on
+// whatever drifted into the cursor row in the meantime.
+func TestNodesModalTargetLockedAcrossLatencyDrift(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("4"))
+	m, _ = m.Update(key("o")) // cycle to sort-by-latency
+	now := time.Now()
+	m, _ = m.Update(latenciesMsg{Lats: []driver.Latency{
+		{NodeID: "m1", Ms: 500, Alive: true, TestedAt: now},
+		{NodeID: "m2", Ms: 50, Alive: true, TestedAt: now},
+	}})
+	mm := m.(Model)
+	if got := mm.nodes.visibleNodes()[0].ID; got != "m2" {
+		t.Fatalf("sorted head = %s, want m2 (the fastest)", got)
+	}
+	m, _ = m.Update(key("x")) // delete confirm targets m2
+	// The next poll reorders the list: m1 becomes the fastest node and
+	// slides into the row the cursor sits on.
+	m, _ = m.Update(latenciesMsg{Lats: []driver.Latency{
+		{NodeID: "m1", Ms: 10, Alive: true, TestedAt: now.Add(time.Second)},
+	}})
+	m, cmd := m.Update(key("y"))
+	if cmd == nil {
+		t.Fatal("y should fire the delete mutation")
+	}
+	m, _ = m.Update(cmd())
+	if len(lastRemoveNodeIDs) != 1 || lastRemoveNodeIDs[0] != "m2" {
+		t.Fatalf("delete targeted %v, want the locked target [m2]", lastRemoveNodeIDs)
+	}
+	_ = m
 }
 
 // A large batch gets a proportionally longer window; the cap matches the

@@ -79,6 +79,9 @@ func (g Group) FixedIndex() int {
 	}
 	for _, p := range g.PolicyParams {
 		n := 0
+		if p.Val == "" {
+			return -1 // fixed() without its positional index is malformed
+		}
 		for _, c := range p.Val {
 			if c < '0' || c > '9' {
 				return -1

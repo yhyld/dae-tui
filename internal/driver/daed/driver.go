@@ -52,6 +52,12 @@ type Driver struct {
 	// ListSelections then permanently uses the frozen v2.1.1 field set.
 	// Atomic for the same reason as groupsFallback.
 	selectionsFallback atomic.Bool
+	// session counts logouts. A re-auth that captured credentials before a
+	// Logout must not write its freshly fetched token back afterwards: the
+	// local session (and the persisted config) was cleared by that logout,
+	// and resurrecting the token would silently re-enable auto-login.
+	// Guarded by optsMu together with the credential fields.
+	session uint64
 }
 
 var _ driver.Driver = (*Driver)(nil)
@@ -69,6 +75,7 @@ func New(opts Options) *Driver {
 func (d *Driver) reAuth(ctx context.Context, c *Client) error {
 	d.optsMu.Lock()
 	username, password, saveToken := d.opts.Username, d.opts.Password, d.opts.SaveToken
+	session := d.session
 	d.optsMu.Unlock()
 	if username == "" || password == "" {
 		return errors.New("no stored credentials")
@@ -76,6 +83,15 @@ func (d *Driver) reAuth(ctx context.Context, c *Client) error {
 	tok, err := c.FetchToken(ctx, username, password)
 	if err != nil {
 		return err
+	}
+	// A Logout racing the fetch must win: an older session's token is
+	// dropped instead of stored, or it would resurrect the session the
+	// logout just cleared (including the persisted copy).
+	d.optsMu.Lock()
+	stale := session != d.session
+	d.optsMu.Unlock()
+	if stale {
+		return nil
 	}
 	c.SetToken(tok)
 	if saveToken != nil {
@@ -238,6 +254,12 @@ func (d *Driver) RemoveGroupNodes(ctx context.Context, groupID string, nodeIDs [
 	return d.client.Do(ctx, mGroupDelNodes, map[string]any{"id": groupID, "nodeIDs": nodeIDs}, nil)
 }
 
+// nodePageCeiling caps node pagination at 100 pages × 200/page (20,000
+// nodes): beyond it the server's cursor is misbehaving, and paging forever
+// is worse than returning what we have. The loop checks after the fetch,
+// so the stop condition is nodePageCeiling-1 (page indexes start at 0).
+const nodePageCeiling = 100
+
 // ListManualNodes walks the global nodes connection and keeps only
 // subscription-less nodes (the ones eligible for groupAddNodes).
 func (d *Driver) ListManualNodes(ctx context.Context) ([]driver.Node, error) {
@@ -259,11 +281,11 @@ func (d *Driver) ListManualNodes(ctx context.Context) ([]driver.Node, error) {
 				nodes = append(nodes, mapNode(n))
 			}
 		}
-		// Same defensive page ceiling as SubscriptionNodes (100 pages ×
-		// 200/page over the *global* connection): beyond it something is
-		// wrong with the server's cursor, and paging forever is worse than
+		// Same defensive page ceiling as SubscriptionNodes (nodePageCeiling
+		// pages × 200/page over the *global* connection): beyond it something
+		// is wrong with the server's cursor, and paging forever is worse than
 		// returning what we have.
-		if !out.Nodes.PageInfo.HasNextPage || len(out.Nodes.Edges) == 0 || page > 100 {
+		if !out.Nodes.PageInfo.HasNextPage || len(out.Nodes.Edges) == 0 || page >= nodePageCeiling-1 {
 			return nodes, nil
 		}
 		after = out.Nodes.PageInfo.EndCursor
@@ -403,7 +425,7 @@ func (d *Driver) SubscriptionNodes(ctx context.Context, subscriptionID string) (
 				Address: n.Address, SubscriptionID: n.SubscriptionID,
 			})
 		}
-		if !out.Nodes.PageInfo.HasNextPage || len(out.Nodes.Edges) == 0 || page > 100 {
+		if !out.Nodes.PageInfo.HasNextPage || len(out.Nodes.Edges) == 0 || page >= nodePageCeiling-1 {
 			return nodes, nil
 		}
 		after = out.Nodes.PageInfo.EndCursor
@@ -467,11 +489,19 @@ func (d *Driver) Traffic(ctx context.Context, windowSec, maxPoints int) (driver.
 		return driver.TrafficSnapshot{}, err
 	}
 	r := out.General.RuntimeOverview
+	upTotal, err := parseInt64Strict("uploadTotal", r.UploadTotal)
+	if err != nil {
+		return driver.TrafficSnapshot{}, err
+	}
+	downTotal, err := parseInt64Strict("downloadTotal", r.DownloadTotal)
+	if err != nil {
+		return driver.TrafficSnapshot{}, err
+	}
 	snap := driver.TrafficSnapshot{
 		UpRate:      r.UploadRate,
 		DownRate:    r.DownloadRate,
-		UpTotal:     parseInt64(r.UploadTotal),
-		DownTotal:   parseInt64(r.DownloadTotal),
+		UpTotal:     upTotal,
+		DownTotal:   downTotal,
 		Conns:       r.ActiveConnections,
 		UDPSessions: r.UdpSessions,
 		UpdatedAt:   parseTime(r.UpdatedAt),
@@ -823,10 +853,11 @@ routing {
 func (d *Driver) CreateProfile(ctx context.Context, section, name string, src *driver.ConfigItem) error {
 	switch section {
 	case "config":
-		// createConfig answers with the new profile's id (the mutation
-		// already selects it): cloning binds to that id instead of looking
-		// the profile up by name afterwards, which mis-bound when several
-		// unselected profiles shared the name.
+		// createConfig answers with the new profile's id (the new profile is
+		// created unselected — wing's config.Create writes Selected:false):
+		// cloning binds to that id instead of looking the profile up by name
+		// afterwards, which mis-bound when several unselected profiles
+		// shared the name.
 		var out struct {
 			CreateConfig struct {
 				ID string `json:"id"`
@@ -841,8 +872,13 @@ func (d *Driver) CreateProfile(ctx context.Context, section, name string, src *d
 		if out.CreateConfig.ID == "" {
 			return fmt.Errorf("新建配置 %q 未返回 id", name)
 		}
-		// Clone: copy all fields onto the new profile in one update.
-		return d.UpdateConfigFields(ctx, out.CreateConfig.ID, src.Fields)
+		// Clone: copy all fields onto the new profile in one update. There is
+		// no rollback — name the leftover in the error so the user knows it
+		// exists and can edit or delete it by hand.
+		if err := d.UpdateConfigFields(ctx, out.CreateConfig.ID, src.Fields); err != nil {
+			return fmt.Errorf("已创建配置 %q，但字段复制失败（可手动编辑或删除）: %w", name, err)
+		}
+		return nil
 	case "dns":
 		content := defaultDnsTemplate
 		if src != nil && src.Body != "" {
@@ -1036,10 +1072,13 @@ func (d *Driver) UpdatePassword(ctx context.Context, currentPassword, newPasswor
 
 // Logout forgets the local session. daed has no logout mutation — the JWT
 // stays valid until it expires — so all this can do is stop replaying the
-// stored credentials.
+// stored credentials. Bumping the session generation also voids any re-auth
+// still in flight, so its freshly fetched token can neither re-arm the
+// client nor reach the persisted config after this point.
 func (d *Driver) Logout(ctx context.Context) error {
 	d.optsMu.Lock()
 	d.opts.Username, d.opts.Password, d.opts.Token = "", "", ""
+	d.session++
 	d.optsMu.Unlock()
 	d.client.SetToken("")
 	return nil
@@ -1054,9 +1093,19 @@ func (d *Driver) setCredentials(username, password string) {
 
 // --- helpers ---
 
-func parseInt64(s string) int64 {
-	n, _ := strconv.ParseInt(s, 10, 64)
-	return n
+// parseInt64Strict parses daed's String-encoded counters. An empty string
+// reads as a benign zero (a fresh counter); anything else that fails to
+// parse is surfaced as an error instead of silently rendering as 0 — a
+// totals display that quietly resets reads like a backend restart.
+func parseInt64Strict(what, s string) (int64, error) {
+	if s == "" {
+		return 0, nil
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s: cannot parse %q as integer", what, s)
+	}
+	return n, nil
 }
 
 // parseTime tolerates zero times and odd encodings; on failure it returns

@@ -38,6 +38,12 @@ type nodesPage struct {
 	tag        textinput.Model
 	ifld       int
 	pickCursor int
+	// opID is the node the open modal (delete confirm, group picker, edit
+	// form) targets. The visible list re-sorts on every latency poll, so
+	// resolving the target through p.sel at submit time can silently act on
+	// a different node than the one the user opened the modal for; the ID
+	// pins the target across that drift.
+	opID string
 
 	importOK   int
 	importFail []driver.NodeImportResult
@@ -52,15 +58,12 @@ type nodesPage struct {
 
 func newNodesPage(caps driver.Caps) nodesPage {
 	l := textinput.New()
-	l.Placeholder = i18n.T("vmess://… / ss://… / trojan://… 分享链接")
 	l.CharLimit = 4096
 	l.Width = 48
 	t := textinput.New()
-	t.Placeholder = i18n.T("标签 (可空)")
 	t.CharLimit = 64
 	t.Width = 32
 	ta := textarea.New()
-	ta.Placeholder = i18n.T("每行一个分享链接，可整段粘贴\nvmess://…\nss://…")
 	ta.CharLimit = 65536
 	ta.SetWidth(52)
 	ta.SetHeight(6)
@@ -129,15 +132,21 @@ func (p *nodesPage) setGroups(groups []driver.Group) {
 	p.groups = groups
 }
 
-func (p *nodesPage) handleLatencies(lats []driver.Latency) {
+func (p *nodesPage) handleLatencies(lats []driver.Latency, err error) {
 	for _, l := range lats {
 		p.lat[l.NodeID] = l
 	}
 	if !p.testing {
 		return
 	}
+	// Same law as groupsPage: the window ends on time even when every poll
+	// errors, so a dead backend can never pin the testing flag (and the
+	// per-second polling that comes with it).
 	if time.Since(p.testStart) > testWindow(len(p.testIDs)) {
 		p.testing = false
+		return
+	}
+	if err != nil {
 		return
 	}
 	for _, id := range p.testIDs {
@@ -171,6 +180,25 @@ func (p *nodesPage) cur() *driver.Node {
 
 func (p *nodesPage) visibleNodes() []driver.Node {
 	return p.nodeView.visible(p.nodes, p.lat)
+}
+
+// opNode resolves the modal's locked target ID against the full node list
+// (not the visible window, whose order drifts with every latency poll).
+func (p *nodesPage) opNode() *driver.Node {
+	for i := range p.nodes {
+		if p.nodes[i].ID == p.opID {
+			return &p.nodes[i]
+		}
+	}
+	return nil
+}
+
+// opGone reports a modal whose locked target no longer exists (removed by a
+// concurrent refresh) as a toast instead of silently doing nothing.
+func opGone(what string) tea.Cmd {
+	return func() tea.Msg {
+		return opDoneMsg{Op: what, Err: fmt.Errorf("%s", i18n.T("目标已随刷新移除，操作已取消"))}
+	}
 }
 
 func (p *nodesPage) visibleLatencyIDs() []string {
@@ -230,10 +258,10 @@ func (p *nodesPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	if p.mode == 2 {
 		switch msg.String() {
 		case "y":
-			n := p.cur()
+			n := p.opNode()
 			p.mode = 0
 			if n == nil {
-				return nil
+				return opGone(i18n.T("删除节点"))
 			}
 			p.busy = true
 			return nodeMutateCmd(d, nodeMutation{kind: 1, ids: []string{n.ID}}, i18n.T("删除节点 ")+ui.SpaceAfterFlag(n.Name))
@@ -255,9 +283,12 @@ func (p *nodesPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 				p.pickCursor--
 			}
 		case "enter":
-			n := p.cur()
+			n := p.opNode()
 			if n == nil || p.pickCursor >= len(p.groups) {
 				p.mode = 0
+				if n == nil {
+					return opGone(i18n.T("加入群组"))
+				}
 				return nil
 			}
 			g := p.groups[p.pickCursor]
@@ -279,6 +310,11 @@ func (p *nodesPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 
 	switch key {
 	case "a":
+		// Busy guard: the import submission sets busy; opening a second
+		// form while one runs would let it stack another mutation.
+		if p.busy {
+			return nil
+		}
 		p.mode = 1
 		p.ifld = 0
 		p.links.Reset()
@@ -321,8 +357,9 @@ func (p *nodesPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 				p.focus = 1
 			}
 		case "x":
-			if p.cur() != nil {
+			if n := p.cur(); n != nil {
 				p.mode = 2
+				p.opID = n.ID
 			}
 		case "e":
 			if n := p.cur(); n != nil {
@@ -341,9 +378,10 @@ func (p *nodesPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		}
 	case "G":
 
-		if p.cur() != nil && len(p.groups) > 0 {
+		if n := p.cur(); n != nil && len(p.groups) > 0 {
 			p.mode = 3
 			p.pickCursor = 0
+			p.opID = n.ID
 		}
 	}
 	return nil
@@ -352,6 +390,7 @@ func (p *nodesPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 func (p *nodesPage) openEdit(n *driver.Node) tea.Cmd {
 	p.mode = 4
 	p.ifld = 0
+	p.opID = n.ID
 	p.tag.SetValue(n.Tag)
 	p.link.SetValue(n.Link)
 	p.tag.Focus()
@@ -376,10 +415,10 @@ func (p *nodesPage) editFormKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		}
 		return nil
 	case "enter":
-		n := p.cur()
+		n := p.opNode()
 		if n == nil {
 			p.mode = 0
-			return nil
+			return opGone(i18n.T("编辑节点"))
 		}
 		tag := strings.TrimSpace(p.tag.Value())
 		link := strings.TrimSpace(p.link.Value())
@@ -482,6 +521,11 @@ func (p nodesPage) View() string {
 }
 
 func (p nodesPage) overlay() *overlaySpec {
+	// Placeholders re-translate here rather than living in the constructor:
+	// the inputs outlive a settings-window language switch.
+	p.links.Placeholder = i18n.T("每行一个分享链接，可整段粘贴\nvmess://…\nss://…")
+	p.link.Placeholder = i18n.T("vmess://… / ss://… / trojan://… 分享链接")
+	p.tag.Placeholder = i18n.T("标签 (可空)")
 	switch p.mode {
 	case 1:
 		lines := []string{
@@ -498,7 +542,7 @@ func (p nodesPage) overlay() *overlaySpec {
 		return &overlaySpec{lines: lines}
 	case 4:
 		title := i18n.T(" 编辑手动节点")
-		if n := p.cur(); n != nil {
+		if n := p.opNode(); n != nil {
 			title += " · " + ui.SpaceAfterFlag(n.Name)
 		}
 		return &overlaySpec{lines: []string{
@@ -526,7 +570,7 @@ func (p nodesPage) modalTitle() string {
 func (p nodesPage) modalLines() []string {
 	switch p.mode {
 	case 2:
-		if n := p.cur(); n != nil {
+		if n := p.opNode(); n != nil {
 			return ui.BoxLines(true, i18n.T("确认删除节点 \"")+ui.SpaceAfterFlag(n.Name)+"\"? (y/n)")
 		}
 	case 3:
@@ -701,5 +745,5 @@ func (p nodesPage) trendLines(id string) []string {
 	l := p.lat[id]
 	st := ui.LatencyStyle(l.Ms, l.Alive, !l.TestedAt.IsZero())
 	return append([]string{head},
-		strings.Split(ui.Sparkline(series, w, trendChartH, st, ""), "\n")...)
+		strings.Split(ui.Sparkline(series, w, trendChartH, st), "\n")...)
 }

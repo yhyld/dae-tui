@@ -31,6 +31,47 @@ var Fixed = map[string]bool{
 // a switch label no live key produces.
 const dead = "\x00"
 
+// defaults is the per-scope set of DEFAULT dispatch keys, registered by the
+// app at startup (the catalog lives there; the keymap only needs the key
+// names). Load and Set consult it so a binding whose new key would silently
+// shadow a still-live action — in the same scope or in the global layer
+// that dispatches ahead of it — is rejected with a note instead.
+var (
+	defaultsMu sync.RWMutex
+	defaults   = map[string]map[string]bool{}
+)
+
+// RegisterDefaults records the default keys a scope dispatches on. Call
+// once at startup, before the first Load.
+func RegisterDefaults(scope string, keys []string) {
+	defaultsMu.Lock()
+	defer defaultsMu.Unlock()
+	m := defaults[scope]
+	if m == nil {
+		m = map[string]bool{}
+		defaults[scope] = m
+	}
+	for _, k := range keys {
+		m[k] = true
+	}
+}
+
+// shadowsDefault reports whether binding newKey in scope would silently
+// cover a still-live default action: either another action of the same
+// scope, or a global action (global dispatch runs ahead of the page's, so
+// a page binding on a live global key never fires). A default that has
+// itself been moved away is not live — that is how key swaps are expressed.
+func shadowsDefault(scope, newKey string, scopeDead, globalDead map[string]bool) bool {
+	defaultsMu.RLock()
+	inScope := defaults[scope][newKey]
+	inGlobal := scope != Global && defaults[Global][newKey]
+	defaultsMu.RUnlock()
+	if inScope && !scopeDead[newKey] {
+		return true
+	}
+	return inGlobal && !globalDead[newKey]
+}
+
 // Scopes the UI dispatches through. The catalog lives in the app package;
 // the keymap only needs names.
 const (
@@ -114,6 +155,21 @@ func Load(path string) *Keymap {
 			seen[neu] = def
 		}
 	}
+	// Second pass, after every binding of the file is applied so true swaps
+	// (a→b plus b→a) pass: a new key that is still the live default of
+	// another action would silently shadow it — Translate maps the pressed
+	// key to this override before the dispatch switch ever sees the default.
+	for scope, binds := range km.over {
+		for def, neu := range binds {
+			if shadowsDefault(scope, neu, km.dead[scope], km.dead[Global]) {
+				km.notes = append(km.notes,
+					scope+"/"+def+" → "+neu+"：该键仍是其它未改走动作的默认键，绑定已忽略（先把原键改走可实现交换）")
+				delete(km.over[scope], def)
+				delete(km.rev[scope], neu)
+				delete(km.dead[scope], def)
+			}
+		}
+	}
 	return km
 }
 
@@ -161,6 +217,12 @@ func (km *Keymap) Key(scope, def string) string {
 func (km *Keymap) Set(path, scope, def, newKey string) error {
 	km.mu.Lock()
 	defer km.mu.Unlock()
+	// Same shadow rule the loader enforces, checked before anything is
+	// mutated so a rejection leaves the previous binding intact; the UI
+	// validates first, this is the depth for direct Set callers.
+	if newKey != def && shadowsDefault(scope, newKey, km.dead[scope], km.dead[Global]) {
+		return fmt.Errorf("%s 仍是未改走动作的默认键，绑定被拒绝", newKey)
+	}
 	if km.over[scope] == nil {
 		km.over[scope] = map[string]string{}
 		km.rev[scope] = map[string]string{}
@@ -223,7 +285,16 @@ func (km *Keymap) saveLocked(path string) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), path)
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return err
+	}
+	// Best-effort directory sync so the rename survives a crash, matching
+	// config.toml's atomic save.
+	if d, err := os.Open(dir); err == nil {
+		d.Sync()
+		d.Close()
+	}
+	return nil
 }
 
 // BoundTo reports the default key that newKey currently triggers in scope

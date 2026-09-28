@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"dae-tui/internal/driver"
 )
@@ -172,6 +173,106 @@ func TestAccessDeniedTriggersReAuthAndRetry(t *testing.T) {
 	if tokens != 1 {
 		t.Fatalf("re-auth ran %d times, want 1", tokens)
 	}
+}
+
+// A re-auth that captured credentials before a Logout must not write its
+// token back afterwards: the logout cleared the local session (and the
+// persisted config), and the late write-back would silently resurrect
+// auto-login for up to the token's lifetime.
+func TestLogoutVoidsInFlightReAuth(t *testing.T) {
+	tokenSeen := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var savedMu sync.Mutex
+	var saved []string
+	m := &mockGraphQL{handler: func(op string, vars map[string]any, auth string) (any, []gqlError) {
+		switch op {
+		case "Token":
+			// Hold the refresh open so the logout lands mid-flight.
+			tokenSeen <- struct{}{}
+			<-release
+			return map[string]any{"token": "jwt-late"}, nil
+		case "Groups":
+			if auth != "Bearer jwt-late" {
+				return nil, []gqlError{{Message: "access denied"}}
+			}
+			return map[string]any{"groups": []any{}}, nil
+		}
+		return nil, []gqlError{{Message: "unexpected op " + op}}
+	}}
+	srv := httptest.NewServer(m)
+	t.Cleanup(srv.Close)
+	opts := Options{
+		Endpoint: srv.URL + "/graphql", Username: "alice", Password: "s3cret1",
+		SaveToken: func(tok string) {
+			savedMu.Lock()
+			saved = append(saved, tok)
+			savedMu.Unlock()
+		},
+	}
+	d := New(opts)
+	d.client.SetToken("jwt-expired")
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := d.ListGroups(ctxT(t))
+		done <- err
+	}()
+	<-tokenSeen // the re-auth leader is now parked inside FetchToken
+	if err := d.Logout(context.Background()); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+	close(release)
+
+	// The replay runs token-less, is denied again, and the request ends as
+	// ErrNeedAuth instead of resurrecting the session.
+	if err := <-done; !errors.Is(err, driver.ErrNeedAuth) {
+		t.Fatalf("post-logout replay should fail with ErrNeedAuth, got %v", err)
+	}
+	savedMu.Lock()
+	defer savedMu.Unlock()
+	if len(saved) != 0 {
+		t.Fatalf("an in-flight re-auth must not persist its token after logout; saved %v", saved)
+	}
+}
+
+// A follower whose request ctx expires while waiting on a slow refresh must
+// still classify as ErrNeedAuth: the app routes any error through
+// errors.Is(…, driver.ErrNeedAuth) back to the login phase, and the old bare
+// "access denied" fell through that check.
+func TestFollowerExpiryReportsErrNeedAuth(t *testing.T) {
+	tokenSeen := make(chan struct{}, 1)
+	release := make(chan struct{})
+	d, _ := newTestDriver(t, func(op string, vars map[string]any, auth string) (any, []gqlError) {
+		switch op {
+		case "Token":
+			tokenSeen <- struct{}{}
+			<-release // hold the leader's refresh open
+			return map[string]any{"token": "jwt-2"}, nil
+		case "Groups":
+			return nil, []gqlError{{Message: "access denied"}}
+		}
+		return nil, []gqlError{{Message: "unexpected op " + op}}
+	})
+	d.client.SetToken("jwt-expired")
+
+	leaderDone := make(chan struct{})
+	go func() {
+		defer close(leaderDone)
+		_, _ = d.ListGroups(ctxT(t)) // parks inside the re-auth leader
+	}()
+	<-tokenSeen
+
+	ctx, cancel := context.WithTimeout(ctxT(t), 50*time.Millisecond)
+	defer cancel()
+	_, err := d.ListGroups(ctx)
+	if !errors.Is(err, driver.ErrNeedAuth) {
+		t.Fatalf("a follower expired mid-refresh must report ErrNeedAuth, got %v", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("the ctx cause should stay inspectable through the wrap, got %v", err)
+	}
+	close(release)
+	<-leaderDone
 }
 
 func TestAccessDeniedWithoutCredentials(t *testing.T) {
@@ -1033,7 +1134,8 @@ func TestRoutingPresetsBuildAndDetect(t *testing.T) {
 // backend cannot parse.
 func TestBuildRoutingPresetRejectsUnusableGroup(t *testing.T) {
 	d := New(Options{})
-	for _, bad := range []string{"", "my group", "pro\"xy", "a:b", "组"} {
+	for _, bad := range []string{"", "my group", "pro\"xy", "a:b", "组",
+		"direct", "must_direct", "block", "must_proxy"} {
 		if _, err := d.BuildRoutingPreset("gfw", bad); err == nil {
 			t.Errorf("BuildRoutingPreset(gfw, %q) should fail", bad)
 		}

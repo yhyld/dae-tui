@@ -139,3 +139,81 @@ func TestSetPersistsAndRestores(t *testing.T) {
 		t.Fatalf("default restore must drop the entry, file: %s", raw)
 	}
 }
+
+// A binding whose new key is the still-live default of another action in
+// the same scope would silently shadow it — Translate maps the pressed key
+// to the override before the dispatch switch sees the default — so the
+// loader drops it with a note. The same rule protects the global layer,
+// which dispatches ahead of every page.
+func TestShadowOfLiveDefaultRejected(t *testing.T) {
+	RegisterDefaults(Groups, []string{"j", "k", "c"})
+	RegisterDefaults(Global, []string{"q", "r"})
+	dir := t.TempDir()
+	path := filepath.Join(dir, "keys.toml")
+
+	os.WriteFile(path, []byte("[groups]\nc = \"j\"\n"), 0o600)
+	km := Load(path)
+	if got := km.Translate(Groups, "c"); got != "c" {
+		t.Fatalf("shadowing binding must be dropped: %q", got)
+	}
+	if got := km.Translate(Groups, "j"); got != "j" {
+		t.Fatalf("j must stay the live default: %q", got)
+	}
+	if len(km.Notes()) != 1 || !strings.Contains(km.Notes()[0], "groups/c") {
+		t.Fatalf("a note should explain the shadow rejection: %v", km.Notes())
+	}
+
+	os.WriteFile(path, []byte("[subs]\nu = \"r\"\n"), 0o600)
+	km = Load(path)
+	if got := km.Translate(Subs, "u"); got != "u" {
+		t.Fatalf("binding onto a live global key must be dropped: %q", got)
+	}
+}
+
+// Swapping two keys is expressed by moving both away; once the target is
+// dead the second half is legal.
+func TestKeySwapAllowed(t *testing.T) {
+	RegisterDefaults(Nodes, []string{"e", "x"})
+	dir := t.TempDir()
+	path := filepath.Join(dir, "keys.toml")
+	os.WriteFile(path, []byte("[nodes]\ne = \"x\"\nx = \"e\"\n"), 0o600)
+	km := Load(path)
+	if got := km.Translate(Nodes, "x"); got != "e" {
+		t.Fatalf("swap half 1 broken: %q", got)
+	}
+	if got := km.Translate(Nodes, "e"); got != "x" {
+		t.Fatalf("swap half 2 broken: %q", got)
+	}
+	if len(km.Notes()) != 0 {
+		t.Fatalf("a clean swap must not warn: %v", km.Notes())
+	}
+}
+
+// Set enforces the same shadow rule, rejecting before anything is mutated
+// so a failed call leaves the previous binding intact. A swap through Set
+// needs an intermediate key (move s away, then L onto s, then s onto L);
+// a file listing both halves at once swaps directly.
+func TestSetRejectsLiveDefault(t *testing.T) {
+	RegisterDefaults(Home, []string{"s", "L"})
+	dir := t.TempDir()
+	path := filepath.Join(dir, "keys.toml")
+	km := Load(path)
+	if err := km.Set(path, Home, "s", "L"); err == nil {
+		t.Fatal("binding onto a live default must be rejected")
+	}
+	if got := km.Key(Home, "s"); got != "s" {
+		t.Fatalf("a rejected Set must leave the default intact: %q", got)
+	}
+	if err := km.Set(path, Home, "s", "Z"); err != nil {
+		t.Fatal(err)
+	}
+	if err := km.Set(path, Home, "L", "s"); err != nil {
+		t.Fatal(err)
+	}
+	if err := km.Set(path, Home, "s", "L"); err != nil {
+		t.Fatalf("completing the swap must be allowed: %v", err)
+	}
+	if got := km.Translate(Home, "s"); got != "L" {
+		t.Fatalf("swap half: pressing s should trigger L, got %q", got)
+	}
+}

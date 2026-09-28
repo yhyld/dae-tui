@@ -62,8 +62,15 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   带 Err 的结果消息做 `errors.Is` 检查，会话中途遇到就直接回 `phaseLogin`，不会
   toast 刷屏）。re-auth hook 自己的请求带 `reauthCtxKey` 标记，防止在刷新 leader
   身上自我死等。`d.opts` 凭据字段由 `optsMu` 保护（Login/改密/退出在写、任意请求
-  goroutine 的 re-auth 在读）。
-- `uploadTotal`/`downloadTotal` 在 SDL 里是 **String**，要 `parseInt64`。
+  goroutine 的 re-auth 在读）。两条新铁律：**follower 等刷新时自己的 ctx 过期也要包
+  `ErrNeedAuth`**（裸 "access denied" 会漏过 `errors.Is`，测试 `TestFollowerExpiry
+  ReportsErrNeedAuth` 兜底）；**登出带会话代数**——`Logout` 递增 `d.session`，re-auth
+  完成后复查代数，旧会话拿到的新 token 直接丢弃（否则在途刷新会把已登出的 token
+  写回内存和 config.toml，"退出登录"最长 30 天不彻底，`TestLogoutVoidsInFlightReAuth`
+  兜底）。错误包装一律 `%w` 不断链。
+- `uploadTotal`/`downloadTotal` 在 SDL 里是 **String**，解析走 `parseInt64Strict`：
+  空串按良性 0，其余解析失败**上抛错误**而不是静默归零（累计流量悄悄清零读起来像
+  后端重启）。
 - `Group.Nodes` **只含直接挂载的节点**；完整成员列表用 `Group.Members()`（订阅贡献的
   节点 + 直接节点，按 ID 去重）。
 - 切固定节点：`groupSetPolicy(id, policy: fixed, policyParams: [{val: "<index>"}])`，
@@ -98,18 +105,37 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   单测兜着（生成的 DSL 必须 round-trip 回同一预设，超集/重复规则必须判自定义）。
 - `run(dry: true)` 是**停止代理**，不是校验。别把它当 dry-run 用。
 - 节点列表是 connection，cursor 就是节点 ID；驱动内循环翻页（200/页，带防御性页数
-  上限 100 页，`ListManualNodes` 与 `SubscriptionNodes` 一致——它翻的是全量节点
-  connection 再客户端过滤，上限不一致会在大实例上静默丢手动节点）。
+  上限 `nodePageCeiling`=100 页、两处一致——它翻的是全量节点
+  connection 再客户端过滤，上限不一致会在大实例上静默丢手动节点；触顶返回已有节点
+  不报错，这是权衡，别改成翻页到底）。
 - `testNodeLatencies` 的 ID 列表超过 100 个要分块，否则 HTTP 超时。
 - 老版本 daed 没有 `GroupSubscription` 类型：`qGroupsRich` 会 schema 校验失败，驱动据此
   永久降级到 `qGroups`（`groupsFallback`）。
-- **双 schema 兼容（traffic-fix fork 链）**：修复流量统计的 fork 链（wing
-  `b089b56` + 新 dae 核心）的 `Global` 类型删了 `soMarkFromDaeSet`、新增
-  `disableThp`/`autoSniffPunt`/`bpfConnStateMapSize`。`ListSelections` 先发新字段集
-  （`qSelections`），遇 `Cannot query field` 永久降级 `qSelectionsLegacy`
-  （冻结 v2.1.1 字段集，`selectionsFallback`，同一法则如 groupsFallback）——
-  **两代 daed 都能用**；可编辑字段清单仍由 configFlatDesc ∩ 返回键交集决定，
-  老核心自然不出现新字段，无需分支硬编码。
+- **双 schema 兼容（traffic-fix fork 链）——先弄清后端跑的是哪条链**：官方 daed
+  v2.1.1 的 git 子模块钉的是**旧 wing `dc50308`**（dae-core `85a1fc3`），这条链的
+  上下行流量统计尚未修复——`runtimeOverview` 的 `uploadTotal`/`downloadTotal` 字段
+  存在但数据不对，首页速率/图表/累计因此失真。**这是后端钉版问题，不是 dae-tui 的
+  bug**；改 dae-tui 治不了它。解决方案：把 daed 仓库的 wing 子模块重钉到
+  `b089b56`（"bump dae-core to v2.1.1 and follow its control plane API"，dae-core
+  `dbae2e8`，`dae/run.go` 控制面对接重写）并重新构建 daed。本机参考实现：
+  `~/projects/daed` 的 `11ff432`（"build(deps): bump wing to b089b56 (dae-core
+  v2.1.1, fixes traffic stats)"，嵌套 dae-core 用的是更新的 nightly `b59e375`），
+  以 `sudo /home/yang/projects/daed/daed run -c /etc/daed/` 运行——系统里 failed 的
+  `daed.service` 是发行版装的旧单元，与实际运行的这个**不是同一个**，别看错。
+  新链的 `Global` 类型删了 `soMarkFromDaeSet`（新 wing 的 globalInput 生成器把
+  `so_mark_from_dae_set` 当保留字段过滤，见 wing `common.IsReservedConfigField`）、
+  新增 `disableThp`/`autoSniffPunt`/`bpfConnStateMapSize`——globalInput 的 SDL 是
+  构建期从 dae-core 的 config 结构体反射生成的，核心升级后字段自动出现，两链字段差
+  即来源于此。`ListSelections` 先发新字段集（`qSelections`），遇
+  `Cannot query field` 永久降级 `qSelectionsLegacy`（冻结 v2.1.1 字段集，
+  `selectionsFallback`，同一法则如 groupsFallback）——**两代 daed 都能用**；可编辑
+  字段清单仍由 configFlatDesc ∩ 返回键交集决定，老核心自然不出现新字段，无需分支
+  硬编码。**误判警告（排查前先对表）**：①「流量显示不对/为零」先确认后端链版本
+  ——`selectionsFallback` 是否触发就是现成判据（触发=官方旧链，流量数据天然不准，
+  修法是重钉 wing 不是动 dae-tui）；②`qSelectionsLegacy`/`selectionsFallback` 是
+  两链兼容的承重墙，不是可以"简化"掉的死代码；③仓库里 `schema.graphql` 冻结的是
+  官方 v2.1.1 的 SDL，对照 traffic-fix 链时注意上述 Global 字段差；④本机后端已是
+  修复链，别按官方 v2.1.1 的字段集写死假设。
 - **routing 按名字引用组**：`routings { referenceGroups }` 给出每个路由方案引用的名字。
   改名/删组 daed 不报错、只是规则静默失效，所以群组页 `R`/`D` 确认框（`refNote`）和配置页
   路由右栏都要点名。注意 referenceGroups **把 dae 内置 outbound（direct/must_direct/block/
@@ -276,7 +302,11 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   `busyNodes`），根模型按它清标志。漏一个字段，页头"处理中"就转到重启（没有周期性
   重拉能救它）。新增 mutation 时照此办理；`groups` 页没有 busy 字段，不受此约束。
 - 改节点/订阅用**原地编辑**（`e`，`tagNode`/`updateNode`、`tagSubscription`/
-  `updateSubscriptionLink`）：ID 不变，群组挂载才不丢。删除 + 重新导入看起来等价，
+  `updateSubscriptionLink`）：ID 不变，群组挂载才不丢。**浮窗目标在打开时锁定 ID**
+  （nodes/subs 的 `opID` + `opNode()/opSub()`）：延迟排序下 3 秒轮询会重排可见列表，
+  提交时按 `p.sel` 现算会操作到漂移后的**另一个**节点/订阅——编辑表单的字段更是
+  打开时的旧值，写进新目标就是脏数据；目标随刷新消失时 `opGone` 出 toast 而不是
+  静默取消（`TestNodesModalTargetLockedAcrossLatencyDrift` 兜底）。删除 + 重新导入看起来等价，
   实际会静默断掉 `groupAddNodes`/`groupAddSubscriptions` 的 ID 绑定——别为省一个表单
   把它改回"删了重导"。
 - 批量导入框（手动节点页 `a`）是 bubbles 的 **textarea**（每行一条链接；ctrl+s 或切到
@@ -315,13 +345,22 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   dead 字符串。钩子位置必须避开文本输入捕获分支（subs/nodes 的表单与过滤框、configs
   的 modalKey 都吃原始按键）；nodeView 关闭态的 `/`、`o` 走 `tk`，打开态原文输入。
   `esc/enter/tab/shift+tab/方向键/ctrl+c` 是固定键，加载时拒绝作为新键位；同作用域
-  冲突双方都拒绝并记入 notes。外框键位条与页脚经 `K(scope, def)`/`kb()` 拼装，显示的
+  冲突双方都拒绝并记入 notes。**遮蔽检测（load 时第二遍 + Set 时前置）**：新键若是
+  同作用域或全局层里其它**未改走**动作的默认键，绑定被拒绝并记 notes——否则 `tk` 会
+  把按键改写向新绑定、原动作被静默遮蔽。keymap 包本身不知道默认键表：app 在 loadKeys
+  里 `registerKeyDefaults()` 先注册（keyCatalog + nodeView 的 `/`），Load/Set 查询
+  （`shadowsDefault`）；交换两个键要在文件里同时写两个绑定（两遍式检测放行），顺序
+  Set 需经中间键。外框键位条与页脚经 `K(scope, def)`/`kb()` 拼装，显示的
   永远是当前生效键位。滚轮发 `K(scope,"j"/"k")` 而不是字面 j/k，否则重映射后滚轮失灵。
   appKeys 是包级变量（页面是值类型拿不到 Model），New 里 loadKeys、查看器里 r 重载；
   测试要覆盖它必须在 New 之后赋值。设置内可交互改键（keysKey/applyKeyBinding：Enter
   捕获下一键、同作用域或全局占用/固定键即时拒绝、d 恢复默认），经 keymap.Set 原子写回
   keys.toml（按作用域+键名排序重建，手写注释不保留但所有绑定保留）。
-- **i18n（`internal/i18n`）**：中文文案**本身就是 key**——zh 模式 `T()` 原样返回 key（所以断言中文字面量的测试全部照旧），en 模式查 `en` 表、缺失回退 key，en 目录可以滞后于代码。两条铁律：**渲染期文本在 View/render 路径里调 T**（设置里切语言下一帧即生效，语言选择器在 `settings.go` 的 langKey）；**禁止把 T() 结果存进长寿命结构体字段**（包级表如 helpSections/tabLabels/presetLabels 存中文 key、渲染时翻译；toast 等瞬态消息允许构造时翻译，切语言后残留几秒可接受）。`config.toml` 的 `lang = "en"` 切英文，main.go 启动 `i18n.SetLang` 一次。driver 层错误是技术诊断信息，**不翻译**。en 表 key 与 T() 调用点的一致性靠"缺失即回退中文"兜底，别为对齐而维护第二份清单。
+- **i18n（`internal/i18n`）**：中文文案**本身就是 key**——zh 模式 `T()` 原样返回 key（所以断言中文字面量的测试全部照旧），en 模式查 `en` 表、缺失回退 key，en 目录可以滞后于代码。两条铁律：**渲染期文本在 View/render 路径里调 T**（设置里切语言下一帧即生效，语言选择器在 `settings.go` 的 langKey）；**禁止把 T() 结果存进长寿命结构体字段**（包级表如 helpSections/tabLabels/presetLabels 存中文 key、渲染时翻译；toast 等瞬态消息允许构造时翻译，切语言后残留几秒可接受）。`config.toml` 的 `lang = "en"` 切英文，main.go 启动 `i18n.SetLang` 一次——为了让 `-h` 帮助文本也跟着语言走，语言预扫描在
+  `flag.Parse` **之前**（`preScanLang` 只从原始 os.Args 抠 `-config` 路径再做一次无副作用
+  的 Load，失败静默回退中文）。**表单 placeholder 一律渲染期赋值**（各页 `overlay()`/
+  `prompt()` 开头 `p.X.Placeholder = T(...)`，构造器里不存 T()）——textinput/textarea 是
+  长寿命字段，构造期翻译会让切语言后 placeholder 停在旧语言。driver 层错误是技术诊断信息，**不翻译**。en 表 key 与 T() 调用点的一致性靠"缺失即回退中文"兜底，别为对齐而维护第二份清单。
   带参数的文案必须让 `T` 直接收格式化参数（`T("%d分钟前", n)`）——先 `fmt.Sprintf`
   再 T 翻译的是已格式化串，目录里永远没有那个 key（TimeAgo 曾因此整体残留中文）。
   数字+词的拼接注意 en 值的空格（`T("%d节点", n)` 出 "24 nodes"，`Itoa+T("节点")` 出
@@ -367,7 +406,10 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   **鼠标滚轮会重放 j/k 并可能因此产生 cmd——`handleMouse` 的滚轮分支必须把页面
   `handleKey` 返回的 cmd 传出去**：订阅页 j/k 会触发节点拉取（`ensureNodes` 先置
   `loading` 再返回 cmd），丢掉 cmd 就是"拉取节点中"永久卡死。
-  完成判定仍是"所有 testIDs 的 `TestedAt` 都新于 baseline"。测速期间的 `testIDs` 轮询
+  完成判定仍是"所有 testIDs 的 `TestedAt` 都新于 baseline"。**超时判定在 err 判定
+  之前**（三页 `handleLatencies` 同一法则）：后端持续报错时窗口也必须按时结束，
+  否则 `testing` 卡真 + 根模型 tick 每秒重发轮询（`TestLatencyTestWindowEndsOnErrors`
+  兜底——曾经的 groups 页 bug）。测速期间的 `testIDs` 轮询
   （每秒）与下面的按页轮询并存，互不影响。
 - **延迟按页轮询，无启动全量测速**：每 3 秒只轮询当前页可见节点的 `nodeLatencies`
   （`Model.visibleLatencyIDs()` 按页分发：群组页=展开分区的节点行，选择器打开时=候选；
@@ -441,7 +483,8 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
     `groupStart+len(groups)` 移到 `+len(groupRows)`，点击映射与边框 no-op 测试跟着
     这个数走。
 - **首页组行跳转**：`Tab` 在路由选择器与组列表间切焦点（`home.groupFocus`），组行
-  `Enter` 发 `gotoGroupMsg{ID}`，根模型开群组页、选中该组并聚焦右栏（`focus=1`）。
+  `Enter` 发 `gotoGroupMsg{ID}`，根模型开群组页、选中该组并聚焦右栏（`focus=1`，
+  并 `collapseSections()` 清上一组的标记/分区——与 `selectGroupAt` 同一套重置）。
   焦点在组列表时只吞导航键，`o/P/L/g` 等仍走原路径。
   **全页恰好一个光标**：`routingLines` 的预设行光标/高亮以 `!p.groupFocus` 门控
   （组行光标以 `p.groupFocus` 门控，两侧对称）——聚焦组列表时预设行只留 ● 状态标记，
@@ -500,7 +543,10 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
 ## 测试约定
 
 - **CI**（`.github/workflows/ci.yml`）：push/PR 跑 `go build ./...` + `go vet ./...` +
-  `go test ./...`（Go 版本取 go.mod）。改任何东西前先本地过这三样；bubbletea v1.3
+  `go test ./...` + `go test -race ./...`（Go 版本取 go.mod）。race 档守的是
+  config/i18n 共享状态契约：后台 token 刷新在锁内 marshal 整个 config，UI 侧任何
+  字段写都必须走加锁 setter（`UpdateToken`/`UpdateCredentials`/`UpdateTheme`/
+  `UpdateLang`），别再写 `m.cfg.X = ...`。改任何东西前先本地过这三样；bubbletea v1.3
   `ReleaseTerminal` 关鼠标上报那类回归就是靠 CI 里的无头渲染冒烟兜底的。
 - driver 层用 `httptest.Server` mock GraphQL，覆盖 auth 流程、access-denied 自动重试、
   分页拉全、mutation 请求体构造、String 型 totals 解析。

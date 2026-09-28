@@ -743,17 +743,21 @@ func (p configsPage) modalLines() []string {
 		}
 
 		rowsH := max0(p.height - 8)
-		if p.scroll > max0(len(lines)-rowsH) {
-			p.scroll = max0(len(lines) - rowsH)
+		// Local clamp: this is a value receiver, so writing p.scroll here
+		// only mutated the render copy — the stored one could stay past the
+		// end until a keypress re-clamped it.
+		scroll := p.scroll
+		if scroll > max0(len(lines)-rowsH) {
+			scroll = max0(len(lines) - rowsH)
 		}
-		if p.scroll < 0 {
-			p.scroll = 0
+		if scroll < 0 {
+			scroll = 0
 		}
-		end := p.scroll + rowsH
+		end := scroll + rowsH
 		if end > len(lines) {
 			end = len(lines)
 		}
-		return lines[p.scroll:end]
+		return lines[scroll:end]
 	}
 	return nil
 }
@@ -1145,15 +1149,17 @@ func (p configsPage) rightLines() []string {
 		end := min(start+rowsH, len(lines))
 		return ui.WithScrollbar(lines[start:end], p.rightW-4, len(lines), start, p.focus == 1)
 	}
-	if p.scroll >= len(lines) {
-		p.scroll = len(lines) - 1
+	// Local clamp, same reason as modalLines: value receiver.
+	scroll := p.scroll
+	if scroll >= len(lines) {
+		scroll = len(lines) - 1
 	}
-	if p.scroll < 0 {
-		p.scroll = 0
+	if scroll < 0 {
+		scroll = 0
 	}
-	end := p.scroll + rowsH
+	end := scroll + rowsH
 	if end > len(lines) {
 		end = len(lines)
 	}
-	return lines[p.scroll:end]
+	return lines[scroll:end]
 }

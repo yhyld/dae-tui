@@ -37,6 +37,11 @@ type subsPage struct {
 	ifld      int
 	cronInput textinput.Model
 	cronOn    bool
+	// opID is the subscription the open modal (delete confirm, cron form,
+	// edit form) targets, pinned for the same reason as nodesPage.opID: a
+	// refresh can move p.sel under an open modal, and the submit must act
+	// on the subscription the user opened it for.
+	opID string
 
 	lat map[string]driver.Latency
 
@@ -52,15 +57,12 @@ type subsPage struct {
 
 func newSubsPage(caps driver.Caps) subsPage {
 	l := textinput.New()
-	l.Placeholder = i18n.T("https://example.com/sub 或 data:… 链接")
 	l.CharLimit = 2048
 	l.Width = 48
 	t := textinput.New()
-	t.Placeholder = i18n.T("标签 (可空)")
 	t.CharLimit = 64
 	t.Width = 32
 	c := textinput.New()
-	c.Placeholder = i18n.T("cron 表达式，如 0 */6 * * *")
 	c.CharLimit = 64
 	c.Width = 32
 	return subsPage{
@@ -121,15 +123,21 @@ func (p *subsPage) handleSubNodes(subID string, nodes []driver.Node, err error) 
 	p.subNodes[subID] = nodes
 }
 
-func (p *subsPage) handleLatencies(lats []driver.Latency) {
+func (p *subsPage) handleLatencies(lats []driver.Latency, err error) {
 	for _, l := range lats {
 		p.lat[l.NodeID] = l
 	}
 	if !p.testing {
 		return
 	}
+	// Same law as groupsPage: the window ends on time even when every poll
+	// errors, so a dead backend can never pin the testing flag (and the
+	// per-second polling that comes with it).
 	if time.Since(p.testStart) > testWindow(len(p.testIDs)) {
 		p.testing = false
+		return
+	}
+	if err != nil {
 		return
 	}
 	for _, id := range p.testIDs {
@@ -213,10 +221,10 @@ func (p *subsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	if p.mode == 2 {
 		switch msg.String() {
 		case "y":
-			s := p.cur()
+			s := p.opSub()
 			if s == nil {
 				p.mode = 0
-				return nil
+				return opGone(i18n.T("删除订阅"))
 			}
 			p.mode = 0
 			return subMutateCmd(d, subMutation{kind: 2, ids: []string{s.ID}}, i18n.T("删除订阅"))
@@ -243,6 +251,11 @@ func (p *subsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		if !p.caps.Subscriptions {
 			return unsupportedCmd(i18n.T("更新订阅"))
 		}
+		// Busy guard: pressing u again mid-update would fire a second
+		// server-side refresh for the same subscription.
+		if p.busy {
+			return nil
+		}
 		if s := p.cur(); s != nil {
 			p.busy = true
 
@@ -256,6 +269,7 @@ func (p *subsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		if s := p.cur(); s != nil && p.focus == 0 {
 			p.mode = 3
 			p.ifld = 0
+			p.opID = s.ID
 			p.cronInput.SetValue(s.CronExp)
 			p.cronOn = s.CronEnable
 			p.cronInput.Focus()
@@ -330,8 +344,9 @@ func (p *subsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			if !p.caps.Subscriptions {
 				return unsupportedCmd(i18n.T("删除订阅"))
 			}
-			if p.cur() != nil {
+			if s := p.cur(); s != nil {
 				p.mode = 2
+				p.opID = s.ID
 			}
 		case "e":
 			if !p.caps.Subscriptions {
@@ -401,10 +416,13 @@ func (p *subsPage) cronKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			return nil
 		}
 		exp := strings.TrimSpace(p.cronInput.Value())
-		s := p.cur()
+		s := p.opSub()
 		p.mode = 0
 		p.cronInput.Blur()
-		if s == nil || exp == "" {
+		if s == nil {
+			return opGone(i18n.T("定时刷新"))
+		}
+		if exp == "" {
 			return nil
 		}
 		p.busy = true
@@ -524,6 +542,7 @@ func (p *subsPage) addFormKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 func (p *subsPage) openEdit(s *driver.Subscription) tea.Cmd {
 	p.mode = 4
 	p.ifld = 0
+	p.opID = s.ID
 	p.tag.SetValue(s.Tag)
 	p.link.SetValue(s.Link)
 	p.tag.Focus()
@@ -548,10 +567,10 @@ func (p *subsPage) editFormKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		}
 		return nil
 	case "enter":
-		s := p.cur()
+		s := p.opSub()
 		if s == nil {
 			p.mode = 0
-			return nil
+			return opGone(i18n.T("编辑订阅"))
 		}
 		tag := strings.TrimSpace(p.tag.Value())
 		link := strings.TrimSpace(p.link.Value())
@@ -610,6 +629,11 @@ func (p subsPage) View() string {
 }
 
 func (p subsPage) overlay() *overlaySpec {
+	// Placeholders re-translate here rather than living in the constructor:
+	// the inputs outlive a settings-window language switch.
+	p.link.Placeholder = i18n.T("https://example.com/sub 或 data:… 链接")
+	p.tag.Placeholder = i18n.T("标签 (可空)")
+	p.cronInput.Placeholder = i18n.T("cron 表达式，如 0 */6 * * *")
 	switch p.mode {
 	case 1:
 		return &overlaySpec{lines: []string{
@@ -621,7 +645,7 @@ func (p subsPage) overlay() *overlaySpec {
 			ui.HelpStyle.Render(i18n.T(" Tab 切换字段  Enter 提交  esc 取消")),
 		}}
 	case 3:
-		if s := p.cur(); s != nil {
+		if s := p.opSub(); s != nil {
 			on := ui.ErrorStyle.Render(i18n.T("停用"))
 			if p.cronOn {
 				on = ui.OKStyle.Render(i18n.T("启用"))
@@ -640,7 +664,7 @@ func (p subsPage) overlay() *overlaySpec {
 			}}
 		}
 	case 4:
-		if s := p.cur(); s != nil {
+		if s := p.opSub(); s != nil {
 			return &overlaySpec{lines: []string{
 				ui.TitleStyle.Render(i18n.T(" 编辑订阅 · ") + s.Tag),
 				"",
@@ -656,10 +680,21 @@ func (p subsPage) overlay() *overlaySpec {
 }
 
 func (p subsPage) modalLines() []string {
-	if s := p.cur(); s != nil {
+	if s := p.opSub(); s != nil {
 		return ui.BoxLines(true, i18n.T("确认删除订阅 \"")+s.Tag+"\"? (y/n)")
 	}
 	return []string{ui.HelpStyle.Render(i18n.T("（无订阅）"))}
+}
+
+// opSub resolves the modal's locked target ID against the current
+// subscription list.
+func (p *subsPage) opSub() *driver.Subscription {
+	for i := range p.subs {
+		if p.subs[i].ID == p.opID {
+			return &p.subs[i]
+		}
+	}
+	return nil
 }
 
 func (p subsPage) leftLines() []string {

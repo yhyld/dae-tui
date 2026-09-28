@@ -38,6 +38,11 @@ type logsViewer struct {
 	following bool // a follower process is streaming
 	loading   bool // a spawn is in flight
 	stopped   bool // the follower exited on its own (unit gone, journal error)
+	// wantFollow is the user's latest follow intent. A cancel that lands
+	// while a spawn is still in flight must win over that spawn: without
+	// it, the late logsSpawnMsg would flip following back on and the new
+	// follower would start streaming over the pause.
+	wantFollow bool
 	err       string
 	lines     []string
 	scroll    int // index of the first visible line

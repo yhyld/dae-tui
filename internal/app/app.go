@@ -251,7 +251,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.groups.focus = 1
-		m.groups.rc = 0
+		// Same reset selectGroupAt does when switching groups: marks and
+		// section state from the previous group must not leak into this one.
+		m.groups.collapseSections()
 		m.groups.rebuild()
 		return m, nil
 
@@ -264,7 +266,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		m.logs.open, m.logs.following, m.logs.loading = true, true, false
+		// An open/reload spawn implies follow intent; a resume spawn ('f')
+		// inherits it, so a cancel that landed mid-flight still wins.
+		if msg.fresh {
+			m.logs.wantFollow = true
+		}
+		m.logs.open, m.logs.loading = true, false
 		m.logs.stopped, m.logs.err = false, ""
 		if msg.fresh {
 			m.logs.lines, m.logs.scroll = nil, 0
@@ -274,6 +281,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// reads ever again. Kill on replace (idempotent — r already did).
 		m.logs.kill()
 		m.logs.proc = msg.proc
+		if !m.logs.wantFollow {
+			// The user paused while this spawn was in flight: kill the
+			// process it produced and drop it — re-arming its read chain
+			// would stream lines over the pause.
+			m.logs.kill()
+			m.logs.proc = nil
+			return m, nil
+		}
+		m.logs.following = true
 		return m, logsWaitCmd(msg.proc.lines)
 
 	case logsLineMsg:
@@ -346,6 +362,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		if msg.Err == nil {
 			m.showToast(m.nodes.importToast())
+		} else if m.page != pageNodes {
+			// The failure lands in the nodes page's import panel; from any
+			// other page it would read as the busy spinner dying silently.
+			m.showErrToast(i18n.T("✗ 导入后刷新节点列表: ") + shortErr(msg.Err))
 		}
 		return m, nil
 
@@ -369,8 +389,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.groups.handleLatencies(msg.Lats, msg.Err)
 		m.home.handleLatencies(msg.Lats)
-		m.subs.handleLatencies(msg.Lats)
-		m.nodes.handleLatencies(msg.Lats)
+		m.subs.handleLatencies(msg.Lats, msg.Err)
+		m.nodes.handleLatencies(msg.Lats, msg.Err)
 		return m, nil
 
 	case subsMsg:
@@ -421,6 +441,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case clipboardMsg:
 		if msg.OK {
 			m.showToast(i18n.T("✓ 已复制") + msg.What + " (OSC 52)")
+		} else if msg.Err != nil {
+			m.showErrToast(i18n.T("✗ 复制失败：") + msg.What + " · " + msg.Err.Error())
 		} else {
 			m.showErrToast(i18n.T("✗ 复制失败：当前输出不是终端"))
 		}
@@ -595,7 +617,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "r":
 			m.fatal = nil
 			m.phase = phaseBoot
-			return m, tea.Batch(tickCmd(m.ticks), bootCmd(m.drv, cfgHasAuth(m.cfg)))
+			// No extra tickCmd here: the per-second chain re-arms in every
+			// phase (see the tickMsg handler), so batching another one would
+			// double every poll — and stack with each retry.
+			return m, bootCmd(m.drv, cfgHasAuth(m.cfg))
 		}
 		return m, nil
 
@@ -658,7 +683,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.logs.open {
 		switch msg.String() {
 		case "esc", "q":
-			m.logs.open, m.logs.following = false, false
+			m.logs.open, m.logs.following, m.logs.wantFollow = false, false, false
 			m.logs.kill()
 			return m, nil
 		case "j", "down":
@@ -671,11 +696,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.logs.scroll = len(m.logs.lines)
 		case "f":
 			if m.logs.following || m.logs.loading {
-				m.logs.following, m.logs.loading = false, false
+				m.logs.following, m.logs.loading, m.logs.wantFollow = false, false, false
 				m.logs.kill()
 				return m, nil
 			}
-			m.logs.loading = true
+			m.logs.loading, m.logs.wantFollow = true, true
 			return m, logsSpawnCmd(0, false)
 		case "r":
 			m.logs.loading = true
@@ -842,7 +867,10 @@ func (m Model) click(x, y int) (tea.Model, tea.Cmd) {
 		m.helpScroll = clampHelpScroll(helpSectionStart(m.page), helpWinBody(m.height-6))
 		return m, nil
 	}
-	if y < 5 || cx < 0 {
+	if y < 5 || y >= m.height-2 || cx < 0 {
+		// y >= height-2 is the reserved toast line (the frame's bottom
+		// border above it already opened help): mapping it into the page
+		// would select whatever row happens to sit at that index.
 		return m, nil
 	}
 	row := y - 5

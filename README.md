@@ -101,7 +101,9 @@ ANSI-256 序号如 `"62"` 或 `"#4f9cf9"`，空/非法用默认值）与 `theme 
 作用域（global/home/groups/subs/nodes/configs），等号左边是默认键（即功能），右边是
 新键（bubbletea 键名，如 `"j"`、`"ctrl+n"`、`"F5"`）。被改走的默认键在该作用域内失
 效，方向键等固定同义词仍然可用；`esc`/`enter`/`tab`/方向键/`ctrl+c` 是固定键，不能
-作为新键位；同作用域两个动作映射到同一个键会被一起拒绝并记入警告。设置窗口（`P` →
+作为新键位；同作用域两个动作映射到同一个键会被一起拒绝并记入警告；**新键若是同作用
+域或全局层里其它未改走动作的默认键也会被拒绝**（否则会静默遮蔽那个动作——要交换两
+个键，把两个绑定写进同一份文件即可）。设置窗口（`P` →
 快捷键）可直接改键：`j/k` 选中动作、`Enter` 后按下新键即时生效并写回 keys.toml
 （绑定回默认键或按 `d` 即恢复默认），加载警告显示在顶部；外部改完文件按 `r` 重载。
 外框键位条与各页脚显示的都是当前生效的键位。
@@ -303,3 +305,16 @@ daed 与其后端 dae-wing 已于 2026-09-24 归档，v2.1.1 为最终版本（b
 其 GraphQL API 从此冻结：好处是永远不会破坏变更，坏处是上游不再有安全修复。本工具按
 v2.1.1 schema 开发（SDL 已固化在仓库中做回归对照）。dae 本体仍在活跃维护；若未来迁移
 到裸 dae，见上文 Phase 2 计划。
+
+### 流量统计需要重钉过 wing 的 daed（官方 v2.1.1 二进制数据不准）
+
+官方 daed v2.1.1 的 git 子模块钉的是**旧版 dae-wing**（`dc50308`，dae-core
+`85a1fc3`）——最后一次发版时上游的流量统计修复尚未进入钉版。这条链上
+`runtimeOverview` 的 `uploadTotal`/`downloadTotal` **字段存在但数据不对**，本工具
+首页的实时速率、流量图表与累计数字因此失真。这是后端钉版问题，不是本工具的 bug。
+
+解决：把 daed 仓库的 wing 子模块重钉到包含修复的提交（`b089b56`，"bump dae-core
+to v2.1.1 and follow its control plane API"，dae-core `dbae2e8` 或更新的 nightly），
+重新构建 daed。两代后端本工具都直接可用：新链 `globalInput` 的字段差
+（新增 `disableThp`/`autoSniffPunt`/`bpfConnStateMapSize`、移除 `soMarkFromDaeSet`）
+由驱动自动探测并切换查询集，无需任何配置。

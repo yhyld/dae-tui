@@ -197,7 +197,7 @@ func (p *groupsPage) pickerNavKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			choice := policyChoices[p.pickCursor]
 			p.mode = pickNone
 			return groupMutateCmd(d, groupMutation{kind: 6, groupID: g.ID, policy: choice.name},
-				g.Name+i18n.T(" 策略改为 ")+choice.label)
+				g.Name+i18n.T(" 策略改为 ")+i18n.T(choice.label))
 		}
 	}
 	return nil

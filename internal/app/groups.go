@@ -92,7 +92,6 @@ type trow struct {
 
 func newGroupsPage(caps driver.Caps) groupsPage {
 	ti := textinput.New()
-	ti.Placeholder = i18n.T("名称")
 	ti.CharLimit = 64
 	ti.Width = 32
 	return groupsPage{
@@ -255,17 +254,20 @@ func (p *groupsPage) handleCandidates(msg attachCandidatesMsg) {
 }
 
 func (p *groupsPage) handleLatencies(lats []driver.Latency, err error) {
-	if err != nil {
-		return
-	}
 	for _, l := range lats {
 		p.lat[l.NodeID] = l
 	}
 	if !p.testing {
 		return
 	}
+	// The timeout check comes before the error check: a backend that keeps
+	// failing must still end the window, otherwise testing stays true and
+	// the root model's tick re-fires latenciesCmd every second forever.
 	if time.Since(p.testStart) > testWindow(len(p.testIDs)) {
 		p.testing = false
+		return
+	}
+	if err != nil {
 		return
 	}
 	for _, id := range p.testIDs {
@@ -417,6 +419,9 @@ func (p *groupsPage) selectGroupAt(next int) {
 }
 
 func (p groupsPage) overlay() *overlaySpec {
+	// Placeholders re-translate here rather than living in the constructor:
+	// the input outlives a settings-window language switch.
+	p.input.Placeholder = i18n.T("名称")
 	switch p.mode {
 	case inputCreate:
 		return &overlaySpec{lines: []string{

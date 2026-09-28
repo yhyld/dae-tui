@@ -116,9 +116,11 @@ func sectionLines(s helpSection) []string {
 	for _, r := range s.rows {
 		// The key column holds CJK entries too (滚轮, 右栏聚焦, …) — they are
 		// catalog keys like the descriptions.
-		key := ui.SelectedStyle.Render(ui.PadRight(i18n.T(r[0]), 14))
+		// 16 fits the widest key ("Tab / shift+Tab"); at 14 it truncated
+		// into "Tab / shift+…" and read as a broken entry.
+		key := ui.SelectedStyle.Render(ui.PadRight(i18n.T(r[0]), 16))
 		if r[0] == "-" {
-			key = ui.HelpStyle.Render(ui.PadRight(r[0], 14))
+			key = ui.HelpStyle.Render(ui.PadRight(r[0], 16))
 		}
 		lines = append(lines, "  "+key+ui.HelpStyle.Render(i18n.T(r[1])))
 	}

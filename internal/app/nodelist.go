@@ -75,7 +75,6 @@ const (
 
 func newNodeView() nodeView {
 	ti := textinput.New()
-	ti.Placeholder = i18n.T("名称/协议/标签/地址")
 	ti.CharLimit = 64
 	ti.Width = 20
 	return nodeView{input: ti}
@@ -199,6 +198,8 @@ func (v *nodeView) sortTitle() string {
 
 func (v *nodeView) prompt() string {
 	if v.open {
+		// Re-translate per render: the input outlives a language switch.
+		v.input.Placeholder = i18n.T("名称/协议/标签/地址")
 		return " / " + v.input.View()
 	}
 	if v.applied != "" {

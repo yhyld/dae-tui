@@ -47,6 +47,10 @@ func TimeAgo(t time.Time) string {
 	switch {
 	case d < 30*time.Second:
 		return i18n.T("刚刚")
+	// Seconds down to a full minute: the old "int(d.Minutes())" branch read
+	// "0分钟前" for anything between 30s and 60s.
+	case d < time.Minute:
+		return i18n.T("%d秒前", int(d.Seconds()))
 	case d < time.Hour:
 		return i18n.T("%d分钟前", int(d.Minutes()))
 	case d < 24*time.Hour:
@@ -56,16 +60,16 @@ func TimeAgo(t time.Time) string {
 	}
 }
 
-// Span renders a duration as Chinese text for a window label ("近 3 分钟").
+// Span renders a duration as text for a window label ("近 3 分钟").
 // TimeAgo answers "how long ago"; this answers "how wide is the window".
 func Span(d time.Duration) string {
 	switch {
 	case d < time.Minute:
-		return fmt.Sprintf("%d 秒", int(d.Seconds()))
+		return i18n.T("%d 秒", int(d.Seconds()))
 	case d < time.Hour:
-		return fmt.Sprintf("%d 分钟", int(d.Minutes()))
+		return i18n.T("%d 分钟", int(d.Minutes()))
 	default:
-		return fmt.Sprintf("%.1f 小时", d.Hours())
+		return i18n.T("%.1f 小时", d.Hours())
 	}
 }
 

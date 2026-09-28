@@ -58,6 +58,13 @@ func versionString() string {
 }
 
 func main() {
+	// The flag help strings below render at flag definition time, so the
+	// language must come from the config file before the flags are
+	// declared. Only the -config path is pre-scanned from the raw command
+	// line; the full load happens after flag.Parse as before.
+	if lang := preScanLang(); lang != "" {
+		i18n.SetLang(lang)
+	}
 	cfgPathFlag := flag.String("config", "", i18n.T("配置文件路径 (默认 ~/.config/dae-tui/config.toml)"))
 	endpointFlag := flag.String("endpoint", "", i18n.T("daed GraphQL 端点 (默认 http://127.0.0.1:2023/graphql)"))
 	probe := flag.Bool("probe", false, i18n.T("非交互自检：连接后端并打印诊断信息后退出"))
@@ -84,6 +91,9 @@ func main() {
 	if err != nil {
 		fatal(i18n.T("加载配置失败: %v"), err)
 	}
+	// Authoritative application after the real load; the pre-scan above only
+	// existed to localize the flag help strings.
+	i18n.SetLang(cfg.Lang)
 
 	theme, found := config.ResolveTheme(cfg.Theme, cfg.Accent, cfg.Border, cfg.Dim)
 	if cfg.Theme != "" && !found {
@@ -133,6 +143,47 @@ func main() {
 	if _, err := p.Run(); err != nil {
 		fatal(i18n.T("启动 TUI 失败: %v"), err)
 	}
+}
+
+// preScanLang reads the language from the config file before the flags are
+// declared, so -h help text comes out in the configured language. Load is
+// side-effect free (a missing file just yields defaults), so a failed
+// pre-scan silently falls back to Chinese — the full load below reports
+// real errors.
+func preScanLang() string {
+	path := ""
+	args := os.Args[1:]
+	for i, a := range args {
+		var val string
+		switch {
+		case a == "-config" || a == "--config":
+			if i+1 < len(args) {
+				val = args[i+1]
+			}
+		case strings.HasPrefix(a, "-config="):
+			val = strings.TrimPrefix(a, "-config=")
+		case strings.HasPrefix(a, "--config="):
+			val = strings.TrimPrefix(a, "--config=")
+		default:
+			continue
+		}
+		if val != "" {
+			path = val
+			break
+		}
+	}
+	if path == "" {
+		p, err := config.Path()
+		if err != nil {
+			return ""
+		}
+		path = p
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return ""
+	}
+	return cfg.Lang
 }
 
 func loadCfg(path, endpoint string) (*config.Config, error) {

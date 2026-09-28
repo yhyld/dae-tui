@@ -82,16 +82,19 @@ func (c *Client) Do(ctx context.Context, query string, vars map[string]any, out 
 	}
 	hookErr, ok := c.reauthenticate(ctx)
 	if !ok {
-		return err // request ctx expired while waiting for the refresh
+		// The request ctx expired while waiting for the refresh. Callers
+		// classify results with errors.Is(…, driver.ErrNeedAuth), so the
+		// bare "access denied" must still carry the sentinel here.
+		return fmt.Errorf("%w: %w (re-auth wait: %w)", driver.ErrNeedAuth, err, ctx.Err())
 	}
 	if hookErr != nil {
-		return fmt.Errorf("%w: %v", driver.ErrNeedAuth, hookErr)
+		return fmt.Errorf("%w: %w", driver.ErrNeedAuth, hookErr)
 	}
 	err = c.roundTrip(ctx, query, vars, out)
 	if isAccessDenied(err) {
 		// The refresh succeeded but the replay is still denied: the session
 		// is not recoverable with the stored credentials.
-		return fmt.Errorf("%w: %v", driver.ErrNeedAuth, err)
+		return fmt.Errorf("%w: %w", driver.ErrNeedAuth, err)
 	}
 	return err
 }

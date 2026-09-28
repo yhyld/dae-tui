@@ -24,9 +24,29 @@ func K(scope, def string) string {
 	return appKeys.Key(scope, def)
 }
 
-// loadKeys loads keys.toml from the config's directory at startup.
+// loadKeys loads keys.toml from the config's directory at startup. The
+// default-key registry is (re)registered before every load: Load consults
+// it to reject bindings whose new key would shadow a still-live default of
+// the same scope or of the global layer.
 func loadKeys(cfgPath string) {
+	registerKeyDefaults()
 	appKeys = keymap.Load(keymap.Path(cfgPath))
+}
+
+// registerKeyDefaults feeds keymap the per-scope default keys the dispatch
+// switches actually handle (the viewer catalog, plus the nodeView filter
+// keys it shares with those scopes).
+func registerKeyDefaults() {
+	byScope := map[string][]string{}
+	for _, e := range keyCatalog {
+		byScope[e.scope] = append(byScope[e.scope], e.def)
+	}
+	for _, scope := range []string{keymap.Groups, keymap.Subs, keymap.Nodes} {
+		byScope[scope] = append(byScope[scope], "/") // nodeView filter
+	}
+	for scope, defs := range byScope {
+		keymap.RegisterDefaults(scope, defs)
+	}
 }
 
 // kb composes a footer fragment: the key an action currently lives on plus
@@ -76,6 +96,7 @@ var keyCatalog = []keyEntry{
 	{keymap.Groups, "n", "加节点"},
 	{keymap.Groups, "x", "移除订阅/节点"},
 	{keymap.Groups, "o", "排序"},
+	{keymap.Groups, "/", "过滤"},
 	{keymap.Groups, "G", "加入群组"},
 	// subs
 	{keymap.Subs, "j", "移动"},
@@ -91,6 +112,7 @@ var keyCatalog = []keyEntry{
 	{keymap.Subs, "t", "测速（全部可见）"},
 	{keymap.Subs, "T", "测速（选中）"},
 	{keymap.Subs, "o", "排序"},
+	{keymap.Subs, "/", "过滤"},
 	// nodes
 	{keymap.Nodes, "j", "移动"},
 	{keymap.Nodes, "k", "移动"},
@@ -103,6 +125,7 @@ var keyCatalog = []keyEntry{
 	{keymap.Nodes, "t", "测速（全部）"},
 	{keymap.Nodes, "T", "测速（选中）"},
 	{keymap.Nodes, "o", "排序"},
+	{keymap.Nodes, "/", "过滤"},
 	{keymap.Nodes, "G", "加入群组"},
 	// configs
 	{keymap.Configs, "j", "移动"},

@@ -60,8 +60,11 @@ func (d *Driver) BuildRoutingPreset(id, proxyGroup string) (string, error) {
 // validGroupName reports whether name can appear as a DSL outbound. Group
 // names come from the backend and are usually plain, but a name with spaces
 // or quotes would silently produce unparseable DSL — refuse it here instead.
+// A name equal to a builtin outbound is refused too: the generated
+// "-> name" would route to the builtin instead of the group, and the result
+// would read back as custom rather than as the preset.
 func validGroupName(name string) bool {
-	if name == "" {
+	if name == "" || builtinOutbounds[name] {
 		return false
 	}
 	for _, r := range name {

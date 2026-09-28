@@ -169,15 +169,17 @@ var settingsItems = []settingsItem{
 
 func newSettings() settings {
 	s := settings{version: Version}
-	s.pwCur = newPasswordInput(i18n.T("当前密码"))
-	s.pwNew = newPasswordInput(i18n.T("新密码 (至少6位, 含字母和数字)"))
-	s.pwRepeat = newPasswordInput(i18n.T("确认新密码"))
+	s.pwCur = newPasswordInput()
+	s.pwNew = newPasswordInput()
+	s.pwRepeat = newPasswordInput()
 	return s
 }
 
-func newPasswordInput(placeholder string) textinput.Model {
+// newPasswordInput builds a password field without baking in a translated
+// placeholder — the sub-password form re-translates it at render time, so a
+// settings-window language switch shows through immediately.
+func newPasswordInput() textinput.Model {
 	ti := textinput.New()
-	ti.Placeholder = placeholder
 	ti.EchoMode = textinput.EchoPassword
 	ti.EchoCharacter = '•'
 	ti.CharLimit = 128
@@ -270,7 +272,10 @@ func (m *Model) openThemePicker() {
 	}
 	s.themeActive = m.cfg.Theme
 	if s.themeActive == "" {
-		s.themeActive = i18n.T("默认")
+		// The builtin's name is the literal "默认" — translating here would
+		// break the t.Name comparison below in English mode (no theme would
+		// ever match its own stored name).
+		s.themeActive = "默认"
 	}
 	s.themeCur = 0
 	for i, t := range s.themes {
@@ -302,8 +307,7 @@ func (m *Model) themeKey(msg tea.KeyMsg) tea.Cmd {
 			return nil
 		}
 		t := s.themes[s.themeCur]
-		m.cfg.Theme = t.Name
-		if err := m.cfg.Save(m.cfgPath); err != nil {
+		if err := m.cfg.UpdateTheme(m.cfgPath, t.Name); err != nil {
 			m.showErrToast(i18n.T("✗ 保存主题: ") + shortErr(err))
 			return nil
 		}
@@ -469,6 +473,10 @@ func (s settings) overlay() *overlaySpec {
 		return &overlaySpec{lines: append(lines,
 			ui.HelpStyle.Render(i18n.T(" j/k 选择  Enter 确认  esc 返回")))}
 	case subPwForm:
+		// Placeholders re-translate per render (see newPasswordInput).
+		s.pwCur.Placeholder = i18n.T("当前密码")
+		s.pwNew.Placeholder = i18n.T("新密码 (至少6位, 含字母和数字)")
+		s.pwRepeat.Placeholder = i18n.T("确认新密码")
 		lines := []string{ui.TitleStyle.Render(i18n.T(" 修改密码")), ""}
 		for i, f := range []struct {
 			label string
@@ -556,8 +564,7 @@ func (m *Model) langKey(msg tea.KeyMsg) tea.Cmd {
 		}
 		e := langEntries[s.langCur]
 		i18n.SetLang(e.code)
-		m.cfg.Lang = e.code
-		if err := m.cfg.Save(m.cfgPath); err != nil {
+		if err := m.cfg.UpdateLang(m.cfgPath, e.code); err != nil {
 			m.showErrToast("✗ " + i18n.T("保存语言: ") + shortErr(err))
 			return nil
 		}
@@ -700,10 +707,18 @@ func (m *Model) applyKeyBinding(newKey string) tea.Cmd {
 		}
 	}
 	// A hand-written binding the catalog does not know still occupies the
-	// key — say so instead of silently shadowing it.
+	// key — say so instead of silently shadowing it. The global scope must
+	// be checked too: its dispatch runs ahead of every page's, so a global
+	// override on the key would shadow the page action being created here.
 	if def, ok := appKeys.BoundTo(e.scope, newKey); ok && def != e.def {
 		s.keysErr = newKey + i18n.T(" 已被键位文件中的 ") + e.scope + "/" + def + i18n.T(" 占用")
 		return nil
+	}
+	if e.scope != keymap.Global {
+		if def, ok := appKeys.BoundTo(keymap.Global, newKey); ok {
+			s.keysErr = newKey + i18n.T(" 已被键位文件中的 ") + keymap.Global + "/" + def + i18n.T(" 占用")
+			return nil
+		}
 	}
 	if err := appKeys.Set(keymap.Path(m.cfgPath), e.scope, e.def, newKey); err != nil {
 		s.keysErr = i18n.T("保存失败: ") + shortErr(err)
@@ -757,6 +772,12 @@ func keysLayout(keysErr string) (head []string, entryLine []int, total int) {
 	return head, entryLine, total
 }
 
+// keysRowW is the selection bar width in the keys viewer: wide enough for
+// the longest row (cursor mark + 12-col key column + description) and
+// deliberately constant, so the overlay's content-sized box does not
+// breathe as the cursor moves between rows.
+const keysRowW = 58
+
 // keysOverlay renders the catalog grouped by scope with a cursor: the live
 // key column (what actually works right now), the action description, and
 // the rebind state riding on the cursor row.
@@ -791,7 +812,7 @@ func (s settings) keysOverlay() *overlaySpec {
 		row := " " + mark + style.Render(ui.PadRight(K(e.scope, e.def), 12)) +
 			ui.HelpStyle.Render(i18n.T(e.desc))
 		if i == cur {
-			row = ui.HiRow(row, 58, true)
+			row = ui.HiRow(row, keysRowW, true)
 			if s.keysEdit {
 				row += ui.SelectedStyle.Render(i18n.T("  ← 按新键…"))
 			}

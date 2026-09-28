@@ -884,9 +884,9 @@ func (p homePage) trafficRows(w int) []string {
 	}
 	rates := " " + up + strings.Repeat(" ", gap) + down
 	charts := lipgloss.JoinHorizontal(lipgloss.Top,
-		ui.Sparkline(s.UpSeries, cw, chartH, green, ""),
+		ui.Sparkline(s.UpSeries, cw, chartH, green),
 		" ",
-		ui.Sparkline(s.DownSeries, cw, chartH, yellow, ""))
+		ui.Sparkline(s.DownSeries, cw, chartH, yellow))
 
 	head := ui.HelpStyle.Render(i18n.T("近 10s")) + peakNote
 	tail := ui.HelpStyle.Render(i18n.T("连接 %d · UDP %d", s.Conns, s.UDPSessions))

@@ -125,6 +125,26 @@ func (c *Config) UpdateCredentials(path, username, password string) error {
 	return c.saveLocked(path)
 }
 
+// UpdateTheme replaces the named theme preference and persists it. The field
+// write must share the lock with saveLocked's marshal: background token
+// refreshes save the whole config concurrently, so an unlocked write races
+// their read of every field.
+func (c *Config) UpdateTheme(path, theme string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Theme = theme
+	return c.saveLocked(path)
+}
+
+// UpdateLang replaces the UI language preference and persists it. Locked for
+// the same reason as UpdateTheme.
+func (c *Config) UpdateLang(path, lang string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Lang = lang
+	return c.saveLocked(path)
+}
+
 // ClearSession wipes every stored credential and persists (logout).
 func (c *Config) ClearSession(path string) error {
 	c.mu.Lock()
@@ -163,5 +183,15 @@ func (c *Config) saveLocked(path string) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), path)
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return err
+	}
+	// Persist the rename itself: on some filesystems a crash right after
+	// the rename can otherwise lose the directory entry. Best-effort — a
+	// failure to sync the dir is not worth failing the save over.
+	if d, err := os.Open(dir); err == nil {
+		d.Sync()
+		d.Close()
+	}
+	return nil
 }
