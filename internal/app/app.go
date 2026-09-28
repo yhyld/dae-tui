@@ -79,6 +79,10 @@ type Model struct {
 	refreshing  bool
 	refreshLeft int
 	refreshAt   time.Time
+
+	// connFails counts consecutive probe failures (traffic and status
+	// polls); any success resets it. Trip level => the top bar badge.
+	connFails int
 }
 
 const (
@@ -86,6 +90,12 @@ const (
 	minTermH = 12
 
 	doubleClickWindow = 400 * time.Millisecond
+
+	// connFailTrip is how many consecutive probe failures mark the backend
+	// as disconnected. One dropped poll is noise; three in a row is a down
+	// tunnel (≈3s on the 1s traffic heartbeat, ≈15s on the 5s status-only
+	// fallback of a driver without TrafficStats).
+	connFailTrip = 3
 )
 
 // errUnsupported is the toast a gated key produces on a backend whose
@@ -320,6 +330,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case statusMsg:
 		if msg.Err == nil {
 			m.status = msg.Status
+			m.connFails = 0
+		} else {
+			m.connFails++
 		}
 		return m, nil
 
@@ -340,8 +353,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.home.apiTook = msg.Took
 		if msg.Err == nil {
 			m.home.update(msg.Snap)
+			m.connFails = 0
 		} else {
 			m.home.err = msg.Err
+			m.connFails++
 		}
 		return m, nil
 
@@ -387,10 +402,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for _, l := range msg.Lats {
 			m.latHist.add(l)
 		}
+		wasTesting := m.anyTesting()
 		m.groups.handleLatencies(msg.Lats, msg.Err)
 		m.home.handleLatencies(msg.Lats)
 		m.subs.handleLatencies(msg.Lats, msg.Err)
 		m.nodes.handleLatencies(msg.Lats, msg.Err)
+		// Ring once when the aggregate spinner ("测速中 x/y") disappears:
+		// in-page latency numbers are the in-band feedback, the bell is the
+		// out-of-band channel for the user who tabbed away.
+		if wasTesting && !m.anyTesting() {
+			return m, testDoneNotifyCmd()
+		}
 		return m, nil
 
 	case subsMsg:
@@ -1060,6 +1082,14 @@ func (m Model) statusBar() string {
 	if !m.status.Running {
 		run = ui.ErrorStyle.Render(i18n.T("○ 未运行"))
 	}
+	down := m.connFails >= connFailTrip
+	if down {
+		// The last known run state is stale while the link is down; the
+		// honest badge is the link itself. The refresh key doubles as the
+		// manual retry — its effective binding is what the badge names.
+		run = ui.ErrorStyle.Render(i18n.T("⚠ 连接断开") + " · " +
+			K(keymap.Global, "r") + " " + i18n.T("重试"))
+	}
 	mod := ""
 	if m.status.Modified {
 		mod = ui.ErrorStyle.Render(i18n.T(" ⚠ 需重载 (A)"))
@@ -1067,7 +1097,8 @@ func (m Model) statusBar() string {
 	left := ui.TitleStyle.Render("dae-tui") + ui.HelpStyle.Render(" ("+shortEndpoint(m.cfg.Endpoint)+")") +
 		"  " + run + ui.HelpStyle.Render(" dae "+m.status.Version) + mod
 	right := ""
-	if m.caps.TrafficStats {
+	if m.caps.TrafficStats && !down {
+		// Rates frozen at the moment the link died would read as current.
 		s := m.home.snap
 		right = ui.HelpStyle.Render("↑" + ui.Rate(s.UpRate) + " ↓" + ui.Rate(s.DownRate))
 	}

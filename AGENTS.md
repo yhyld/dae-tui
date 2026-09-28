@@ -339,6 +339,15 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   `refreshing` 并弹 `✓ 已刷新` toast（完成无提示会被当成死键），顶栏 `spinSuffix`
   期间显示"刷新中"；回复丢了的兜底是 tickMsg 里的 `refreshStale()`（15s，清零并弹
   超时 toast），没有独立定时器。
+- **断线徽章**（`connFails`/`connFailTrip`）：traffic（1s 心跳）与 status（5s 轮询）
+  两个探测的失败都计数、任一成功清零，连续 `connFailTrip`=3 次失败即顶栏状态行
+  `⚠ 连接断开 · <刷新键> 重试`（红色，**顶替**"● 运行中/○ 未运行"——链接断开时
+  运行态是陈词，徽章同时**隐藏右侧冻结速率**，死链上显示速率会被读成当前值）。
+  `ErrNeedAuth` 不参与计数（`msgAuthErr` 在进 switch 前就转去 phaseLogin）。
+  恢复是自动的（探测成功即清零），`r` 是手动重试且 `forceRefresh` 本身含
+  status+traffic 探测——**别给断线另造重试入口**。`!TrafficStats` 的后端只有
+  status 探测（15s 才到阈值），这是降级路径不是 bug。
+  `TestDisconnectBadgeAfterProbeFailures` 兜底。
 - **键位重映射（`internal/keymap` + `app/keybinds.go`）**：动作以"作用域+默认键"标识
   （如 groups/j），keys.toml（config.toml 同目录）按节覆盖默认键；**分发 switch 仍读
   默认键名**——`tk(scope, pressed)` 在各页分发点把按键改写回规范名，改走的默认键返回
@@ -411,6 +420,12 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   否则 `testing` 卡真 + 根模型 tick 每秒重发轮询（`TestLatencyTestWindowEndsOnErrors`
   兜底——曾经的 groups 页 bug）。测速期间的 `testIDs` 轮询
   （每秒）与下面的按页轮询并存，互不影响。
+  **完成铃**（`notify.go` 的 `testDoneNotifyCmd`）：根模型 latenciesMsg 分支在派发
+  前后各看一次聚合 `anyTesting()`，从有测速变无测速才发一次——响的是"spinner 消失"
+  这个事件，批次完成与窗口超时都算，空闲后的后续轮询不响。单次 WriteString 写
+  `OSC 9（桌面通知文案）+ BEL`，与 OSC 52 同一单写纪律、同样 `stdoutIsTerminal()`
+  门控；BEL 的音量/静音是终端自己的设置，所以**不做配置开关**（用户的关阀在终端侧）。
+  `TestLatencyDoneBellRingsOnce` 兜底。
 - **延迟按页轮询，无启动全量测速**：每 3 秒只轮询当前页可见节点的 `nodeLatencies`
   （`Model.visibleLatencyIDs()` 按页分发：群组页=展开分区的节点行，选择器打开时=候选；
   订阅页=右栏可见节点；手动节点页=列表；首页/配置页不轮询）。`initialLoad` **不再**
@@ -537,8 +552,13 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   本地 exec，远程隧道场景天然不可用（LookPath 失败时 toast 说明）。测试 seam：
   `startLogsProc` 是包级 var，`logs_test.go` 的 `withFakeLogs` 换成手喂 channel 的假进程，
   绝不在测试里跑真 journalctl。
-- **CLI 子命令**（`main.go`）：`-cmd status|test`，`test` 支持 `-g 组名` / `-n id,id`。
-  刻意没有 `-cmd switch`：fixed 组改组是破坏性操作，理由见"已知限制"。
+- **CLI 子命令**（`main.go`）：`-cmd status|test|groups|switch-dns|switch-routing`，
+  `test` 支持 `-g 组名` / `-n id,id`，switch 族用 `-name 方案名`（`resolveSelection`
+  按名反查 ID，miss 时列出可用名）。`groups` 只打印组行（status 的脚本友好切片，
+  格式与 `printGroups` 共用）。**switch 只选择不重载**：方案切换在 daed 侧只是标记
+  运行配置过期，重载是确认门控的破坏性操作（TUI 内 `A`），CLI 静默重载代理是
+  意外突变——打印"重载后生效"提示而不是替用户按下去。刻意没有组切换类子命令：
+  fixed 组改组是破坏性操作，理由见"已知限制"。
 
 ## 测试约定
 

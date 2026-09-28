@@ -2225,6 +2225,82 @@ func TestLatencyTestWindowEndsOnErrors(t *testing.T) {
 	}
 }
 
+// The completion bell rings exactly once when the aggregate testing state
+// falls back to idle — both batch completion and window expiry count, and a
+// poll against an already-idle model stays silent.
+func TestLatencyDoneBellRingsOnce(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("2"))
+	m, cmd := m.Update(key("t"))
+	if cmd == nil {
+		t.Fatal("t should fire a test")
+	}
+	m, _ = m.Update(cmd())
+
+	// Completion: every tested ID reports fresher than its baseline.
+	now := time.Now()
+	var lats []driver.Latency
+	for _, id := range m.(Model).groups.testIDs {
+		lats = append(lats, driver.Latency{NodeID: id, Ms: 42, Alive: true, TestedAt: now})
+	}
+	if len(lats) == 0 {
+		t.Fatal("fixture should provide test IDs")
+	}
+	m, bell := m.Update(latenciesMsg{Lats: lats})
+	if bell == nil {
+		t.Fatal("batch completion should fire the bell cmd")
+	}
+	m, bell = m.Update(latenciesMsg{Lats: lats})
+	if bell != nil {
+		t.Fatal("a poll against an idle model must not ring again")
+	}
+
+	// Window expiry ends testing too — the bell marks "spinner gone", not
+	// only success.
+	m, cmd = m.Update(key("t"))
+	if cmd == nil {
+		t.Fatal("t should fire a second test")
+	}
+	m, _ = m.Update(cmd())
+	mm := m.(Model)
+	mm.groups.testStart = time.Now().Add(-time.Hour)
+	m = mm
+	m, bell = m.Update(latenciesMsg{Err: errors.New("backend down")})
+	if bell == nil {
+		t.Fatal("window expiry should also fire the bell cmd")
+	}
+}
+
+// Three consecutive probe failures badge the top bar as disconnected; any
+// successful probe — traffic or status — clears it again. Two failures stay
+// below the trip level.
+func TestDisconnectBadgeAfterProbeFailures(t *testing.T) {
+	m := newTestModel(t)
+	boomed := trafficMsg{Err: errors.New("connection refused")}
+	m, _ = m.Update(boomed)
+	m, _ = m.Update(boomed)
+	if v := m.View(); strings.Contains(v, "连接断开") {
+		t.Fatal("two failures must not trip the badge")
+	}
+	m, _ = m.Update(boomed)
+	if v := m.View(); !strings.Contains(v, "连接断开") {
+		t.Fatalf("three failures should badge the top bar:\n%s", v)
+	}
+	// The status heartbeat is a probe too — its success also clears.
+	m, _ = m.Update(statusMsg{Status: driver.Status{Version: "v2.1.1", Running: true}})
+	if v := m.View(); strings.Contains(v, "连接断开") {
+		t.Fatalf("a successful status probe should clear the badge:\n%s", v)
+	}
+	// And the traffic heartbeat recovers on its own as well.
+	m, _ = m.Update(boomed)
+	m, _ = m.Update(boomed)
+	m, _ = m.Update(boomed)
+	m, _ = m.Update(trafficMsg{Snap: mustTraffic(t)})
+	if v := m.View(); strings.Contains(v, "连接断开") {
+		t.Fatalf("a successful traffic probe should clear the badge:\n%s", v)
+	}
+}
+
 // A latency poll re-sorts the visible node list under an open modal; the
 // confirm must act on the node the user opened the modal for, not on
 // whatever drifted into the cursor row in the meantime.

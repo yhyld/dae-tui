@@ -69,9 +69,10 @@ func main() {
 	endpointFlag := flag.String("endpoint", "", i18n.T("daed GraphQL 端点 (默认 http://127.0.0.1:2023/graphql)"))
 	probe := flag.Bool("probe", false, i18n.T("非交互自检：连接后端并打印诊断信息后退出"))
 	version := flag.Bool("version", false, i18n.T("打印版本"))
-	cmdFlag := flag.String("cmd", "", i18n.T("非交互子命令: status（打印后端状态）| test（触发测速，见 -g/-n）"))
+	cmdFlag := flag.String("cmd", "", i18n.T("非交互子命令: status（打印后端状态）| test（触发测速，见 -g/-n）| groups（列出群组）| switch-dns/switch-routing（按 -name 切换方案）"))
 	groupFlag := flag.String("g", "", i18n.T("-cmd test: 按组名测速（逗号分隔多个组）"))
 	nodeFlag := flag.String("n", "", i18n.T("-cmd test: 按节点 ID 测速（逗号分隔多个 ID）"))
+	nameFlag := flag.String("name", "", i18n.T("-cmd switch-dns/switch-routing: 目标方案名"))
 	flag.Parse()
 
 	if *version {
@@ -134,8 +135,17 @@ func main() {
 	case "test":
 		runTest(drv, *groupFlag, *nodeFlag)
 		return
+	case "groups":
+		runGroups(drv)
+		return
+	case "switch-dns":
+		runSwitch(drv, "dns", *nameFlag)
+		return
+	case "switch-routing":
+		runSwitch(drv, "routing", *nameFlag)
+		return
 	default:
-		fatal(i18n.T("未知 -cmd %q（可用: status, test）"), *cmdFlag)
+		fatal(i18n.T("未知 -cmd %q（可用: status, test, groups, switch-dns, switch-routing）"), *cmdFlag)
 	}
 
 	app.Version = versionString()
@@ -253,13 +263,7 @@ func runStatus(d *daeddrv.Driver) {
 	if err != nil {
 		fmt.Println("ListGroups:", err)
 	} else {
-		for _, g := range groups {
-			cur := i18n.T("自动")
-			if sel := g.SelectedNode(); sel != nil {
-				cur = sel.Name
-			}
-			fmt.Printf(i18n.T("组 %-16s 策略=%-14s 成员=%-4d 当前=%s\n"), g.Name, g.Policy, len(g.Members()), cur)
-		}
+		printGroups(groups)
 	}
 
 	sel, err := d.ListSelections(ctx)
@@ -323,6 +327,91 @@ func runTest(d *daeddrv.Driver, groups, nodes string) {
 func fatal(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "dae-tui: "+format+"\n", args...)
 	os.Exit(1)
+}
+
+// printGroups renders the one-line-per-group block shared by -cmd status and
+// -cmd groups: fixed columns so the line stays awk-able despite the labels.
+func printGroups(groups []driver.Group) {
+	for _, g := range groups {
+		cur := i18n.T("自动")
+		if sel := g.SelectedNode(); sel != nil {
+			cur = sel.Name
+		}
+		fmt.Printf(i18n.T("组 %-16s 策略=%-14s 成员=%-4d 当前=%s\n"), g.Name, g.Policy, len(g.Members()), cur)
+	}
+}
+
+// runGroups prints just the group lines — the script-friendly slice of
+// status (which mixes in version and selections).
+func runGroups(d *daeddrv.Driver) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	if _, err := d.Connect(ctx); err != nil {
+		fatal(i18n.T("连接失败: %v"), err)
+	}
+	groups, err := d.ListGroups(ctx)
+	if err != nil {
+		fatal("ListGroups: %v", err)
+	}
+	printGroups(groups)
+}
+
+// resolveSelection finds a profile by name; on miss it returns the available
+// names so the error can say what the options were.
+func resolveSelection(items []driver.ConfigItem, name string) (driver.ConfigItem, []string, bool) {
+	var names []string
+	for _, it := range items {
+		names = append(names, it.Name)
+		if it.Name == name {
+			return it, nil, true
+		}
+	}
+	return driver.ConfigItem{}, names, false
+}
+
+// runSwitch selects a dns or routing profile by name. Group-switching stays
+// out of the CLI on purpose: a fixed-group switch rewrites group membership
+// destructively in daed, which is exactly the operation that needs the TUI's
+// confirmation flow. Selecting a profile only marks the running one stale —
+// the confirm-gated reload (A in the TUI) applies it, and a CLI that silently
+// reloaded the proxy would be a surprise mutation, so we say what is left.
+func runSwitch(d *daeddrv.Driver, kind, name string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	if name == "" {
+		fatal(i18n.T("-cmd switch-dns/switch-routing 需要方案名（-name）"))
+	}
+	if _, err := d.Connect(ctx); err != nil {
+		fatal(i18n.T("连接失败: %v"), err)
+	}
+	sel, err := d.ListSelections(ctx)
+	if err != nil {
+		fatal("ListSelections: %v", err)
+	}
+
+	var items []driver.ConfigItem
+	var pick func(id string) error
+	switch kind {
+	case "dns":
+		items = sel.Dns
+		pick = func(id string) error { return d.SelectDns(ctx, id) }
+	case "routing":
+		items = sel.Routings
+		pick = func(id string) error { return d.SelectRouting(ctx, id) }
+	default:
+		fatal(i18n.T("未知 -cmd switch kind %q"), kind)
+	}
+
+	it, names, ok := resolveSelection(items, name)
+	if !ok {
+		fatal(i18n.T("%s 方案 %q 不存在（可用: %s）"), kind, name, strings.Join(names, ", "))
+	}
+	if err := pick(it.ID); err != nil {
+		fatal(i18n.T("切换失败: %v"), err)
+	}
+	fmt.Printf(i18n.T("已选择 %s %s（重载后生效：TUI 内按 A 确认重载）\n"), kind, name)
 }
 
 func runProbe(d *daeddrv.Driver) {

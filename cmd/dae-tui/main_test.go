@@ -90,3 +90,20 @@ func TestTestTargetsReportsUnknownGroups(t *testing.T) {
 		t.Fatalf("ids = %#v missing = %#v", ids, missing)
 	}
 }
+
+// runSwitch resolves by name, not by the backend's ID — the CLI is given
+// names and the miss error should list what was available.
+func TestResolveSelectionByName(t *testing.T) {
+	items := []driver.ConfigItem{
+		{ID: "7", Name: "gfw"},
+		{ID: "8", Name: "cnOnly"},
+	}
+	it, _, ok := resolveSelection(items, "cnOnly")
+	if !ok || it.ID != "8" {
+		t.Fatalf("resolve(cnOnly) = %v %s %v, want id 8", it, it.ID, ok)
+	}
+	_, names, ok := resolveSelection(items, "global")
+	if ok || !reflect.DeepEqual(names, []string{"gfw", "cnOnly"}) {
+		t.Fatalf("resolve(global) miss = %v %v, want the name list", ok, names)
+	}
+}

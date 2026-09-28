@@ -1,6 +1,6 @@
 # dae-tui
 
-dae 网络代理的终端管理界面（TUI），当前通过 **daed 的 GraphQL API** 管理代理：切换路由组节点、测速、实时流量、订阅管理、节点/订阅原地编辑、config/DNS/routing 方案切换与重载、账户管理。
+dae 网络代理的终端管理界面（TUI），当前通过 **daed 的 GraphQL API** 管理代理：切换路由组节点、测速、实时流量、订阅管理、节点/订阅原地编辑、config/DNS/routing 方案切换与重载、账户管理。测速结束响铃一次（OSC 9 桌面通知 + BEL）；后端失联时顶栏红字「连接断开 · r 重试」，恢复后自动消除。
 
 ```
 ╭────────────────────────────────────────────────────────────────────╮
@@ -72,9 +72,14 @@ lipgloss / toml / charmbracelet-x-ansi（终端单元格宽度计算，与 lipgl
 ./dae-tui -cmd test          # 非交互：触发全部节点测速
 ./dae-tui -cmd test -g proxy # 只测指定组（逗号分隔多个组）的全部成员
 ./dae-tui -cmd test -n id1,id2   # 只测指定节点 ID
+./dae-tui -cmd groups        # 非交互：只打印组行（脚本友好的 status 切片）
+./dae-tui -cmd switch-dns -name 方案名     # 切换 DNS 方案（重载后生效）
+./dae-tui -cmd switch-routing -name 方案名 # 切换路由方案（重载后生效）
 ```
 
-`-cmd` 子命令可绑系统快捷键、写进脚本。刻意没有提供 `-cmd switch`：daed v2 的 fixed 组
+`-cmd` 子命令可绑系统快捷键、写进脚本。switch 族**只选择不重载**：方案切换在 daed 侧
+只是把运行配置标记为过期，重载（重启代理进程）是确认门控的操作，留给 TUI 里的 `A`。
+刻意没有提供 `-cmd switch`（切组内节点）：daed v2 的 fixed 组
 只允许一个成员，"切到某节点"会静默重组整组（摘订阅、移除其他直接节点），破坏性太大，
 不适合无人值守执行。
 
@@ -184,7 +189,7 @@ ANSI-256 序号如 `"62"` 或 `"#4f9cf9"`，空/非法用默认值）与 `theme 
 ## 架构
 
 ```
-cmd/dae-tui          入口（flag 解析、-probe 自检、-cmd status/test 子命令）
+cmd/dae-tui          入口（flag 解析、-probe 自检、-cmd status/test/groups/switch-* 子命令）
 internal/driver/     后端抽象：Driver 接口 + 领域类型（Group/Node/Latency/Traffic…）
 internal/driver/daed daed GraphQL 驱动（client/auth/queries/types/driver）
                      schema.graphql = daed v2.1.1 最终版 SDL 的固化副本
