@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -23,6 +24,26 @@ func (p *configsPage) modalKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		return p.diffConfirmKey(msg, d)
 	case 7:
 		return p.builtinEditorKey(msg, d)
+	case 8:
+		return p.exportKey(msg)
+	}
+	return nil
+}
+
+// exportKey drives the E overlay: w writes the backup file, y copies the
+// document to the clipboard (OSC 52). Both channels produce the same
+// content; esc just closes. Keys stay literal like every modal confirm —
+// they are not remappable actions.
+func (p *configsPage) exportKey(msg tea.KeyMsg) tea.Cmd {
+	switch msg.String() {
+	case "w":
+		p.mode = 0
+		return exportFileCmd(p.exportDir, buildExport(p.sel, time.Now()))
+	case "y":
+		p.mode = 0
+		return osc52CopyCmd(buildExport(p.sel, time.Now()), i18n.T("方案备份"))
+	case "n", "esc":
+		p.mode = 0
 	}
 	return nil
 }

@@ -5274,6 +5274,28 @@ func TestKeyRemap(t *testing.T) {
 	}
 }
 
+// The configs page dispatches through the keymap layer like the other
+// pages — it used to read raw keys only, which silently ignored remapped
+// bindings (new key dead, default key still firing).
+func TestConfigsKeyRemap(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "keys.toml")
+	os.WriteFile(path, []byte("[configs]\nv = \"x\"\n"), 0o600)
+	m := newTestModelWith(t, stubDriver{})
+	oldKeys := appKeys
+	appKeys = keymap.Load(path)
+	t.Cleanup(func() { appKeys = oldKeys })
+	m, _ = m.Update(key("5"))
+	m, _ = m.Update(key("x"))
+	if mm := m.(Model); !mm.configs.summaryView {
+		t.Fatal("x should toggle the summary view (configs/v remapped to x)")
+	}
+	m, _ = m.Update(key("v"))
+	if mm := m.(Model); !mm.configs.summaryView {
+		t.Fatal("retired v must do nothing on the configs page")
+	}
+}
+
 // The keys viewer lists the catalog and surfaces load notes; r reloads.
 func TestSettingsKeysViewer(t *testing.T) {
 	dir := t.TempDir()

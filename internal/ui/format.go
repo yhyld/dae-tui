@@ -90,7 +90,7 @@ func LatencyBar(ms int) string {
 	if ms <= 0 {
 		return spaces(w)
 	}
-	v := float64(ms) / 500 * w
+	v := float64(ms) / LatMidMs * w
 	if v > w {
 		v = w
 	}

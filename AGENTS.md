@@ -212,7 +212,8 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   `ui.Overlay` 负责 ANSI 感知地居中叠到页面画面上（`Truncate` 取左 + 补 reset、`TruncateLeft`
   取右——注意 TruncateLeft 会丢弃被跳过区域的转义序列，盒子右侧窄条可能掉色，文字不受影响）。
   浮窗清单：帮助（`helpOpen`，`?` 任何页面）、设置（`settings.open`，`P` 任何页面，含账户/主题等子窗口）、全局 `A` 确认、首页预设确认+DSL 预览、
-  各页输入表单（含内置 DSL 编辑器 mode 7）。留在右栏的：小 y/n 确认（删组/删节点/删订阅/
+  各页输入表单（含内置 DSL 编辑器 mode 7）、配置页导出备份（mode 8，`E` 开、
+  `w`/`y` 双通道，见"安全与兼容"）。留在右栏的：小 y/n 确认（删组/删节点/删订阅/
   删配置、组内移除）、大列表选择器（加节点、挂订阅、策略）、DSL diff 确认。
 - **内置 DSL 编辑器**（configs mode 7，`config.toml` 的 `editor = "builtin"` 开启）：
   textarea 浮窗，`ctrl+s` → `validateTextCmd(path="")` → `editorValidatedMsg`；校验失败时
@@ -353,6 +354,9 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   默认键名**——`tk(scope, pressed)` 在各页分发点把按键改写回规范名，改走的默认键返回
   dead 字符串。钩子位置必须避开文本输入捕获分支（subs/nodes 的表单与过滤框、configs
   的 modalKey 都吃原始按键）；nodeView 关闭态的 `/`、`o` 走 `tk`，打开态原文输入。
+  **每页的非模态分发点都必须过 `tk`**——configs 页曾经整页漏掉这层（目录里能改键、
+  分发却读原始键：改键后新键是死键、默认键照旧触发），`TestConfigsKeyRemap` 兜底；
+  新页面照 groups/subs/nodes/home 的 `key := tk(...)` 模式写。
   `esc/enter/tab/shift+tab/方向键/ctrl+c` 是固定键，加载时拒绝作为新键位；同作用域
   冲突双方都拒绝并记入 notes。**遮蔽检测（load 时第二遍 + Set 时前置）**：新键若是
   同作用域或全局层里其它**未改走**动作的默认键，绑定被拒绝并记 notes——否则 `tk` 会
@@ -391,9 +395,11 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
 - 节点名（`Node.Name`）在**任何**展示点都要过 `ui.SpaceAfterFlag`：订阅节点名常是
   `🇩🇪Germany 01` 这种旗贴字格式，国旗占两列且字形顶到国家名上，看起来像重叠。
   列表、详情、标题、toast、确认框一处都不能漏。
-- 延迟色阶：未测/死亡 = 灰，<200ms 绿，<500ms 黄，其余红；节点行的延迟列统一走
+- 延迟色阶：未测/死亡 = 灰，<200ms 绿，<500ms 黄，其余红——阈值只有一对常量
+  `ui.LatGoodMs`/`ui.LatMidMs`（LatencyStyle 取色与 LatencyBar 打满同刻度，
+  改一处必须两处同义）；节点行的延迟列统一走
   `latencyCell`（`nodelist.go`）：≥56 列的面板在毫秒值前多一条 5 格微型条
-  （`ui.LatencyBar`，500ms 打满，与数值同色）——窄面板（如 36 列的左栏）自动去掉条只留
+  （`ui.LatencyBar`，与数值同色）——窄面板（如 36 列的左栏）自动去掉条只留
   数值，别在窄栏里硬塞。自动策略下的"当前节点"是
   估算值，显示时加 `≈` 前缀（没有测量数据时首页标注「未测速」；首页不显示毫秒数，
   逐节点延迟去群组页看）。
@@ -568,6 +574,10 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   字段写都必须走加锁 setter（`UpdateToken`/`UpdateCredentials`/`UpdateTheme`/
   `UpdateLang`），别再写 `m.cfg.X = ...`。改任何东西前先本地过这三样；bubbletea v1.3
   `ReleaseTerminal` 关鼠标上报那类回归就是靠 CI 里的无头渲染冒烟兜底的。
+  **刻意不引入 golangci-lint**：本机没有安装、无法本地复现的 lint 门等于盲改 CI
+  （风格告警会靠猜修）。工程卫生的现实基线 = vet + race + 魔法数字收拢成具名常量
+  （延迟阈值 `ui.LatGoodMs/LatMidMs`、历史窗口 `latWindow/latMaxNodes`、帮助布局
+  `helpKeyColW/helpMarginW/helpMaxW`）。真要加：先在本地装好、清零存量告警、再进 CI。
 - driver 层用 `httptest.Server` mock GraphQL，覆盖 auth 流程、access-denied 自动重试、
   分页拉全、mutation 请求体构造、String 型 totals 解析。
 - app 层用 `stubDriver`（内嵌 `driver.Driver` 接口以便只覆盖需要的方法）喂罐头数据，
@@ -593,6 +603,12 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   密码再落 token——崩溃窗口留下"旧 token+新密码"，静默 re-auth 能自愈，反过来
   不行。
 - daed 默认监听 `0.0.0.0:2023` 纯 HTTP；本工具只走回环 + SSH 隧道，不要改这个前提。
+- **导出备份（配置页 `E`，`app/export.go`）结构上不可能带出凭据**：文档只从
+  `ListSelections` 构建（名称/selected/全局字段/DSL 原文），dae-tui 自己的密码/JWT 根本
+  不流经那条数据路径；订阅与节点**刻意不进备份**（分享链接内嵌服务器凭据，备份是要
+  能共享的东西）。双通道：`w` 落盘 config.toml 同目录 `export/`（目录 0700、文件 0600、
+  文件名带时间戳，toast 报全路径），`y` OSC 52 复制全文。输出是合法 TOML
+  （`TestBuildExportRoundTrip` round-trip 兜底）——将来做导入就按这份结构解析。
 - daed 已归档、schema 冻结：这是特性不是 bug——永远不会有破坏性变更，但也不会有安全
   修复。`schema.graphql` 是固化的 SDL 副本，用于回归对照，不参与编译。
 

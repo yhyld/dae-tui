@@ -59,6 +59,13 @@ var (
 	BorderDim     = lipgloss.NewStyle().Foreground(BorderCol)
 )
 
+// The latency ramp's thresholds: under LatGoodMs is green, under LatMidMs
+// yellow, above red. LatencyBar fills on the same scale (LatMidMs = full).
+const (
+	LatGoodMs = 200
+	LatMidMs  = 500
+)
+
 // LatencyStyle maps a latency in ms to a style.
 func LatencyStyle(ms int, alive, tested bool) lipgloss.Style {
 	if !tested {
@@ -73,9 +80,9 @@ func LatencyStyle(ms int, alive, tested bool) lipgloss.Style {
 		return lipgloss.NewStyle().Foreground(Gray)
 	}
 	switch {
-	case ms > 0 && ms < 200:
+	case ms > 0 && ms < LatGoodMs:
 		return lipgloss.NewStyle().Foreground(Green)
-	case ms >= 200 && ms < 500:
+	case ms >= LatGoodMs && ms < LatMidMs:
 		return lipgloss.NewStyle().Foreground(Yellow)
 	default:
 		return lipgloss.NewStyle().Foreground(Red)

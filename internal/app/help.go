@@ -106,6 +106,10 @@ var helpSections = []helpSection{
 	}},
 }
 
+// helpKeyColW fits the widest key ("Tab / shift+Tab"); at 14 it truncated
+// into "Tab / shift-…" and read as a broken entry.
+const helpKeyColW = 16
+
 // sectionLines renders one help section: the key column carries the accent
 // (it is what the eye scans for), descriptions stay dim, and the "-"
 // continuation rows keep the dim dash.
@@ -116,11 +120,9 @@ func sectionLines(s helpSection) []string {
 	for _, r := range s.rows {
 		// The key column holds CJK entries too (滚轮, 右栏聚焦, …) — they are
 		// catalog keys like the descriptions.
-		// 16 fits the widest key ("Tab / shift+Tab"); at 14 it truncated
-		// into "Tab / shift+…" and read as a broken entry.
-		key := ui.SelectedStyle.Render(ui.PadRight(i18n.T(r[0]), 16))
+		key := ui.SelectedStyle.Render(ui.PadRight(i18n.T(r[0]), helpKeyColW))
 		if r[0] == "-" {
-			key = ui.HelpStyle.Render(ui.PadRight(r[0], 16))
+			key = ui.HelpStyle.Render(ui.PadRight(r[0], helpKeyColW))
 		}
 		lines = append(lines, "  "+key+ui.HelpStyle.Render(i18n.T(r[1])))
 	}
@@ -188,6 +190,13 @@ func clampHelpScroll(scroll, win int) int {
 // helpOverlayBox renders the help as a floating window over any page,
 // windowed to what fits and with a position footer. The content width is
 // capped well below the terminal so the page stays visible on both sides.
+// helpMarginW keeps 8 columns of terminal on each side of the floating box;
+// helpMaxW caps it on very wide terminals so descriptions stay readable.
+const (
+	helpMarginW = 16
+	helpMaxW    = 96
+)
+
 func helpOverlayBox(w, avail, scroll int) string {
 	lines := helpLines()
 	win := helpWinBody(avail)
@@ -201,9 +210,9 @@ func helpOverlayBox(w, avail, scroll int) string {
 	// every padded line otherwise).
 	// helpLines already opens with its own title row; the box stays well
 	// under the terminal width so the page peeks out on both sides.
-	helpW := w - 16
-	if helpW > 96 {
-		helpW = 96
+	helpW := w - helpMarginW
+	if helpW > helpMaxW {
+		helpW = helpMaxW
 	}
 	body := make([]string, 0, end-scroll+2)
 	for _, l := range lines[scroll:end] {

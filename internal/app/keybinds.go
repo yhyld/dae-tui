@@ -140,6 +140,7 @@ var keyCatalog = []keyEntry{
 	{keymap.Configs, "e", "编辑"},
 	{keymap.Configs, "v", "概览/原文"},
 	{keymap.Configs, "y", "复制 DSL"},
+	{keymap.Configs, "E", "导出备份"},
 }
 
 // scopeTitle renders a scope's display name for the viewer.

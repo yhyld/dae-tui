@@ -25,10 +25,18 @@ type latSample struct {
 	at    time.Time
 }
 
+// The history budget: samples kept per node (~3 minutes at the 3s poll
+// cadence) and how many nodes stay tracked before the least recently seen
+// is evicted.
+const (
+	latWindow   = 60
+	latMaxNodes = 256
+)
+
 func newLatHistory() *latHistory {
 	return &latHistory{
-		window:   60,  // ~3 minutes at the 3s poll cadence
-		maxNodes: 256, // polled nodes plus on-demand tests; keep the recent ones
+		window:   latWindow,
+		maxNodes: latMaxNodes,
 		byNode:   map[string][]latSample{},
 	}
 }

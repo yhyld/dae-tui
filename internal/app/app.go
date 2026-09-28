@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -121,6 +122,9 @@ func New(drv driver.Driver, cfg *config.Config, cfgPath string) Model {
 	loadKeys(cfgPath)
 
 	m.configs.builtin = cfg.Editor == "builtin"
+	// The E backup lands next to the app's own config, not in $PWD: launched
+	// from anywhere, the destination must stay predictable.
+	m.configs.exportDir = filepath.Join(filepath.Dir(cfgPath), "export")
 	return m
 }
 
@@ -1203,7 +1207,8 @@ func (m Model) helpKeys() (keys, hint string) {
 			"  " + gA + "  " + gR
 	case pageConfigs:
 		keys = kb(keymap.Configs, "v", "概览/原文") + "  " + kb(keymap.Configs, "y", "复制 DSL") +
-			"  " + K(keymap.Configs, "l") + "/Enter " + i18n.T("详情") + "  " + gA + "  " + gR
+			"  " + kb(keymap.Configs, "E", "导出备份") + "  " + K(keymap.Configs, "l") + "/Enter " +
+			i18n.T("详情") + "  " + gA + "  " + gR
 	default:
 		keys = kb(keymap.Global, "A", "重载") + "  " + K(keymap.Global, "1") + "-" +
 			K(keymap.Global, "5") + " " + i18n.T("切换页面") + "  " + kb(keymap.Global, "q", "退出")

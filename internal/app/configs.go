@@ -57,6 +57,10 @@ type configsPage struct {
 	edErr     string
 	edEscArm  bool
 
+	// exportDir is where the E backup lands (an "export" folder next to
+	// config.toml); set by the root model which owns the config path.
+	exportDir string
+
 	caps driver.Caps
 
 	leftW, rightW, height int
@@ -506,7 +510,17 @@ func (p *configsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	if p.mode != 0 {
 		return p.modalKey(msg, d)
 	}
-	switch msg.String() {
+
+	// Remap layer for everything below: modalKey above stays raw (its text
+	// inputs eat real keystrokes), every action switch dispatches through
+	// the translated key — the same law as the other pages. Configs used to
+	// read raw keys only, which silently ignored remapped bindings.
+	key := tk(keymap.Configs, msg.String())
+
+	switch key {
+	case "E":
+		p.mode = 8
+		return nil
 	case "v":
 		p.summaryView = !p.summaryView
 		p.scroll = 0
@@ -523,7 +537,7 @@ func (p *configsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		}
 	}
 	if p.focus == 0 {
-		switch msg.String() {
+		switch key {
 		case "j", "down":
 
 			if last := p.secRange[p.sec][1]; last >= 0 && p.cur < last {
@@ -614,7 +628,7 @@ func (p *configsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		if p.fieldCur >= len(fields) {
 			p.fieldCur = len(fields) - 1
 		}
-		switch msg.String() {
+		switch key {
 		case "j", "down":
 			if p.fieldCur < len(fields)-1 {
 				p.fieldCur++
@@ -640,7 +654,7 @@ func (p *configsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	}
 
 	body := p.bodyLines()
-	switch msg.String() {
+	switch key {
 	case "j", "down":
 		if p.scroll < len(body)-1 {
 			p.scroll++
@@ -678,6 +692,8 @@ func (p configsPage) View() string {
 		rightFooter = i18n.T("y 确认 · n/esc 取消")
 	case 6:
 		rightFooter = i18n.T("y 提交 · n/esc 取消 · j/k 滚动")
+	case 8:
+		rightFooter = i18n.T("w 保存文件 · y 复制内容 · esc 取消")
 	case 2, 3, 4, 7:
 
 		rightFooter = ""
@@ -832,6 +848,16 @@ func (p configsPage) overlay() *overlaySpec {
 		return &overlaySpec{lines: append(lines, "",
 			ui.HelpStyle.Render(i18n.T(" ctrl+s 校验并预览 diff  esc 取消")),
 			ui.HelpStyle.Render(i18n.T(" 想用 vim/nano 等编辑器：config.toml 里 editor = \"external\"")))}
+	case 8:
+		n := len(p.sel.Configs) + len(p.sel.Dns) + len(p.sel.Routings)
+		return &overlaySpec{lines: []string{
+			ui.TitleStyle.Render(" " + i18n.T("导出备份")),
+			"",
+			ui.HelpStyle.Render(i18n.T(" 含全部配置/DNS/路由方案（共 %d 个），selected 标记当前选中", n)),
+			ui.HelpStyle.Render(" " + i18n.T("不含订阅与节点（链接内嵌服务器凭据）及账户信息")),
+			"",
+			ui.HelpStyle.Render(i18n.T(" 保存位置  ") + ui.Truncate(p.exportDir, 64)),
+		}}
 	}
 	return nil
 }
