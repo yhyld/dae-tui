@@ -106,3 +106,36 @@ func TestReloadSwapsBindings(t *testing.T) {
 		t.Fatalf("reload applies the new one: %q", got)
 	}
 }
+
+func TestSetPersistsAndRestores(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "keys.toml")
+	km := Load(path) // missing file: defaults
+	if err := km.Set(path, Groups, "j", "ctrl+n"); err != nil {
+		t.Fatal(err)
+	}
+	// The override applies and survives a fresh load of the file.
+	if got := km.Key(Groups, "j"); got != "ctrl+n" {
+		t.Fatalf("binding lost: %q", got)
+	}
+	km2 := Load(path)
+	if got := km2.Translate(Groups, "ctrl+n"); got != "j" {
+		t.Fatalf("binding did not persist: %q", got)
+	}
+	// A second Set on the same action replaces, not stacks.
+	if err := km2.Set(path, Groups, "j", "ctrl+x"); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	if !strings.Contains(string(raw), `j = "ctrl+x"`) || strings.Contains(string(raw), "ctrl+n") {
+		t.Fatalf("old override must be replaced, file: %s", raw)
+	}
+	// Restoring the default drops the override from the file entirely.
+	if err := km2.Set(path, Groups, "j", "j"); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = os.ReadFile(path)
+	if strings.Contains(string(raw), "j =") {
+		t.Fatalf("default restore must drop the entry, file: %s", raw)
+	}
+}

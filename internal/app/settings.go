@@ -38,8 +38,12 @@ type settings struct {
 	// language picker cursor.
 	langCur int
 
-	// keys viewer scroll offset (the catalog outgrows the window).
+	// keys viewer: window start, catalog cursor, pending-rebind flag and
+	// the last validation error (rendered inline above the catalog).
 	keysScroll int
+	keysCursor int
+	keysEdit   bool
+	keysErr    string
 }
 
 const (
@@ -510,27 +514,67 @@ func (s settings) langOverlay() *overlaySpec {
 		ui.HelpStyle.Render(i18n.T(" j/k 选择  Enter 确认  esc 返回")))}
 }
 
-// keysKey drives the read-only keymap viewer: j/k/g/G scroll the catalog,
-// r re-reads keys.toml (the file is the editor — the viewer names it), esc
-// returns to the settings menu.
+// keysViewerWin is the entry rows the keys overlay window shows.
+const keysViewerWin = 18
+
+// keysKey drives the keymap editor: j/k move the cursor over the catalog,
+// Enter starts a rebind (the next press becomes the new key), d restores
+// the default, r re-reads keys.toml (edits made outside still land), esc
+// returns to the settings menu — or cancels a pending rebind first.
 func (m *Model) keysKey(msg tea.KeyMsg) tea.Cmd {
 	s := &m.settings
-	switch tk(keymap.Global, msg.String()) {
+	if s.keysEdit {
+		switch msg.String() {
+		case "esc":
+			s.keysEdit, s.keysErr = false, ""
+			return nil
+		}
+		return m.applyKeyBinding(msg.String())
+	}
+	switch msg.String() {
 	case "esc":
 		s.sub = subMenu
 	case "j", "down":
-		s.keysScroll++
+		if s.keysCursor < len(keyCatalog)-1 {
+			s.keysCursor++
+		}
 	case "k", "up":
-		s.keysScroll--
+		if s.keysCursor > 0 {
+			s.keysCursor--
+		}
 	case "g":
-		s.keysScroll = 0
+		s.keysCursor = 0
 	case "G":
-		s.keysScroll = len(keyCatalog)
+		s.keysCursor = len(keyCatalog) - 1
+	case "enter", "e":
+		s.keysEdit, s.keysErr = true, ""
+	case "d":
+		return m.applyKeyDefault()
 	case "r":
 		m.reloadKeys()
 	}
-	s.keysScroll = max0(s.keysScroll)
+	s.keysFollow()
 	return nil
+}
+
+// keysFollow keeps the window on the cursor: the entry's line index comes
+// from the same layout pass the renderer uses, so the two cannot drift.
+func (s *settings) keysFollow() {
+	_, entryLine, total := keysLayout(s.keysErr)
+	if len(entryLine) == 0 {
+		return
+	}
+	line := entryLine[s.clampKeysCursor()]
+	win := keysViewerWin
+	if line < s.keysScroll {
+		s.keysScroll = line
+	}
+	if line >= s.keysScroll+win {
+		s.keysScroll = line - win + 1
+	}
+	if max := max0(total - win); s.keysScroll > max {
+		s.keysScroll = max
+	}
 }
 
 // reloadKeys re-reads keys.toml; the toast reports warnings rather than
@@ -545,39 +589,157 @@ func (m *Model) reloadKeys() {
 	m.showToast("✓ " + i18n.T("键位已重载"))
 }
 
-// keysOverlay renders the catalog grouped by scope: the live key column
-// (what actually works right now) and the action description. Load notes
-// ride on top — they are why a binding might not have applied.
-func (s settings) keysOverlay() *overlaySpec {
-	const winH = 22
-	lines := []string{ui.TitleStyle.Render(" " + i18n.T("快捷键")), ""}
+func (s *settings) clampKeysCursor() int {
+	if s.keysCursor < 0 {
+		return 0
+	}
+	if s.keysCursor >= len(keyCatalog) {
+		return len(keyCatalog) - 1
+	}
+	return s.keysCursor
+}
+
+// applyKeyBinding commits a pressed key as the cursor entry's new binding.
+// Validation rejects here (with an inline message, the user is mid-flow)
+// rather than at load time: fixed keys, and a conflict with another live
+// binding — same scope, or any global key, which every page dispatches
+// through first and would therefore shadow a page action.
+func (m *Model) applyKeyBinding(newKey string) tea.Cmd {
+	s := &m.settings
+	e := keyCatalog[s.clampKeysCursor()]
+	s.keysEdit = false
+	if keymap.Fixed[newKey] {
+		s.keysErr = newKey + i18n.T("：固定键不能作为快捷键")
+		return nil
+	}
+	if newKey == e.def {
+		return m.applyKeyDefault() // bound to its own default: a reset
+	}
+	for _, o := range keyCatalog {
+		if o.scope == e.scope && o.def == e.def {
+			continue
+		}
+		clashScope := o.scope == e.scope || o.scope == keymap.Global || e.scope == keymap.Global
+		if !clashScope {
+			continue
+		}
+		if K(o.scope, o.def) == newKey {
+			s.keysErr = newKey + i18n.T(" 已被占用：") + scopeTitle(o.scope) + " / " + i18n.T(o.desc)
+			return nil
+		}
+	}
+	// A hand-written binding the catalog does not know still occupies the
+	// key — say so instead of silently shadowing it.
+	if def, ok := appKeys.BoundTo(e.scope, newKey); ok && def != e.def {
+		s.keysErr = newKey + i18n.T(" 已被键位文件中的 ") + e.scope + "/" + def + i18n.T(" 占用")
+		return nil
+	}
+	if err := appKeys.Set(keymap.Path(m.cfgPath), e.scope, e.def, newKey); err != nil {
+		s.keysErr = i18n.T("保存失败: ") + shortErr(err)
+		return nil
+	}
+	s.keysErr = ""
+	m.showToast("✓ " + i18n.T(e.desc) + ": " + e.def + " → " + newKey)
+	return nil
+}
+
+// applyKeyDefault restores the cursor entry's default key and drops the
+// override from keys.toml.
+func (m *Model) applyKeyDefault() tea.Cmd {
+	s := &m.settings
+	e := keyCatalog[s.clampKeysCursor()]
+	s.keysEdit = false
+	if K(e.scope, e.def) == e.def {
+		s.keysErr = ""
+		return nil
+	}
+	if err := appKeys.Set(keymap.Path(m.cfgPath), e.scope, e.def, e.def); err != nil {
+		s.keysErr = i18n.T("保存失败: ") + shortErr(err)
+		return nil
+	}
+	s.keysErr = ""
+	m.showToast("✓ " + i18n.T(e.desc) + i18n.T(" 已恢复默认 ") + e.def)
+	return nil
+}
+
+// keysLayout builds the overlay's pinned head block (title, load notes,
+// the validation error — always on screen) and the flat body line index of
+// every catalog entry, so the key handler's follow math and the renderer
+// share one source of truth. entryLine indexes are into the scrolling body.
+func keysLayout(keysErr string) (head []string, entryLine []int, total int) {
+	head = []string{ui.TitleStyle.Render(" " + i18n.T("快捷键")), ""}
 	for _, n := range appKeys.Notes() {
-		lines = append(lines, "  "+ui.HelpStyle.Render("⚠ "+ui.Truncate(n, 56)))
+		head = append(head, "  "+ui.HelpStyle.Render("⚠ "+ui.Truncate(n, 56)))
+	}
+	if keysErr != "" {
+		head = append(head, "  "+ui.ErrorStyle.Render("✗ "+ui.Truncate(keysErr, 56)))
 	}
 	lastScope := ""
 	for _, e := range keyCatalog {
 		if e.scope != lastScope {
 			lastScope = e.scope
-			lines = append(lines, "", "  "+ui.SelectedStyle.Render(scopeTitle(e.scope)))
+			total += 2 // blank line + scope header
 		}
-		row := "  " + ui.CursorStyle.Render(ui.PadRight(K(e.scope, e.def), 12)) +
-			ui.HelpStyle.Render(i18n.T(e.desc))
-		lines = append(lines, row)
+		entryLine = append(entryLine, total)
+		total++
 	}
-	total := len(lines)
+	return head, entryLine, total
+}
+
+// keysOverlay renders the catalog grouped by scope with a cursor: the live
+// key column (what actually works right now), the action description, and
+// the rebind state riding on the cursor row.
+func (s settings) keysOverlay() *overlaySpec {
+	head, entryLine, total := keysLayout(s.keysErr)
+	cur := s.clampKeysCursor()
+	curLine := -1
+	if cur >= 0 && cur < len(entryLine) {
+		curLine = entryLine[cur]
+	}
 	start := s.keysScroll
-	if start > total-winH {
-		start = max0(total - winH)
+	if max := max0(total - keysViewerWin); start > max {
+		start = max
 	}
-	end := start + winH
-	if end > total {
-		end = total
+	if curLine >= 0 && curLine < start {
+		start = curLine
 	}
-	body := lines[start:end]
-	body = append(body, "",
-		ui.HelpStyle.Render(i18n.T(" j/k 滚动  r 重载 keys.toml  esc 返回"))+
-			ui.HelpStyle.Render(fmt.Sprintf("  %d-%d/%d", start+1, end, total)))
-	return &overlaySpec{lines: body}
+	if curLine >= start+keysViewerWin {
+		start = curLine - keysViewerWin + 1
+	}
+	var body []string
+	lastScope := ""
+	for i, e := range keyCatalog {
+		if e.scope != lastScope {
+			lastScope = e.scope
+			body = append(body, "", "  "+ui.SelectedStyle.Render(scopeTitle(e.scope)))
+		}
+		mark, style := "  ", ui.HelpStyle
+		if i == cur {
+			mark, style = "❯ ", ui.CursorStyle
+		}
+		row := " " + mark + style.Render(ui.PadRight(K(e.scope, e.def), 12)) +
+			ui.HelpStyle.Render(i18n.T(e.desc))
+		if i == cur {
+			row = ui.HiRow(row, 58, true)
+			if s.keysEdit {
+				row += ui.SelectedStyle.Render(i18n.T("  ← 按新键…"))
+			}
+		}
+		body = append(body, row)
+	}
+	end := start + keysViewerWin
+	if end > len(body) {
+		end = len(body)
+	}
+	footer := i18n.T(" j/k 移动  Enter 改键  d 恢复默认  r 重载  esc 返回")
+	if s.keysEdit {
+		footer = i18n.T(" 按下新键  esc 取消")
+	}
+	lines := append(append([]string(nil), head...), body[start:end]...)
+	lines = append(lines, "",
+		ui.HelpStyle.Render(footer)+
+			ui.HelpStyle.Render(fmt.Sprintf("  %d-%d/%d", start+1, end, len(body))))
+	return &overlaySpec{lines: lines}
 }
 
 func themeSwatches(t config.Theme) string {

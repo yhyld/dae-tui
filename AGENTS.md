@@ -304,7 +304,9 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   冲突双方都拒绝并记入 notes。外框键位条与页脚经 `K(scope, def)`/`kb()` 拼装，显示的
   永远是当前生效键位。滚轮发 `K(scope,"j"/"k")` 而不是字面 j/k，否则重映射后滚轮失灵。
   appKeys 是包级变量（页面是值类型拿不到 Model），New 里 loadKeys、查看器里 r 重载；
-  测试要覆盖它必须在 New 之后赋值。
+  测试要覆盖它必须在 New 之后赋值。设置内可交互改键（keysKey/applyKeyBinding：Enter
+  捕获下一键、同作用域或全局占用/固定键即时拒绝、d 恢复默认），经 keymap.Set 原子写回
+  keys.toml（按作用域+键名排序重建，手写注释不保留但所有绑定保留）。
 - **i18n（`internal/i18n`）**：中文文案**本身就是 key**——zh 模式 `T()` 原样返回 key（所以断言中文字面量的测试全部照旧），en 模式查 `en` 表、缺失回退 key，en 目录可以滞后于代码。两条铁律：**渲染期文本在 View/render 路径里调 T**（设置里切语言下一帧即生效，语言选择器在 `settings.go` 的 langKey）；**禁止把 T() 结果存进长寿命结构体字段**（包级表如 helpSections/tabLabels/presetLabels 存中文 key、渲染时翻译；toast 等瞬态消息允许构造时翻译，切语言后残留几秒可接受）。`config.toml` 的 `lang = "en"` 切英文，main.go 启动 `i18n.SetLang` 一次。driver 层错误是技术诊断信息，**不翻译**。en 表 key 与 T() 调用点的一致性靠"缺失即回退中文"兜底，别为对齐而维护第二份清单。
   带参数的文案必须让 `T` 直接收格式化参数（`T("%d分钟前", n)`）——先 `fmt.Sprintf`
   再 T 翻译的是已格式化串，目录里永远没有那个 key（TimeAgo 曾因此整体残留中文）。

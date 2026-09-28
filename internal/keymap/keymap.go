@@ -7,8 +7,11 @@
 package keymap
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 
 	"github.com/BurntSushi/toml"
@@ -147,6 +150,90 @@ func (km *Keymap) Key(scope, def string) string {
 		return neu
 	}
 	return def
+}
+
+// Set binds def to newKey in scope and persists the whole binding set to
+// path. newKey == def removes the override (restore the default); the
+// caller validates newKey first (fixed keys, conflicts) — Set applies.
+// The file is rewritten from the live state in deterministic order, so
+// hand-written comments do not survive an edit made here, but every
+// binding — including scopes the UI never shows — does.
+func (km *Keymap) Set(path, scope, def, newKey string) error {
+	km.mu.Lock()
+	defer km.mu.Unlock()
+	if km.over[scope] == nil {
+		km.over[scope] = map[string]string{}
+		km.rev[scope] = map[string]string{}
+		km.dead[scope] = map[string]bool{}
+	}
+	if old, ok := km.over[scope][def]; ok {
+		delete(km.rev[scope], old)
+	}
+	delete(km.over[scope], def)
+	delete(km.dead[scope], def)
+	if newKey != def {
+		km.over[scope][def] = newKey
+		km.rev[scope][newKey] = def
+		km.dead[scope][def] = true
+	}
+	return km.saveLocked(path)
+}
+
+// saveLocked writes the binding set atomically (temp file + fsync +
+// rename, like config.toml): a crash mid-save must not leave a truncated
+// keys.toml that silently drops bindings on the next start.
+func (km *Keymap) saveLocked(path string) error {
+	scopes := make([]string, 0, len(km.over))
+	for sc := range km.over {
+		if len(km.over[sc]) > 0 {
+			scopes = append(scopes, sc)
+		}
+	}
+	sort.Strings(scopes)
+	var b strings.Builder
+	for _, sc := range scopes {
+		fmt.Fprintf(&b, "[%s]\n", sc)
+		defs := make([]string, 0, len(km.over[sc]))
+		for d := range km.over[sc] {
+			defs = append(defs, d)
+		}
+		sort.Strings(defs)
+		for _, d := range defs {
+			fmt.Fprintf(&b, "%s = %q\n", d, km.over[sc][d])
+		}
+		b.WriteString("\n")
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".keys-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.WriteString(b.String()); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
+}
+
+// BoundTo reports the default key that newKey currently triggers in scope
+// through an override (a default key's own liveness is the caller's to
+// judge against its catalog — this only sees the override table).
+func (km *Keymap) BoundTo(scope, newKey string) (string, bool) {
+	km.mu.RLock()
+	defer km.mu.RUnlock()
+	def, ok := km.rev[scope][newKey]
+	return def, ok
 }
 
 // Notes returns the load warnings (nil when the file was clean).

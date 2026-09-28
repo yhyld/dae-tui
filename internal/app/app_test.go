@@ -5226,3 +5226,145 @@ func TestSubsLeftClickReclaimsFocus(t *testing.T) {
 		t.Fatalf("a left-pane click must reclaim focus, focus=%d", mm.subs.focus)
 	}
 }
+
+// The keys editor: Enter on a catalog entry captures the next press as the
+// new binding, applies it live and persists it to keys.toml; d restores
+// the default; fixed keys and live conflicts are refused inline.
+func TestSettingsKeysEditor(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{Endpoint: "http://127.0.0.1:2023/graphql"}
+	var m tea.Model = New(stubDriver{}, cfg, filepath.Join(dir, "config.toml"))
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	m, _ = m.Update(bootMsg{Users: 1, Status: driver.Status{Version: "v2.1.1", Running: true}})
+	m, _ = m.Update(groupsMsg{Groups: mustGroups(t)})
+	oldKeys := appKeys
+	t.Cleanup(func() { appKeys = oldKeys })
+
+	// Open the viewer: P → 快捷键 → Enter.
+	m, _ = m.Update(key("P"))
+	m, _ = m.Update(key("j"))
+	m, _ = m.Update(key("j"))
+	m, _ = m.Update(key("j"))
+	m, _ = m.Update(key("enter"))
+	// Park the cursor on groups/t directly (the j/k walk is covered below).
+	mm := m.(Model)
+	for i, e := range keyCatalog {
+		if e.scope == keymap.Groups && e.def == "t" {
+			mm.settings.keysCursor = i
+			break
+		}
+	}
+	m = mm
+	m, _ = m.Update(key("enter"))
+	if v := m.(Model).View(); !strings.Contains(v, "按新键") {
+		t.Fatalf("rebind prompt missing:\n%s", v)
+	}
+	m, _ = m.Update(key("F5"))
+	if got := K(keymap.Groups, "t"); got != "F5" {
+		t.Fatalf("t should now live on F5, got %q", got)
+	}
+	// Persisted: the file names the binding.
+	raw, err := os.ReadFile(keymap.Path(filepath.Join(dir, "config.toml")))
+	if err != nil || !strings.Contains(string(raw), `t = "F5"`) {
+		t.Fatalf("binding should be persisted to keys.toml: %v %s", err, raw)
+	}
+	// And dispatch follows: F5 on the groups page starts a latency test.
+	m, _ = m.Update(key("esc")) // viewer → menu
+	m, _ = m.Update(key("esc")) // menu → closed
+	m, _ = m.Update(key("2"))
+	m, cmd := m.Update(key("F5"))
+	if cmd == nil {
+		t.Fatal("F5 should fire the latency-test command")
+	}
+	// Restore the default via d.
+	m, _ = m.Update(key("P"))
+	m, _ = m.Update(key("j"))
+	m, _ = m.Update(key("j"))
+	m, _ = m.Update(key("j"))
+	m, _ = m.Update(key("enter"))
+	for i, e := range keyCatalog {
+		if e.scope == keymap.Groups && e.def == "t" {
+			mm = m.(Model)
+			mm.settings.keysCursor = i
+			m = mm
+			break
+		}
+	}
+	m, _ = m.Update(key("d"))
+	if got := K(keymap.Groups, "t"); got != "t" {
+		t.Fatalf("d should restore the default, got %q", got)
+	}
+	raw, _ = os.ReadFile(keymap.Path(filepath.Join(dir, "config.toml")))
+	if strings.Contains(string(raw), "t =") {
+		t.Fatalf("restoring the default should drop the override: %s", raw)
+	}
+}
+
+// Fixed keys and live conflicts are refused with an inline message.
+func TestSettingsKeysEditorRejections(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{Endpoint: "http://127.0.0.1:2023/graphql"}
+	var m tea.Model = New(stubDriver{}, cfg, filepath.Join(dir, "config.toml"))
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	m, _ = m.Update(bootMsg{Users: 1, Status: driver.Status{Version: "v2.1.1", Running: true}})
+	oldKeys := appKeys
+	t.Cleanup(func() { appKeys = oldKeys })
+
+	// Open the viewer first.
+	m, _ = m.Update(key("P"))
+	m, _ = m.Update(key("j"))
+	m, _ = m.Update(key("j"))
+	m, _ = m.Update(key("j"))
+	m, _ = m.Update(key("enter"))
+	// Fixed key: bind groups/x to enter — refused.
+	mm := m.(Model)
+	for i, e := range keyCatalog {
+		if e.scope == keymap.Groups && e.def == "x" {
+			mm.settings.keysCursor = i
+			break
+		}
+	}
+	m = mm
+	m, _ = m.Update(key("enter"))
+	m, _ = m.Update(key("enter")) // enter as the new key
+	mm = m.(Model)
+	if mm.settings.keysErr == "" || !strings.Contains(mm.View(), "固定键") {
+		t.Fatalf("binding enter must be refused inline: err=%q", mm.settings.keysErr)
+	}
+	if got := K(keymap.Groups, "x"); got != "x" {
+		t.Fatalf("refused binding must not apply, got %q", got)
+	}
+	// Conflict: bind groups/t to j (a live default in the same scope).
+	for i, e := range keyCatalog {
+		if e.scope == keymap.Groups && e.def == "t" {
+			mm = m.(Model)
+			mm.settings.keysCursor = i
+			m = mm
+			break
+		}
+	}
+	m, _ = m.Update(key("enter"))
+	m, _ = m.Update(key("j"))
+	mm = m.(Model)
+	if mm.settings.keysErr == "" || !strings.Contains(mm.View(), "已被占用") {
+		t.Fatalf("a live conflict must be refused inline: err=%q", mm.settings.keysErr)
+	}
+	if got := K(keymap.Groups, "t"); got != "t" {
+		t.Fatalf("conflicting binding must not apply, got %q", got)
+	}
+	// Global shadowing: bind global/q to x, which groups also uses.
+	for i, e := range keyCatalog {
+		if e.scope == keymap.Global && e.def == "q" {
+			mm = m.(Model)
+			mm.settings.keysCursor = i
+			m = mm
+			break
+		}
+	}
+	m, _ = m.Update(key("enter"))
+	m, _ = m.Update(key("x"))
+	mm = m.(Model)
+	if mm.settings.keysErr == "" {
+		t.Fatal("a global key shadowing a page action must be refused")
+	}
+}
