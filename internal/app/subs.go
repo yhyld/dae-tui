@@ -696,7 +696,7 @@ func (p subsPage) leftLines() []string {
 		}
 		row := cursor + " " + ui.PadRight(s.Tag, max0(p.leftW-26)) +
 			stStyle.Render(ui.Truncate(st, 10)) +
-			ui.HelpStyle.Render(" "+strconv.Itoa(s.NodeCount)+i18n.T("节点"))
+			ui.HelpStyle.Render(" "+i18n.T("%d节点", s.NodeCount))
 		list = append(list, ui.HiRow(row, p.leftW-4, i == p.sel))
 		if failed && s.Info != "" {
 			list = append(list, "    "+ui.ErrorStyle.Render(

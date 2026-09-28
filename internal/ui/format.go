@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"dae-tui/internal/i18n"
 )
 
 // Rate formats a bytes/sec value for display.
@@ -34,9 +36,9 @@ func Bytes(n int64) string {
 	}
 }
 
-// TimeAgo renders a coarse relative age like "3分钟前". The whole UI is
-// Chinese, so the relative times are too — an English "3m ago" next to
-// Chinese labels reads like a rendering bug.
+// TimeAgo renders a coarse relative age like "3分钟前", translated at call
+// time (T takes the format args directly — wrapping a Sprintf result would
+// translate the formatted string, which is never a catalog key).
 func TimeAgo(t time.Time) string {
 	if t.IsZero() {
 		return "-"
@@ -44,13 +46,13 @@ func TimeAgo(t time.Time) string {
 	d := time.Since(t)
 	switch {
 	case d < 30*time.Second:
-		return "刚刚"
+		return i18n.T("刚刚")
 	case d < time.Hour:
-		return fmt.Sprintf("%d分钟前", int(d.Minutes()))
+		return i18n.T("%d分钟前", int(d.Minutes()))
 	case d < 24*time.Hour:
-		return fmt.Sprintf("%d小时前", int(d.Hours()))
+		return i18n.T("%d小时前", int(d.Hours()))
 	default:
-		return fmt.Sprintf("%d天前", int(d.Hours()/24))
+		return i18n.T("%d天前", int(d.Hours()/24))
 	}
 }
 

@@ -2,7 +2,6 @@ package app
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -538,7 +537,7 @@ func (p nodesPage) modalLines() []string {
 				mark, style = "❯ ", ui.CursorStyle
 			}
 			lines = append(lines, ui.HiRow(style.Render(mark+ui.PadRight(g.Name, 24))+
-				ui.HelpStyle.Render(strconv.Itoa(len(g.Nodes))+i18n.T("节点")), p.rightW-4, i == p.pickCursor))
+				ui.HelpStyle.Render(i18n.T("%d节点", len(g.Nodes))), p.rightW-4, i == p.pickCursor))
 		}
 		return lines
 	}

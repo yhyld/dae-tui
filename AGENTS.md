@@ -305,9 +305,11 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   永远是当前生效键位。滚轮发 `K(scope,"j"/"k")` 而不是字面 j/k，否则重映射后滚轮失灵。
   appKeys 是包级变量（页面是值类型拿不到 Model），New 里 loadKeys、查看器里 r 重载；
   测试要覆盖它必须在 New 之后赋值。
-- **i18n（`internal/i18n`）**：中文文案**本身就是 key**——zh 模式 `T()` 原样返回 key（所以断言中文字面量的测试全部照旧），en 模式查 `en` 表、缺失回退 key，en 目录可以滞后于代码。两条铁律：**渲染期文本在 View/render 路径里调 T**（设置里切语言下一帧即生效，语言选择器在 `settings.go` 的 langKey）；**禁止把 T() 结果存进长寿命结构体字段**（包级表如 helpSections/tabLabels/presetLabels 存中文 key、渲染时翻译；toast 等瞬态消息允许构造时翻译，切语言后残留几秒可接受）。`config.toml` 的 `lang = "en"` 切英文，main.go 启动 `i18n.SetLang` 一次。driver 层错误是技术诊断信息，**不翻译**。en 表 key 与 T() 调用点的一致性靠"半合法即降级"兜底，别为对齐而硬编码两份清单。
 - **i18n（`internal/i18n`）**：中文文案**本身就是 key**——zh 模式 `T()` 原样返回 key（所以断言中文字面量的测试全部照旧），en 模式查 `en` 表、缺失回退 key，en 目录可以滞后于代码。两条铁律：**渲染期文本在 View/render 路径里调 T**（设置里切语言下一帧即生效，语言选择器在 `settings.go` 的 langKey）；**禁止把 T() 结果存进长寿命结构体字段**（包级表如 helpSections/tabLabels/presetLabels 存中文 key、渲染时翻译；toast 等瞬态消息允许构造时翻译，切语言后残留几秒可接受）。`config.toml` 的 `lang = "en"` 切英文，main.go 启动 `i18n.SetLang` 一次。driver 层错误是技术诊断信息，**不翻译**。en 表 key 与 T() 调用点的一致性靠"缺失即回退中文"兜底，别为对齐而维护第二份清单。
-  已知包级表（configFieldLabels/sectionTitles/policyChoices/helpSections/tabLabels/
+  带参数的文案必须让 `T` 直接收格式化参数（`T("%d分钟前", n)`）——先 `fmt.Sprintf`
+  再 T 翻译的是已格式化串，目录里永远没有那个 key（TimeAgo 曾因此整体残留中文）。
+  数字+词的拼接注意 en 值的空格（`T("%d节点", n)` 出 "24 nodes"，`Itoa+T("节点")` 出
+  "24nodes"）。已知包级表（configFieldLabels/sectionTitles/policyChoices/helpSections/tabLabels/
   presetLabels/settingsItems）一律存 key、查表处翻译——脚本曾把 T() 包进 init 表达式
   造成语言冻结（配置页右栏字段标签就是因此残留中文），`TestEnglishModeChromeHasNoCJK`
   是 chrome 无中文的回归兜底。dae 核心的 configFlatDesc 说明文字是英文数据（dae 的
