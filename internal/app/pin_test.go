@@ -26,6 +26,17 @@ type pinDriver struct {
 	lastPolicy   driver.Policy
 	lastAddIDs   []string
 	lastDropIDs  []string
+
+	runCalls int
+	runDry   []bool
+	runErr   error
+}
+
+// Run records the auto/manual reload calls the reload tests assert on.
+func (d *pinDriver) Run(_ context.Context, dry bool) error {
+	d.runCalls++
+	d.runDry = append(d.runDry, dry)
+	return d.runErr
 }
 
 const pinFixtureRouting = "pname(NetworkManager, systemd-resolved, dnsmasq) -> must_direct\n" +

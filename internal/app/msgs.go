@@ -32,6 +32,47 @@ type logoutMsg struct{}
 
 type gotoGroupMsg struct{ ID string }
 
+// reloadNoteMsg reports a mutation that bumps the backend's config version:
+// the label names what changed, and lands in the pending-reload list the A
+// confirm shows ("why is a reload pending?"). Only successful mutations
+// emit one; the note is a translated-at-mutation-time string — entries are
+// a historical log of what was done, so a mid-session language switch
+// leaves older entries in the old language (same allowance as toasts).
+type reloadNoteMsg struct{ Note string }
+
+// autoReloadToggledMsg reports the settings toggle's outcome; the dedicated
+// type keeps the menu's displayed state honest even when the config write
+// fails (the root model only flips settings.autoReload on success).
+type autoReloadToggledMsg struct {
+	On  bool
+	Err error
+}
+
+func reloadNoteCmd(note string) tea.Cmd {
+	return func() tea.Msg { return reloadNoteMsg{Note: note} }
+}
+
+// withReloadNote tags a mutation cmd's success messages with its label as a
+// pending-reload note. Failure paths (opDoneMsg carrying Err) and the node
+// import report (imports alone don't touch group versions) pass through
+// untouched.
+func withReloadNote(cmd tea.Cmd, label string) tea.Cmd {
+	return func() tea.Msg {
+		msg := cmd()
+		switch m := msg.(type) {
+		case opDoneMsg:
+			if m.Err != nil {
+				return m
+			}
+		case importDoneMsg:
+			return m
+		case tea.BatchMsg:
+			return append(m, reloadNoteCmd(label))
+		}
+		return tea.BatchMsg{func() tea.Msg { return msg }, reloadNoteCmd(label)}
+	}
+}
+
 type statusMsg struct {
 	Status driver.Status
 	Err    error
@@ -196,7 +237,7 @@ type nodeMutation struct {
 }
 
 func nodeMutateCmd(d driver.Driver, nm nodeMutation, label string) tea.Cmd {
-	return withCtxT(30*time.Second, func(ctx context.Context) tea.Msg {
+	return withReloadNote(withCtxT(30*time.Second, func(ctx context.Context) tea.Msg {
 		if nm.kind == 0 {
 			report, err := d.ImportNodes(ctx, nm.links, nm.tag)
 			if err != nil {
@@ -231,7 +272,7 @@ func nodeMutateCmd(d driver.Driver, nm nodeMutation, label string) tea.Cmd {
 			return opDoneMsg{Op: label, Err: gerr, Idle: busyNodes}
 		}
 		return nodesChangedMsg{Nodes: nodes, Groups: groups}
-	})
+	}), label)
 }
 
 func loadManualNodesCmd(d driver.Driver) tea.Cmd {
@@ -287,7 +328,7 @@ type groupMutation struct {
 }
 
 func groupMutateCmd(d driver.Driver, gm groupMutation, label string) tea.Cmd {
-	return withCtx(func(ctx context.Context) tea.Msg {
+	return withReloadNote(withCtx(func(ctx context.Context) tea.Msg {
 		var err error
 		switch gm.kind {
 		case 0:
@@ -315,11 +356,11 @@ func groupMutateCmd(d driver.Driver, gm groupMutation, label string) tea.Cmd {
 			return opDoneMsg{Op: label, Err: lerr}
 		}
 		return groupsMsg{Groups: gs}
-	})
+	}), label)
 }
 
 func switchNodeCmd(d driver.Driver, groupID string, p driver.Policy) tea.Cmd {
-	return withCtx(func(ctx context.Context) tea.Msg {
+	return withReloadNote(withCtx(func(ctx context.Context) tea.Msg {
 		if err := d.SetGroupPolicy(ctx, groupID, p); err != nil {
 			return opDoneMsg{Op: i18n.T("切换节点"), Err: err}
 		}
@@ -328,7 +369,7 @@ func switchNodeCmd(d driver.Driver, groupID string, p driver.Policy) tea.Cmd {
 			return opDoneMsg{Op: i18n.T("切换节点"), Err: err}
 		}
 		return groupsMsg{Groups: gs}
-	})
+	}), i18n.T("切换节点"))
 }
 
 func testLatencyCmd(d driver.Driver, ids []string) tea.Cmd {
@@ -381,7 +422,7 @@ type subMutation struct {
 }
 
 func subMutateCmd(d driver.Driver, m subMutation, label string) tea.Cmd {
-	return withCtxT(30*time.Second, func(ctx context.Context) tea.Msg {
+	return withReloadNote(withCtxT(30*time.Second, func(ctx context.Context) tea.Msg {
 		var err error
 		switch m.kind {
 		case 0:
@@ -406,7 +447,7 @@ func subMutateCmd(d driver.Driver, m subMutation, label string) tea.Cmd {
 			return opDoneMsg{Op: label, Err: lerr, Idle: busySubs}
 		}
 		return subsMsg{Subs: subs}
-	})
+	}), label)
 }
 
 func loadSelectionsCmd(d driver.Driver) tea.Cmd {
@@ -423,8 +464,19 @@ func loadInterfacesCmd(d driver.Driver) tea.Cmd {
 	})
 }
 
+// selectCmd switches the selected profile of one section; the label names
+// the section so the pending-reload note reads like a change, not a verb.
 func selectCmd(d driver.Driver, section, id string) tea.Cmd {
-	return withCtx(func(ctx context.Context) tea.Msg {
+	label := i18n.T("切换选择")
+	switch section {
+	case "config":
+		label = i18n.T("切换全局配置方案")
+	case "dns":
+		label = i18n.T("切换 DNS 方案")
+	case "routing":
+		label = i18n.T("切换路由方案")
+	}
+	return withReloadNote(withCtx(func(ctx context.Context) tea.Msg {
 		var err error
 		switch section {
 		case "config":
@@ -435,14 +487,14 @@ func selectCmd(d driver.Driver, section, id string) tea.Cmd {
 			err = d.SelectRouting(ctx, id)
 		}
 		if err != nil {
-			return opDoneMsg{Op: i18n.T("切换选择"), Err: err}
+			return opDoneMsg{Op: label, Err: err}
 		}
 		sel, lerr := d.ListSelections(ctx)
 		if lerr != nil {
-			return opDoneMsg{Op: i18n.T("切换选择"), Err: lerr}
+			return opDoneMsg{Op: label, Err: lerr}
 		}
 		return selectionsMsg{Sel: sel}
-	})
+	}), label)
 }
 
 type profileMutation struct {
@@ -454,7 +506,7 @@ type profileMutation struct {
 }
 
 func profileMutateCmd(d driver.Driver, pm profileMutation, label string) tea.Cmd {
-	return withCtxT(30*time.Second, func(ctx context.Context) tea.Msg {
+	return withReloadNote(withCtxT(30*time.Second, func(ctx context.Context) tea.Msg {
 		var err error
 		switch pm.kind {
 		case 0:
@@ -472,11 +524,11 @@ func profileMutateCmd(d driver.Driver, pm profileMutation, label string) tea.Cmd
 			return opDoneMsg{Op: label, Err: lerr}
 		}
 		return selectionsMsg{Sel: sel}
-	})
+	}), label)
 }
 
 func configTextCmd(d driver.Driver, section, id, text, label string) tea.Cmd {
-	return withCtxT(30*time.Second, func(ctx context.Context) tea.Msg {
+	return withReloadNote(withCtxT(30*time.Second, func(ctx context.Context) tea.Msg {
 		var err error
 		switch section {
 		case "dns":
@@ -492,11 +544,11 @@ func configTextCmd(d driver.Driver, section, id, text, label string) tea.Cmd {
 			return opDoneMsg{Op: label, Err: lerr}
 		}
 		return selectionsMsg{Sel: sel}
-	})
+	}), label)
 }
 
 func configFieldCmd(d driver.Driver, id string, field driver.ConfigField, value, label string) tea.Cmd {
-	return withCtxT(30*time.Second, func(ctx context.Context) tea.Msg {
+	return withReloadNote(withCtxT(30*time.Second, func(ctx context.Context) tea.Msg {
 		if err := d.UpdateConfigField(ctx, id, field, value); err != nil {
 			return opDoneMsg{Op: label, Err: err}
 		}
@@ -505,7 +557,7 @@ func configFieldCmd(d driver.Driver, id string, field driver.ConfigField, value,
 			return opDoneMsg{Op: label, Err: lerr}
 		}
 		return selectionsMsg{Sel: sel}
-	})
+	}), label)
 }
 
 type editorDoneMsg struct {

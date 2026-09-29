@@ -45,12 +45,17 @@ type settings struct {
 	keysCursor int
 	keysEdit   bool
 	keysErr    string
+
+	// autoReload mirrors cfg.AutoReload for the menu row's state suffix;
+	// the root model keeps it in step (enterMain + the toggle's msg).
+	autoReload bool
 }
 
 const (
 	itemAccount = iota
 	itemTheme
 	itemLang
+	itemAutoReload
 	itemKeys
 	itemAbout
 )
@@ -163,6 +168,7 @@ var settingsItems = []settingsItem{
 	{"账户", true},
 	{"主题", true},
 	{"语言", true},
+	{"自动重载", true},
 	{"快捷键", true},
 	{"关于", true},
 }
@@ -236,6 +242,8 @@ func (s *settings) key(m *Model, msg tea.KeyMsg) tea.Cmd {
 						s.langCur = i
 					}
 				}
+			case itemAutoReload:
+				return s.toggleAutoReload(m)
 			case itemKeys:
 				s.sub = subKeys
 				s.keysScroll = 0
@@ -245,6 +253,20 @@ func (s *settings) key(m *Model, msg tea.KeyMsg) tea.Cmd {
 		}
 	}
 	return nil
+}
+
+// toggleAutoReload flips the auto-reload preference and persists it through
+// the locked setter (the whole-file save races the background token
+// refresh). The outcome returns as autoReloadToggledMsg so the root model —
+// not the page — decides what the menu shows on failure.
+func (s *settings) toggleAutoReload(m *Model) tea.Cmd {
+	want, path, cfgr := !m.cfg.AutoReload, m.cfgPath, m.cfg
+	return func() tea.Msg {
+		if err := cfgr.UpdateAutoReload(path, want); err != nil {
+			return autoReloadToggledMsg{Err: err}
+		}
+		return autoReloadToggledMsg{On: want}
+	}
 }
 
 func (m *Model) cfgThemeDir() (string, bool) {
@@ -444,6 +466,13 @@ func (s settings) overlay() *overlaySpec {
 				mark, style = "❯ ", ui.CursorStyle
 			}
 			label := i18n.T(it.label)
+			if i == itemAutoReload {
+				state := i18n.T("关闭")
+				if s.autoReload {
+					state = i18n.T("开启")
+				}
+				label += ui.HelpStyle.Render("  " + state)
+			}
 			if !it.enabled {
 				label += i18n.T("（即将支持）")
 			}

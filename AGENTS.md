@@ -318,7 +318,10 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   失败明细渲染在右栏（`importFail`）——一行 toast 说不完逐条报错。
 - `P` 是设置浮窗（`settings.go`：sub 0 菜单 / 1 账户菜单 / 2 改密码 / 3 退出确认 /
   4 主题选择器 / 5 关于），已计入 `anyModal()`；esc 在子窗口逐级返回、在菜单关闭。
-  账户状态机已从 homePage 迁入根模型；未实现的菜单项 enabled=false（光标跳过、置灰
+  菜单里的「自动重载」没有子窗口——Enter 直接切换（`toggleAutoReload` 写盘、结果经
+  `autoReloadToggledMsg` 回根模型），行尾跟随 开启/关闭 状态（`settings.autoReload`
+  由根模型在 enterMain 与切换成功时同步）。账户状态机已从 homePage 迁入根模型；
+  未实现的菜单项 enabled=false（光标跳过、置灰
   加「即将支持」，实现一项开一项）。版本来源：main.go 的 `version` 变量吃 ldflags
   `-X main.version=`，缺省回退 `debug.ReadBuildInfo` 的 vcs 修订号；`app.Version`
   只读展示。盲文徽标已是正式设计：`settings.go` 的 `aboutLogoFrame`（框层：圆角框+
@@ -352,6 +355,30 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   status+traffic 探测——**别给断线另造重试入口**。`!TrafficStats` 的后端只有
   status 探测（15s 才到阈值），这是降级路径不是 bug。
   `TestDisconnectBadgeAfterProbeFailures` 兜底。
+- **待重载清单与自动重载（根模型 + `withReloadNote`）**：daed 只给 `dae.modified`
+  一个布尔（selected 与 running 的 config/dns/routing ID+版本、被引用组集合的版本和
+  全对比），"为什么需重载"拿不到——所以**客户端记账**。9 个通用 mutation cmd
+  （`msgs.go` 的 node/group/sub/select/profile/configText/configField/switchNode）整体
+  包在 `withReloadNote` 里：成功的返回消息附一条 `reloadNoteMsg{label}`（**失败
+  opDoneMsg 与 importDoneMsg 原样放过**——导入不挂组、不动版本号）；pin/unpin/切组
+  三个 cmd 在成功 BatchMsg 里手工补。根模型 handler 只在 `status.Running` 时记录
+  （daed 停机时 modified 恒 false，记了也永远不被确认）。清单生命周期跟 status 走
+  （`applyStatus`）：**翻 true 且无本地原因 → 补一条「外部变更」**（daed Web UI 或
+  本会话之前的操作——远程改了什么无从得知，这是诚实上限）；**翻 false → 清空**；
+  有 `reloadStaleGuard`（7s）守卫——刚落 note 时还在天上的旧轮询快照先于变更，直接
+  信它会错清/错标外部（status 赋值照常、只跳过簿记）。呈现：顶栏黄字
+  `⚠ 需重载 (A) · N 项`（**黄不红**：需重载从来不是紧急态，代理在旧配置上正常跑；
+  紧急态各有红字——未运行/连接断开/固定组已空），A 确认浮窗列清单（`applyOverlay`，
+  上限 8 行 + 省略计数；**整段以 Modified 为门**，note 与下一次轮询之间有竞态）。
+  note 是构造时已翻译的字符串存长寿命列表——历史日志语义，切语言旧条目保持原语言
+  （与 toast 同口径的例外）。**自动重载**（设置菜单「自动重载」/`auto_reload`，
+  默认关）：只在 reloadNoteMsg 到达时武装 `autoReloadAt = now+2s`（trailing debounce，
+  连续操作只重载一次），tickMsg 里到期发 `runCmd(drv, false)`；**外部变更不武装**
+  （不替别人的改动按破坏性按钮）、`confirmApply` 打开时推迟（不在用户确认时开火）、
+  发过一次即清零（**失败即停**，绝不自动重试——回滚失败会杀死 daed 进程，重试在
+  叠加这个概率）、关开关时撤销未决的武装。开关写盘走 `cfg.UpdateAutoReload`
+  （加锁 setter），结果经 `autoReloadToggledMsg` 回根模型（失败不翻转菜单状态）。
+  测试在 `reload_test.go`（pinDriver 加了 Run 记录器）。
 - **键位重映射（`internal/keymap` + `app/keybinds.go`）**：动作以"作用域+默认键"标识
   （如 groups/j），keys.toml（config.toml 同目录）按节覆盖默认键；**分发 switch 仍读
   默认键名**——`tk(scope, pressed)` 在各页分发点把按键改写回规范名，改走的默认键返回
@@ -469,7 +496,7 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   rows 函数 + TitledBox 包一层；配对用 `pairedRow`（内部即 `PaneRow`），别手拼。
 - **首页重点提亮层级**：一眼要看的（代理状态徽章、上下行**加粗**速率、活动预设 ●、
   组当前节点名）用色块/加粗/亮色；回头查的（方案名、连接/UDP/API、累计、环境事实）
-  一律暗色；异常（订阅过期、接口缺失）黄/红。运行配置过期的 "⚠ 需重载 (A)" 提示统一在顶栏状态行（首页代理盒与配置页的本地横幅已删）。徽章行不再带版本号（状态栏
+  一律暗色；异常（订阅过期、接口缺失）黄/红。运行配置过期的 "⚠ 需重载 (A)" 提示统一在顶栏状态行（黄字带待生效条数，机制见横切机制的"待重载清单"节；首页代理盒与配置页的本地横幅已删）。徽章行不再带版本号（状态栏
   已有）；`方案 config X · dns Y` + 续行 `routing Z` 在"代理"盒内。
 - **首页信息密度（都不新增轮询，数据来自已有消息流）**：
   - **订阅摘要**（`subLines`，根模型在 `subsMsg` 里喂 `home.setSubs`，渲染进"环境"盒）：

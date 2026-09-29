@@ -2108,12 +2108,21 @@ func TestSubsNodeCacheSurvivesReload(t *testing.T) {
 		t.Fatalf("expanded nodes should render without a re-fetch:\n%s", v)
 	}
 	// An update invalidates just that subscription and re-fetches it.
+	// The mutation's success now returns a batch (subsMsg + the
+	// pending-reload note), so feed every message in it.
 	m, cmd := m.Update(key("u"))
 	if cmd == nil {
 		t.Fatal("u should fire subMutateCmd")
 	}
-	m, cmd = m.Update(cmd()) // subsMsg after the mutation
-	if cmd == nil {
+	var fetch tea.Cmd
+	for _, msg := range execCmds(cmd) {
+		var c tea.Cmd
+		m, c = m.Update(msg)
+		if c != nil {
+			fetch = c
+		}
+	}
+	if fetch == nil {
 		t.Fatal("an updated subscription should be re-fetched")
 	}
 	if _, ok := m.(Model).subs.subNodes["s1"]; ok {
@@ -2133,7 +2142,9 @@ func TestBusyShowsHeaderSpinner(t *testing.T) {
 	if v := m.View(); !strings.Contains(v, "处理中") {
 		t.Fatalf("header should show the busy spinner:\n%s", v)
 	}
-	m, _ = m.Update(cmd()) // subsMsg: the update completed
+	for _, msg := range execCmds(cmd) { // subsMsg + reload note
+		m, _ = m.Update(msg)
+	}
 	if v := m.View(); strings.Contains(v, "处理中") {
 		t.Fatalf("busy spinner should be gone after the update:\n%s", v)
 	}
@@ -3629,12 +3640,12 @@ func TestAcctOverlay(t *testing.T) {
 	}
 }
 
-// All settings entries are live now: the cursor walks the five rows in
-// order with no skips left.
+// All settings entries are live now: the cursor walks the rows in order
+// with no skips left.
 func TestSettingsMenuWalksAllEntries(t *testing.T) {
 	m := newTestModel(t)
 	m, _ = m.Update(key("P"))
-	for i, want := range []int{itemTheme, itemLang, itemKeys, itemAbout} {
+	for i, want := range []int{itemTheme, itemLang, itemAutoReload, itemKeys, itemAbout} {
 		m, _ = m.Update(key("j"))
 		if mm := m.(Model); mm.settings.cur != want {
 			t.Fatalf("j #%d should land on entry %d, cur=%d", i+1, want, mm.settings.cur)
@@ -5186,6 +5197,7 @@ func TestSettingsAbout(t *testing.T) {
 	m, _ = m.Update(key("P"))
 	m, _ = m.Update(key("j")) // 主题
 	m, _ = m.Update(key("j")) // 语言
+	m, _ = m.Update(key("j")) // 自动重载
 	m, _ = m.Update(key("j")) // 快捷键
 	m, _ = m.Update(key("j")) // 关于
 	m, _ = m.Update(key("enter"))
@@ -5313,6 +5325,7 @@ func TestSettingsKeysViewer(t *testing.T) {
 	m, _ = m.Update(key("P"))
 	m, _ = m.Update(key("j")) // 主题
 	m, _ = m.Update(key("j")) // 语言
+	m, _ = m.Update(key("j")) // 自动重载
 	m, _ = m.Update(key("j")) // 快捷键
 	m, _ = m.Update(key("enter"))
 	mm := m.(Model)
@@ -5437,6 +5450,7 @@ func TestSettingsKeysEditor(t *testing.T) {
 	m, _ = m.Update(key("j"))
 	m, _ = m.Update(key("j"))
 	m, _ = m.Update(key("j"))
+	m, _ = m.Update(key("j"))
 	m, _ = m.Update(key("enter"))
 	// Park the cursor on groups/t directly (the j/k walk is covered below).
 	mm := m.(Model)
@@ -5473,6 +5487,7 @@ func TestSettingsKeysEditor(t *testing.T) {
 	m, _ = m.Update(key("j"))
 	m, _ = m.Update(key("j"))
 	m, _ = m.Update(key("j"))
+	m, _ = m.Update(key("j"))
 	m, _ = m.Update(key("enter"))
 	for i, e := range keyCatalog {
 		if e.scope == keymap.Groups && e.def == "t" {
@@ -5504,6 +5519,7 @@ func TestSettingsKeysEditorRejections(t *testing.T) {
 
 	// Open the viewer first.
 	m, _ = m.Update(key("P"))
+	m, _ = m.Update(key("j"))
 	m, _ = m.Update(key("j"))
 	m, _ = m.Update(key("j"))
 	m, _ = m.Update(key("j"))

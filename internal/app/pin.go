@@ -136,6 +136,7 @@ func switchGroupCmd(d driver.Driver, cfgr *config.Config, cfgPath, from, to, man
 			},
 			loadGroupsCmd(d),
 			loadSelectionsCmd(d),
+			reloadNoteCmd(label),
 		}
 	})
 }
@@ -397,6 +398,7 @@ func pinNodeCmd(d driver.Driver, cfgr *config.Config, cfgPath, nodeID, nodeName,
 			},
 			loadGroupsCmd(d),
 			loadSelectionsCmd(d),
+			reloadNoteCmd(i18n.T("固定节点 %s", ui.SpaceAfterFlag(nodeName))),
 		}
 	})
 }
@@ -441,6 +443,7 @@ func unpinNodeCmd(d driver.Driver, cfgr *config.Config, cfgPath string) tea.Cmd 
 			func() tea.Msg { return opDoneMsg{Op: i18n.T("已解除固定（A 重载后生效）")} },
 			loadGroupsCmd(d),
 			loadSelectionsCmd(d),
+			reloadNoteCmd(i18n.T("解除固定节点")),
 		}
 	})
 }

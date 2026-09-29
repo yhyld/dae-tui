@@ -58,6 +58,14 @@ type Config struct {
 	// makes re-pinning a pure membership swap.
 	Pin Pin `toml:"pin"`
 
+	// AutoReload reloads daed automatically (2s after the last change this
+	// TUI made) instead of waiting for the manual A. Off by default: every
+	// reload is a cold restart of the control plane — established
+	// connections drop for about a second — and a failed rollback kills the
+	// daed process, so it must be a deliberate opt-in. External changes
+	// (daed web UI) never trigger it; a failed auto-reload never retries.
+	AutoReload bool `toml:"auto_reload"`
+
 	// mu serializes mutations + saves: driver hooks persist new tokens and
 	// credentials from background request goroutines while the UI's logout
 	// clears the session on the tea goroutine. Unexported, so the struct
@@ -166,6 +174,15 @@ func (c *Config) UpdatePin(path, groupID, restore string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.Pin.GroupID, c.Pin.Restore = groupID, restore
+	return c.saveLocked(path)
+}
+
+// UpdateAutoReload flips the auto-reload preference and persists it. Locked
+// like UpdateTheme (whole-file saves race the background token refresh).
+func (c *Config) UpdateAutoReload(path string, on bool) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.AutoReload = on
 	return c.saveLocked(path)
 }
 

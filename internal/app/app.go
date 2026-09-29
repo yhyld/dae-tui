@@ -77,6 +77,19 @@ type Model struct {
 	spinning      bool
 	confirmApply  bool
 
+	// Pending-reload bookkeeping: reloadNotes lists what this session
+	// changed since the server last reported an unmodified running config
+	// (the A confirm shows it); reloadDirty marks that the latest flip to
+	// modified is ours, so no "external change" line is fabricated;
+	// reloadLastNote guards against a status poll that was already in
+	// flight when the newest note landed (its snapshot predates the
+	// mutation). autoReloadAt is the pending auto-reload deadline (zero =
+	// idle; see the tickMsg handler).
+	reloadNotes    []string
+	reloadDirty    bool
+	reloadLastNote time.Time
+	autoReloadAt   time.Time
+
 	refreshing  bool
 	refreshLeft int
 	refreshAt   time.Time
@@ -211,6 +224,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					cmds = append(cmds, cmd)
 				}
 			}
+			// Auto-reload: fire once the debounce deadline passes. Never
+			// while the user stares at the A confirm (firing under their
+			// finger re-arms instead); a fired attempt leaves the deadline
+			// zeroed, so a failure never retries on its own.
+			if !m.autoReloadAt.IsZero() {
+				if m.confirmApply {
+					m.autoReloadAt = time.Now().Add(autoReloadDelay)
+				} else if time.Now().After(m.autoReloadAt) {
+					m.autoReloadAt = time.Time{}
+					cmds = append(cmds, runCmd(m.drv, false))
+				}
+			}
 		}
 		return m, tea.Batch(cmds...)
 
@@ -231,7 +256,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.login.username.SetValue(m.cfg.Username)
 			return m, m.login.init()
 		default:
-			m.status = msg.Status
+			m.applyStatus(msg.Status)
 			m.enterMain()
 			return m, m.initialLoad()
 		}
@@ -339,10 +364,47 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case statusMsg:
 		if msg.Err == nil {
-			m.status = msg.Status
+			m.applyStatus(msg.Status)
 			m.connFails = 0
 		} else {
 			m.connFails++
+		}
+		return m, nil
+
+	case reloadNoteMsg:
+		// Notes only matter while the proxy runs: daed reports modified
+		// false whenever it is stopped, so notes recorded while stopped
+		// would never be confirmed — the next start applies everything
+		// wholesale anyway.
+		if m.status.Running {
+			dup := false
+			for _, n := range m.reloadNotes {
+				if n == msg.Note {
+					dup = true
+					break
+				}
+			}
+			if !dup {
+				m.reloadNotes = append(m.reloadNotes, msg.Note)
+			}
+			m.reloadDirty, m.reloadLastNote = true, time.Now()
+			if m.cfg.AutoReload {
+				m.autoReloadAt = m.reloadLastNote.Add(autoReloadDelay)
+			}
+		}
+		return m, nil
+
+	case autoReloadToggledMsg:
+		if msg.Err != nil {
+			m.showErrToast(i18n.T("✗ 切换自动重载失败: ") + shortErr(msg.Err))
+			return m, nil
+		}
+		m.settings.autoReload = msg.On
+		if msg.On {
+			m.showToast(i18n.T("已开启自动重载（每次重载会短暂断开现有连接）"))
+		} else {
+			m.showToast(i18n.T("已关闭自动重载"))
+			m.autoReloadAt = time.Time{} // a pending fire dies with the switch
 		}
 		return m, nil
 
@@ -622,10 +684,41 @@ func (m *Model) pinManagedName() string {
 	return ""
 }
 
+// reloadStaleGuard covers the status poll's in-flight window: a snapshot
+// taken just before a mutation can arrive just after its note, so a status
+// this close to the newest note is trusted for display but not for list
+// bookkeeping (it cannot know about the change yet).
+const reloadStaleGuard = 7 * time.Second
+
+// autoReloadDelay is the trailing debounce for auto-reload: every note
+// pushes the deadline, so a chain of mutations (pin's multi-step op, a
+// burst of field edits) reloads exactly once at the end.
+const autoReloadDelay = 2 * time.Second
+
+// applyStatus records a fresh backend status and maintains the
+// pending-reload list: a flip to modified with no local cause is an
+// external change (daed web UI, or this session never saw the edit), and
+// an unmodified status clears the list — the running config absorbed it.
+func (m *Model) applyStatus(st driver.Status) {
+	prev := m.status.Modified
+	m.status = st
+	if time.Since(m.reloadLastNote) < reloadStaleGuard {
+		return
+	}
+	switch {
+	case st.Modified && !prev && !m.reloadDirty:
+		m.reloadNotes = append(m.reloadNotes, i18n.T("外部变更（daed Web UI 或本会话之外的操作）"))
+	case !st.Modified && len(m.reloadNotes) > 0:
+		m.reloadNotes = nil
+	}
+	m.reloadDirty = false
+}
+
 func (m *Model) enterMain() {
 	m.phase = phaseMain
 	m.page = pageHome
 	m.settings.user = m.cfg.Username
+	m.settings.autoReload = m.cfg.AutoReload
 	m.settings.open, m.settings.sub = false, subMenu
 }
 
@@ -1124,13 +1217,7 @@ func (m Model) View() string {
 		body = ui.Overlay(body, overlayBox(ov, cw-1), cw-1, avail)
 	}
 	if m.confirmApply {
-		body = ui.Overlay(body, overlayBox(&overlaySpec{destructive: true, lines: []string{
-			ui.TitleStyle.Render(i18n.T(" 确认重载 (run)？")),
-			i18n.T(" 重载会按当前状态重新生成 dae 配置：方案切换、"),
-			i18n.T(" 订阅更新、群组改动都要重载后才生效。"),
-			"",
-			ui.OKStyle.Render(i18n.T(" y 重载")) + "    " + ui.ErrorStyle.Render(i18n.T("n / esc 取消")),
-		}}, cw-1), cw-1, avail)
+		body = ui.Overlay(body, overlayBox(m.applyOverlay(), cw-1), cw-1, avail)
 	}
 	if m.helpOpen {
 		body = ui.Overlay(body, helpOverlayBox(cw-1, avail, m.helpScroll), cw-1, avail)
@@ -1177,6 +1264,37 @@ func shortEndpoint(ep string) string {
 	return s
 }
 
+// applyOverlay builds the A confirm. The pending-change list answers "what
+// would this reload apply?" at the exact moment the user asks — the notes
+// are the session's own mutation labels plus the external-change line; the
+// whole section hides while the server reports nothing pending (a note
+// racing the next status poll would otherwise show a list under a
+// no-reload-needed confirm).
+func (m Model) applyOverlay() *overlaySpec {
+	lines := []string{ui.TitleStyle.Render(i18n.T(" 确认重载 (run)？"))}
+	if m.status.Modified && len(m.reloadNotes) > 0 {
+		lines = append(lines, ui.HelpStyle.Render(i18n.T(" 自上次重载以来的变更：")))
+		const maxNotes = 8
+		notes := m.reloadNotes
+		if len(notes) > maxNotes {
+			lines = append(lines, ui.HelpStyle.Render(
+				i18n.T("  （较早的 %d 项省略）", len(notes)-maxNotes)))
+			notes = notes[len(notes)-maxNotes:]
+		}
+		for _, n := range notes {
+			lines = append(lines, " · "+n)
+		}
+		lines = append(lines, "")
+	}
+	lines = append(lines,
+		i18n.T(" 重载会按当前状态重新生成 dae 配置：方案切换、"),
+		i18n.T(" 订阅更新、群组改动都要重载后才生效。"),
+		"",
+		ui.OKStyle.Render(i18n.T(" y 重载"))+"    "+ui.ErrorStyle.Render(i18n.T("n / esc 取消")),
+	)
+	return &overlaySpec{destructive: true, lines: lines}
+}
+
 func (m Model) statusBar() string {
 	run := ui.OKStyle.Render(i18n.T("● 运行中"))
 	if !m.status.Running {
@@ -1192,7 +1310,14 @@ func (m Model) statusBar() string {
 	}
 	mod := ""
 	if m.status.Modified {
-		mod = ui.ErrorStyle.Render(i18n.T(" ⚠ 需重载 (A)"))
+		// Yellow, never red: a pending reload is a notice, not an emergency
+		// — the proxy keeps running on the old config, and the real
+		// emergencies (stopped, link down) carry their own red badges.
+		txt := "⚠ " + i18n.T("需重载") + " (" + K(keymap.Global, "A") + ")"
+		if n := len(m.reloadNotes); n > 0 {
+			txt += i18n.T(" · %d 项", n)
+		}
+		mod = " " + lipgloss.NewStyle().Foreground(ui.Yellow).Render(txt)
 	}
 	left := ui.TitleStyle.Render("dae-tui") + ui.HelpStyle.Render(" ("+shortEndpoint(m.cfg.Endpoint)+")") +
 		"  " + run + ui.HelpStyle.Render(" dae "+m.status.Version) + mod
