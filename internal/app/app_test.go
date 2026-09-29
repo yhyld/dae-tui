@@ -1779,6 +1779,61 @@ func TestHomeNoRoutingProfile(t *testing.T) {
 
 // --- node list filter / sort ---
 
+// The fzf layer: a scattered subsequence finds nodes a substring never
+// would, relevance puts the tight name hit above a later field hit, and the
+// highlighted name column carries SGR accents only around matched runes —
+// stripped, it must read back as the SpaceAfterFlag'd plain name.
+func TestFuzzyFilterMatchRankHighlight(t *testing.T) {
+	nodes := []driver.Node{
+		{ID: "a", Name: "Tokyo-01", Protocol: "vmess"},
+		{ID: "b", Name: "法兰克福-02", Protocol: "ss"},
+		{ID: "c", Name: "sg.hk-03", Protocol: "trojan"},
+		{ID: "f", Name: "🇩🇪Germany 01", Protocol: "vmess"},
+	}
+	ids := func(q string) []string {
+		v := newNodeView()
+		v.applied = q
+		out := []string{}
+		for _, n := range v.visible(nodes, nil) {
+			out = append(out, n.ID)
+		}
+		return out
+	}
+	if got := ids("tk1"); !reflect.DeepEqual(got, []string{"a"}) {
+		t.Fatalf("scattered subsequence: %v, want [a]", got)
+	}
+	if got := ids("shk"); !reflect.DeepEqual(got, []string{"c"}) {
+		t.Fatalf("name hit across a dot: %v, want [c]", got)
+	}
+	// Relevance: "b"'s protocol hit at position 0 outranks the vmess hits at
+	// position 2 ("a" then "f", stable) — and "c" (no double s anywhere) is
+	// out.
+	if got := ids("ss"); !reflect.DeepEqual(got, []string{"b", "a", "f"}) {
+		t.Fatalf("relevance order: %v, want [b a f]", got)
+	}
+	// The highlight: nodeName round-trips the name — flag spacing intact —
+	// whether it matched or not (a headless render emits no SGR, so the
+	// accenting itself is only visible on a real terminal; what the test
+	// pins is that painting it cannot corrupt the name).
+	if got := plain(nodeName(nodes[0], "tk1")); got != "Tokyo-01" {
+		t.Fatalf("highlight strips back to the name: %q", got)
+	}
+	if got := plain(nodeName(nodes[1], "tk1")); got != "法兰克福-02" {
+		t.Fatalf("a non-matching name survives verbatim: %q", got)
+	}
+	if got := plain(nodeName(nodes[3], "de")); got != "🇩🇪 Germany 01" {
+		t.Fatalf("flag spacing under highlight: %q", got)
+	}
+	// The matcher is greedy-leftmost: "to" packs onto the leading "To", not
+	// the later "o" alone would leave a hole.
+	if pos := fuzzyPositions("Tokyo-01", "to"); !reflect.DeepEqual(pos, []int{0, 1}) {
+		t.Fatalf("greedy-leftmost positions: %v", pos)
+	}
+	if pos := fuzzyPositions("Tokyo-01", "zz"); pos != nil {
+		t.Fatalf("a non-fitting query must not match: %v", pos)
+	}
+}
+
 // The shared filter/sort: matching by any recognizable field, latency
 // ordering with unmeasured nodes trailing, and the key contract of the
 // filter box.
@@ -1805,10 +1860,14 @@ func TestNodeViewFilterAndSort(t *testing.T) {
 	if got := ids(v); !reflect.DeepEqual(got, []string{"a", "b", "c"}) {
 		t.Fatalf("no filter: %v", got)
 	}
-	// Match on name, protocol, tag, address — case-insensitively.
+	// Match on name, protocol, tag, address — case-insensitively, as a
+	// subsequence (fzf-style). While filtering, relevance orders the
+	// survivors: "SS" ranks the protocol "ss" (a hit at position 0) above
+	// "vmess" (the same fragment starting later), and a name hit outranks a
+	// protocol hit ("hk" → a only, by name).
 	for q, want := range map[string][]string{
 		"hk":           {"a"},
-		"SS":           {"a", "b"}, // substring: vmess contains "ss"
+		"SS":           {"b", "a"}, // protocol hit: ss ranks above vmess
 		"机场":           {"b"},
 		"example.com":  {"c"},
 		"":             {"a", "b", "c"},
@@ -4585,6 +4644,224 @@ func TestSubsMutationFailureClearsBusy(t *testing.T) {
 	}
 }
 
+// Vim-visual-style range select: v arms on the cursor's node, a second
+// press marks everything between the two endpoints inclusive. A letter key,
+// deliberately not ctrl+space — that toggles the input method. The anchor is
+// the node ID, so a latency poll that reorders the rows between the presses
+// still marks the same two nodes — and an anchor that a refresh dissolved
+// restarts the range instead of marking a wrong span.
+func TestGroupsRangeMark(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("2"))
+	m, _ = m.Update(key("l"))     // focus the detail column
+	m, _ = m.Update(key("enter")) // open the subscription section
+	m, _ = m.Update(key("j"))     // 东京-01 (n1)
+	m, _ = m.Update(key("v"))
+	if mm := m.(Model); mm.groups.markAnchor != "n1" {
+		t.Fatalf("the first press should anchor, anchor=%q", mm.groups.markAnchor)
+	}
+	// The armed anchor is visible: the start row carries ◆ and the right
+	// pane's footer names the anchor and the cancel key.
+	if v := m.View(); !strings.Contains(plain(v), "◆") || !strings.Contains(v, "区间起点") ||
+		!strings.Contains(v, "V 取消锚定") {
+		t.Fatalf("an armed anchor must be visible on screen:\n%s", v)
+	}
+	// V (the shifted pair of v, like t/T) abandons the anchor in place —
+	// focus stays in the right pane and nothing is marked; a fresh v
+	// re-anchors.
+	m, _ = m.Update(key("V"))
+	if mm := m.(Model); mm.groups.markAnchor != "" || mm.groups.focus != 1 || len(mm.groups.marked) != 0 {
+		t.Fatalf("V should cancel just the anchor: anchor=%q focus=%d marked=%d",
+			mm.groups.markAnchor, mm.groups.focus, len(mm.groups.marked))
+	}
+	m, _ = m.Update(key("v"))
+	if mm := m.(Model); mm.groups.markAnchor != "n1" {
+		t.Fatalf("v after a cancel should re-anchor, anchor=%q", mm.groups.markAnchor)
+	}
+	// esc keeps its single meaning: back to the left pane (which clears the
+	// anchor with it).
+	m, _ = m.Update(key("esc"))
+	if mm := m.(Model); mm.groups.focus != 0 || mm.groups.markAnchor != "" {
+		t.Fatalf("esc should return to the left pane: focus=%d anchor=%q",
+			mm.groups.focus, mm.groups.markAnchor)
+	}
+	m, _ = m.Update(key("l"))
+	m, _ = m.Update(key("v"))
+	if mm := m.(Model); mm.groups.markAnchor != "n1" {
+		t.Fatalf("re-anchor after refocusing: anchor=%q", mm.groups.markAnchor)
+	}
+	m, _ = m.Update(key("j")) // SG-03 (n3)
+	m, _ = m.Update(key("v"))
+	mm := m.(Model)
+	if mm.groups.markAnchor != "" {
+		t.Fatal("the closing press should clear the anchor")
+	}
+	if v := m.View(); !strings.Contains(v, "已选 2") || !strings.Contains(v, "U 清除") {
+		t.Fatalf("the range should mark both endpoints and advertise the clear key:\n%s", v)
+	}
+	// U clears every mark in one press (from either pane) — the undo for a
+	// range that marked more than wanted; the pending anchor is untouched.
+	m, _ = m.Update(key("U"))
+	if mm := m.(Model); len(mm.groups.marked) != 0 {
+		t.Fatalf("U should clear the marks: %v", mm.groups.marked)
+	}
+	if v := m.View(); strings.Contains(v, "已选") {
+		t.Fatalf("no marks, no count:\n%s", v)
+	}
+
+	// Latency drift: SG-03 becomes the fast node and a latency sort
+	// reorders the rows. The anchor is armed in the drifted order…
+	m, _ = m.Update(latenciesMsg{Lats: []driver.Latency{
+		{NodeID: "n3", Ms: 10, Alive: true, TestedAt: time.Now()},
+	}})
+	mm = m.(Model)
+	mm.groups.sortBy = sortLatencyAsc
+	mm.groups.rebuild()
+	if got := mm.groups.rows[1].node.ID; got != "n3" {
+		t.Fatalf("fixture drifted the wrong way: rows[1] = %s", got)
+	}
+	m = mm
+	// The cursor rides row 2, which the drift turned into 东京-01 — anchor
+	// there.
+	m, _ = m.Update(key("v"))
+	if mm := m.(Model); mm.groups.markAnchor != "n1" {
+		t.Fatalf("anchor in the drifted order, anchor=%q", mm.groups.markAnchor)
+	}
+	// …then the sort is dropped (rows are back in backend order, row 2 is
+	// SG-03 again) and the closing press must still resolve both endpoints
+	// by ID: the same pair gets marked across the reorder.
+	mm = m.(Model)
+	mm.groups.sortBy = sortBackend
+	mm.groups.rebuild()
+	m = mm
+	m, _ = m.Update(key("v"))
+	mm = m.(Model)
+	if n := len(mm.groups.marked); n != 2 {
+		t.Fatalf("reordered range should still mark 2 nodes, got %d", n)
+	}
+	for _, id := range []string{"n1", "n3"} {
+		if !mm.groups.marked[id] {
+			t.Fatalf("node %s should be marked", id)
+		}
+	}
+
+	// An anchor whose node vanished (group switch collapses everything)
+	// restarts the range instead of marking a wrong span.
+	m, _ = m.Update(key("h"))
+	m, _ = m.Update(key("j")) // direct group (rows collapse, anchor cleared)
+	if mm := m.(Model); mm.groups.markAnchor != "" {
+		t.Fatal("switching groups must clear the anchor")
+	}
+	m, _ = m.Update(key("l"))
+	m, _ = m.Update(key("j")) // a node row in the new group? (none — no-op)
+	m, _ = m.Update(key("v"))
+	mm = m.(Model)
+	if len(mm.groups.marked) != 0 {
+		t.Fatalf("a stale anchor must not mark anything: %v", mm.groups.marked)
+	}
+}
+
+// The command palette: ctrl+p opens it on any page, every key (digits
+// included) feeds the filter while it is open, a fuzzy query reaches the
+// right item, Enter fires it, and the surface stays non-destructive — no
+// preset/pin/delete/reload entries that would bypass their confirm gates.
+func TestCommandPalette(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.Update(key("4")) // from the manual-nodes page, of all places
+	m, _ = m.Update(key("ctrl+p"))
+	mm := m.(Model)
+	if !mm.palette.open {
+		t.Fatal("ctrl+p should open the palette")
+	}
+	v := m.View()
+	for _, want := range []string{"跳到 1 首页", "群组 proxy", "DNS方案 备用DNS", "路由方案 默认路由"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("palette should list %q:\n%s", want, v)
+		}
+	}
+	// The banned surface is the item list itself — the page underneath keeps
+	// its own destructive keys.
+	mm = m.(Model)
+	for _, it := range paletteItems(&mm, "") {
+		for _, banned := range []string{"预设", "固定", "删除", "重载", "导入", "移除"} {
+			if strings.Contains(it.title, banned) || strings.Contains(it.hint, banned) {
+				t.Fatalf("the palette must stay non-destructive, item %q+%q matches %q", it.title, it.hint, banned)
+			}
+		}
+	}
+
+	// While open, every key belongs to the palette — a "1" filters, it does
+	// not jump to the home page.
+	m, _ = m.Update(key("1"))
+	if mm := m.(Model); mm.page != pageNodes {
+		t.Fatalf("a digit while the palette is open must feed the filter, page=%d", mm.page)
+	}
+	if mm := m.(Model); mm.palette.q != "1" {
+		t.Fatalf("the digit should be in the filter: %q", mm.palette.q)
+	}
+	m, _ = m.Update(key("esc"))
+	if mm := m.(Model); mm.palette.open || mm.page != pageNodes {
+		t.Fatalf("esc closes the palette without acting: open=%v page=%d", mm.palette.open, mm.page)
+	}
+
+	// Fuzzy: "备用" narrows to the standby DNS profile; Enter fires the
+	// selection (a plain switch, reload stays behind A) and closes.
+	m, _ = m.Update(key("ctrl+p"))
+	m, _ = m.Update(runeKey("备"))
+	m, _ = m.Update(runeKey("用"))
+	m, cmd := m.Update(key("enter"))
+	if cmd == nil {
+		t.Fatal("enter should fire the item under the cursor")
+	}
+	if mm := m.(Model); mm.palette.open {
+		t.Fatal("a fired item closes the palette")
+	}
+	msgs := execCmds(cmd)
+	sel, ok := firstMsgOf[selectionsMsg](msgs)
+	if !ok || len(sel.Sel.Dns) != 2 {
+		t.Fatalf("enter should switch the DNS profile, got %d msgs", len(msgs))
+	}
+
+	// The cursor survives a shrinking filter: walk it past the end of the
+	// hits for "d", keep typing to "di" (群组 direct survives), Enter still
+	// fires the clamped cursor's item.
+	m, _ = m.Update(key("ctrl+p"))
+	m, _ = m.Update(runeKey("d"))
+	m, _ = m.Update(key("down"))
+	m, _ = m.Update(key("down"))
+	m, _ = m.Update(key("down"))
+	m, _ = m.Update(runeKey("i"))
+	m, cmd = m.Update(key("enter"))
+	if cmd == nil {
+		t.Fatal("the clamped cursor should still fire the surviving item")
+	}
+	if msg := cmd(); msg != nil {
+		m, _ = m.Update(msg)
+	}
+	if mm := m.(Model); mm.page != pageTree {
+		t.Fatalf("enter after a narrowed filter should jump to groups, page=%d", mm.page)
+	}
+
+	// Group jump: "pro" reaches the proxy group; Enter hands back the jump
+	// cmd, which lands on the groups page with it selected and the detail
+	// column focused.
+	m, _ = m.Update(key("ctrl+p"))
+	m, _ = m.Update(runeKey("p"))
+	m, _ = m.Update(runeKey("r"))
+	m, _ = m.Update(runeKey("o"))
+	m, cmd = m.Update(key("enter"))
+	if cmd == nil {
+		t.Fatal("a group item hands back its jump cmd")
+	}
+	if msg := cmd(); msg != nil {
+		m, _ = m.Update(msg)
+	}
+	mm = m.(Model)
+	if mm.page != pageTree || mm.groups.gi != 0 || mm.groups.focus != 1 {
+		t.Fatalf("palette group jump: page=%d gi=%d focus=%d", mm.page, mm.groups.gi, mm.groups.focus)
+	}
+}
+
 // overlapDriver lists a directly-attached group node (n2, HK-02) among the
 // manual nodes — what real daed does, and the one shape the stock stub
 // cannot express (its manual nodes share no ID with any group's).
@@ -5212,6 +5489,47 @@ func TestSettingsAbout(t *testing.T) {
 	m, _ = m.Update(key("esc"))
 	if mm := m.(Model); mm.settings.sub != subMenu {
 		t.Fatalf("esc should return to the settings menu, sub=%d", mm.settings.sub)
+	}
+}
+
+// legacyChainDriver answers the optional fallback probes like the stock
+// (pre-traffic-fix) daed chain; fixedChainDriver like a repinned one.
+type legacyChainDriver struct{ stubDriver }
+
+func (legacyChainDriver) SelectionsFallback() bool { return true }
+func (legacyChainDriver) GroupsFallback() bool     { return false }
+
+type fixedChainDriver struct{ stubDriver }
+
+func (fixedChainDriver) SelectionsFallback() bool { return false }
+func (fixedChainDriver) GroupsFallback() bool     { return false }
+
+// openAbout walks the settings menu to the About window and returns the view.
+func openAbout(t *testing.T, m tea.Model) string {
+	t.Helper()
+	m, _ = m.Update(key("P"))
+	for range 5 { // 主题/语言/自动重载/快捷键/关于
+		m, _ = m.Update(key("j"))
+	}
+	m, _ = m.Update(key("enter"))
+	return m.(Model).View()
+}
+
+// The About window names which daed chain is on the other side: the driver's
+// optional fallback probes feed it, a driver that cannot answer shows no
+// chain line at all (stub backend), and the legacy verdict carries the fix
+// (repin wing) rather than leaving the user to rediscover it from skewy
+// traffic numbers.
+func TestSettingsAboutBackendChain(t *testing.T) {
+	if v := openAbout(t, newTestModelWith(t, legacyChainDriver{})); !strings.Contains(v, "官方 daed v2.1.1 旧链") ||
+		!strings.Contains(v, "重钉到 b089b56") {
+		t.Fatalf("a legacy chain should be named with its fix:\n%s", v)
+	}
+	if v := openAbout(t, newTestModelWith(t, fixedChainDriver{})); !strings.Contains(v, "链路  ✓") {
+		t.Fatalf("a fixed chain should read as verified:\n%s", v)
+	}
+	if v := openAbout(t, newTestModel(t)); strings.Contains(v, "链路") {
+		t.Fatalf("a driver without the probes shows no chain line:\n%s", v)
 	}
 }
 

@@ -148,6 +148,13 @@ func (v *nodeView) visible(nodes []driver.Node, lat map[string]driver.Latency) [
 		}
 		out = append(out, n)
 	}
+	if q != "" && v.sortBy == sortBackend {
+		// While filtering, relevance is the order (the fzf contract): best
+		// matches on top. An explicit latency sort (o) still overrides it.
+		sort.SliceStable(out, func(i, j int) bool {
+			return fuzzyNodeScore(out[i], q) < fuzzyNodeScore(out[j], q)
+		})
+	}
 	switch v.sortBy {
 	case sortLatencyAsc:
 		sort.SliceStable(out, func(i, j int) bool { return lessByLatency(out[i], out[j], lat, false) })
@@ -155,18 +162,6 @@ func (v *nodeView) visible(nodes []driver.Node, lat map[string]driver.Latency) [
 		sort.SliceStable(out, func(i, j int) bool { return lessByLatency(out[i], out[j], lat, true) })
 	}
 	return out
-}
-
-func matchNode(n driver.Node, q string) bool {
-	if q == "" {
-		return true
-	}
-	for _, f := range []string{n.Name, n.Protocol, n.Tag, n.Address} {
-		if strings.Contains(strings.ToLower(f), q) {
-			return true
-		}
-	}
-	return false
 }
 
 func lessByLatency(a, b driver.Node, lat map[string]driver.Latency, desc bool) bool {

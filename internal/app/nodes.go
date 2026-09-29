@@ -633,7 +633,7 @@ func (p nodesPage) leftLines() []string {
 		if i == p.sel {
 			cursor = ui.CursorStyle.Render("❯")
 		}
-		row := cursor + " " + ui.PadRight(ui.SpaceAfterFlag(n.Name), max0(p.leftW-17-latCellW(p.leftW-4))) +
+		row := cursor + " " + ui.PadRight(nodeName(n, p.nodeView.filter()), max0(p.leftW-17-latCellW(p.leftW-4))) +
 			ui.HelpStyle.Render(ui.PadRight(n.Protocol, 8)) +
 			latencyCell(p.lat, n.ID, latCellW(p.leftW-4))
 		list = append(list, ui.HiRow(row, p.leftW-4, i == p.sel))

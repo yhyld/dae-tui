@@ -884,7 +884,7 @@ func (p subsPage) bodyLines(inner int) []string {
 			cursor = ui.CursorStyle.Render("❯")
 		}
 		nameW := max0(p.rightW - 17 - latCellW(p.rightW-4))
-		row := cursor + " " + ui.PadRight(ui.SpaceAfterFlag(n.Name), nameW) +
+		row := cursor + " " + ui.PadRight(nodeName(n, p.nodeView.filter()), nameW) +
 			ui.HelpStyle.Render(ui.PadRight(n.Protocol, 8)) +
 			latencyCell(p.lat, n.ID, latCellW(p.rightW-4))
 		window = append(window, ui.HiRow(row, p.rightW-4, i == p.nc && p.focus == 1))

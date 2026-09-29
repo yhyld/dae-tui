@@ -217,18 +217,27 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   （表单/对话框），根模型 `pageOverlay()` 收集（设置浮窗最优先，`P` 已是全局键，任何页面可开），
   `ui.Overlay` 负责 ANSI 感知地居中叠到页面画面上（`Truncate` 取左 + 补 reset、`TruncateLeft`
   取右——注意 TruncateLeft 会丢弃被跳过区域的转义序列，盒子右侧窄条可能掉色，文字不受影响）。
-  浮窗清单：帮助（`helpOpen`，`?` 任何页面）、设置（`settings.open`，`P` 任何页面，含账户/主题等子窗口）、全局 `A` 确认、首页预设确认+DSL 预览、
+  浮窗清单：帮助（`helpOpen`，`?` 任何页面）、设置（`settings.open`，`P` 任何页面，含账户/主题等子窗口）、
+  命令面板（`palette.open`，`ctrl+p` 任何页面，见下）、全局 `A` 确认、首页预设确认+DSL 预览、
   各页输入表单（含内置 DSL 编辑器 mode 7）、配置页导出备份（mode 8，`E` 开、
   `w`/`y` 双通道，见"安全与兼容"）。留在右栏的：小 y/n 确认（删组/删节点/删订阅/
   删配置、组内移除）、大列表选择器（加节点、挂订阅、策略）、DSL diff 确认。
+- **命令面板**（`app/palette.go`，`ctrl+p`，k9s 式）：模糊搜索直达**非破坏性动作**——
+  跳页（5 页）、跳组（`gotoGroupMsg`，复用首页组行 Enter 的落点）、切 全局配置/DNS/路由
+  方案（`selectCmd`）。**刻意不收** 确认/重载/预设/固定/删除——面板命中太好按了，
+  破坏性动作必须留在各自的确认门后（`TestCommandPalette` 对条目清单断言无此类词）。
+  键盘在根模型 `handleKey` 顶部整段接管（数字也进过滤框，不翻页），↑↓ 选择、Enter
+  执行并关闭、esc 关闭；条目打开时从 groups/selections 现构建（item.run 闭包拿
+  `*Model`），过滤复用 fuzzy.go 的子序列匹配+相关度排序。键位 `ctrl+p` 已进
+  keyCatalog（可重映射、可被遮蔽检测保护）。
 - **内置 DSL 编辑器**（configs mode 7，`config.toml` 的 `editor = "builtin"` 开启）：
   textarea 浮窗，`ctrl+s` → `validateTextCmd(path="")` → `editorValidatedMsg`；校验失败时
   `handleValidated` 检测 `mode==7` 把错误写进 `edErr` 并**保持编辑器打开**；成功进 mode 6，
   `diffState.Builtin` 标记来源，diff 里按 `n`/esc 回到编辑器（内容不丢），按 `y` 直接提交。
   $EDITOR 路径（默认）不变：临时文件在"应用后/内容未变"才删。
-- **浮窗期间按键归属**：`helpOpen`、`settings.open`（设置浮窗，含账户/主题子窗口）与
-  `logs.open`（日志浮窗）计入 `anyModal()`，且其按键在根模型 `handleKey` 顶部优先分发
-  （任何页面可开，esc 不能被所在页吃掉）；
+- **浮窗期间按键归属**：`helpOpen`、`settings.open`（设置浮窗，含账户/主题子窗口）、
+  `palette.open`（命令面板）与 `logs.open`（日志浮窗）计入 `anyModal()`，且其按键在根模型
+  `handleKey` 顶部优先分发（任何页面可开，esc 不能被所在页吃掉）；
   鼠标滚轮在 helpOpen 时滚帮助、logs.open 时滚日志，其余模态期间忽略。
 - 模态渲染在右栏内部的（上面的"留在右栏"清单）用 `ui.BoxLines(destructive, lines...)`
   （红框=破坏性），列表型选择器保持裸行；不能 `body += "\n" + box` 追加在双栏下方——
@@ -303,8 +312,12 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   `View` 与 `rightClick` 用的是同一个值。`selectedNode()` 不跟 focus（光标高亮跟、
   选中不跟），所以 `T` 在左栏也能用；`y` 必须显式判 `focus == 1`。
 - **节点列表的过滤/排序统一走 `internal/app/nodelist.go` 的 `nodeView`**（`/` 开过滤框，
-  `enter` 保留、`esc` 清空，`o` 循环排序，未测/死亡节点排序时殿后）。群组页右栏、`n`
-  选择器、订阅页右栏、手动节点页四处都内嵌它；新增节点列表必须复用，不要另写一套。
+  `enter` 保留、`esc` 清空，`o` 循环排序，未测/死亡节点排序时殿后）。**匹配是 fzf 式
+  子序列**（`fuzzy.go`：`fz 匹配` 能命中「法兰克福」，大小写不敏感，按 名称/标签/协议/
+  地址 四字段），且无显式排序（`o` 未动）时**按相关度排序**（命中早、间距紧者优先，
+  名称命中 > 标签 > 协议 > 地址）；名称列高亮走 `nodeName(n, filter)`——四个渲染点
+  （群组右栏/候选选择器/订阅右栏/手动节点页）共用这一个助手，匹配 rune 用 accent
+  加粗，协议/标签命中时名称保持原样（诚实），新增节点列表必须复用，不要另写一套。
   过滤框打开时所有按键归它（并计入 `anyModal()`），`t` 测速只测可见节点。群组页在过滤
   状态下要把分区视为展开、无命中分区直接不建行（见 `rebuild`），并且换组时必须
   `rebuild()`——否则右栏会残留上一个组的行。
@@ -347,6 +360,13 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   `aboutLogoFrame` 留空行），`TestAboutLogoIsKnownCandidate` 比对两层兜底防半 paste；
   点阵坐标改动后重新生成盲文的办法：临时加一个打印 `pack()` 的测试跑 `go test -v`
   （plan/只读环境跑不了脚本，测试基建是唯一可靠生成途径），粘完即删；
+  **关于窗口带后端链路自检**（`chainSelfCheck()`）：打开时快照，经**可选接口**
+  `chainProber`（app 包本地定义：`SelectionsFallback()/GroupsFallback()`）向驱动询问
+  schema 降级状态——`selectionsFallback` 是官方旧链（wing 未重钉、流量统计失真）的现成
+  判据，About 里黄字点名修法（重钉 wing 重建 daed，"不是 dae-tui 的问题"）；修复链绿字
+  ✓、老 daed（groupsFallback）单独一档、未产生 selections 数据显示"尚未检测"。它刻意
+  **不进 `driver.Driver` 域接口也不进 Caps**（能力位管"能不能"，fallback 是"是哪条链"），
+  驱动不实现该接口时链路行整段不渲染（stub 后端如此）；
   退出登录由根模型处理（`logoutMsg`：清 cfg + 存盘 + `drv.Logout` +
   回 `phaseLogin`），页面自己不能改 phase。首页 `L` 是 daed 日志视图：**应用内浮窗**
   （`app/logs.go`，journalctl 作普通子进程流式输出，不再 `tea.ExecProcess` 接管终端），
@@ -499,6 +519,20 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   `markedIDs()/markedDirectNodes()` 必须去重——同一节点可以同时出现在订阅区和直接区两行。
   换组清空详情标记（`collapseSections`，只在换组时调用——右栏常驻后 esc 离开右栏不再收起
   分区/清标记，否则等于当着用户的面丢数据）。
+  **区间标记**（`v`，vim 视觉模式式；进 keyCatalog 可重映射，分发过 `tk`）：第一次按在
+  光标节点上**锚定**（`markAnchor` 存**节点 ID** 不是行号——测速轮询会重排行），j/k 移到
+  终点再按一次，`markRange()` 把两端（含）之间的节点行**置为已标记**（只置不翻——区间
+  结果要可预期，取消仍用单行 space）。第二次按下时两端才按当时的行序解析（press-time
+  快照）；锚点节点已消失（刷新/换组）就退化为**重新锚定**而不是标记错误区间。锚点清零
+  时机：二次按下、**`V` 取消**（与 v 成对、同 t/T 的大写=反操作习惯；焦点不动、不标记；
+  esc 不参与——它只有"回左栏"一个含义，顺带清锚点）、`collapseSections`（换组）、焦点
+  切回左栏。**`U` 一次清空全部标记**（两栏都响应——区间标多了逐行 space 取消不是工作流；
+  提示钉在右栏标题"已选 N（U 清除）"旁边，锚点归 v/V 管不受影响）。
+  **锚定必须可见**：起点行 mark 列显示黄 ◆（优先于 ✓/●），右栏 footer 换成状态行
+  （`anchorLabel()`：◆ 区间起点 名 · v 收区间 · V 取消锚定，键名走实时绑定；锚点行已
+  消失显示"已失效"）。
+  **刻意不用 ctrl+space**——它在大部分系统是输入法切换键；也**不用 esc 取消**——esc
+  的"回左栏"含义太根深蒂固，一key一义。
 - **首页分区（btop 式网格盒子）**：整页是带标题的圆角盒子（`ui.TitledBox`，标题嵌在
   上边框、聚焦时点亮标题+边框），按严格网格排布：**全页唯一竖缝**（左列 = `homeRoutingW`，
   行行相同）、**同行盒子等高**（`ui.PaneRow` 把短侧内容补空行到等高再包框，边框上下

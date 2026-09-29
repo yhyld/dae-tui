@@ -34,6 +34,12 @@ type groupsPage struct {
 
 	marked map[string]bool
 
+	// markAnchor is the armed endpoint of a range select (ctrl+space): a
+	// node ID, never a row index — the 3s latency poll reorders rows between
+	// the two presses, so the closing press resolves both endpoints against
+	// the row order it sees right then.
+	markAnchor string
+
 	pickMarked map[string]bool
 
 	lat map[string]driver.Latency
@@ -175,6 +181,51 @@ func (p *groupsPage) collapseSections() {
 	p.directOpen = false
 	p.rc = 0
 	p.marked = map[string]bool{}
+	p.markAnchor = ""
+}
+
+// markRange arms or closes a k9s-style range select on the cursor's node
+// row: the first press anchors, the second marks every node row between the
+// anchor and the cursor (inclusive, both endpoints resolved against the
+// row order at the closing press — the press-time snapshot). An anchor that
+// vanished with a refresh restarts the range at the cursor rather than
+// silently marking the wrong span. Marks are set, never toggled: the result
+// of a range must be predictable while single space-toggles remain
+// available for the exceptions.
+func (p *groupsPage) markRange() {
+	r := p.cur()
+	if r == nil || r.kind != rowNode {
+		return
+	}
+	if p.markAnchor == "" {
+		p.markAnchor = r.node.ID
+		return
+	}
+	lo, hi := -1, -1
+	for i := range p.rows {
+		if p.rows[i].kind != rowNode {
+			continue
+		}
+		switch p.rows[i].node.ID {
+		case p.markAnchor:
+			lo = i
+		case r.node.ID:
+			hi = i
+		}
+	}
+	if lo < 0 || hi < 0 {
+		p.markAnchor = r.node.ID
+		return
+	}
+	if lo > hi {
+		lo, hi = hi, lo
+	}
+	for i := lo; i <= hi; i++ {
+		if p.rows[i].kind == rowNode {
+			p.marked[p.rows[i].node.ID] = true
+		}
+	}
+	p.markAnchor = ""
 }
 
 func (p *groupsPage) cur() *trow {
@@ -673,6 +724,11 @@ func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			return unsupportedCmd(i18n.T("测速"))
 		}
 		return p.startTest(d, true)
+	case "U":
+		// Clear every mark at once — the convenient undo for a range mark
+		// (unmarking 50 nodes with space is not a workflow). Works from
+		// either pane; the anchor is v/V's own business and stays.
+		p.marked = map[string]bool{}
 	}
 
 	if p.focus == 0 {
@@ -783,6 +839,7 @@ func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 	case "tab", "h", "left", "esc":
 
 		p.focus = 0
+		p.markAnchor = ""
 	case "enter", "l", "right":
 		r := p.cur()
 		if r == nil {
@@ -808,6 +865,17 @@ func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 				p.marked[r.node.ID] = true
 			}
 		}
+	case "v":
+		// Range mark, vim visual-mode style: v anchors on the cursor's
+		// node, move, v again marks everything between. A letter key (not
+		// ctrl+space — that toggles the input method on most systems) and
+		// remappable through the catalog like the rest of the page.
+		p.markRange()
+	case "V":
+		// The abort half of the pair, same key capital-shifted like t/T:
+		// drop the pending anchor, mark nothing, stay in the right pane.
+		// esc keeps its single meaning (back to the left pane).
+		p.markAnchor = ""
 	case "f":
 		return p.startPin()
 	case "S":
@@ -873,6 +941,23 @@ func (p *groupsPage) candidateRows() []candidateRow {
 	return out
 }
 
+// anchorLabel renders the footer's armed-anchor state line: which node the
+// range starts at, what closes it (the live v binding), what aborts it (the
+// live V binding). Empty when no anchor.
+func (p groupsPage) anchorLabel() string {
+	if p.markAnchor == "" {
+		return ""
+	}
+	for i := range p.rows {
+		if r := &p.rows[i]; r.kind == rowNode && r.node.ID == p.markAnchor {
+			return i18n.T("◆ 区间起点 ") + ui.SpaceAfterFlag(r.node.Name) + "  ·  " +
+				K(keymap.Groups, "v") + i18n.T(" 收区间 · ") +
+				K(keymap.Groups, "V") + i18n.T(" 取消锚定")
+		}
+	}
+	return i18n.T("◆ 区间起点已失效 · ") + K(keymap.Groups, "V") + i18n.T(" 取消锚定")
+}
+
 func (p groupsPage) View() string {
 
 	left := p.leftLines()
@@ -894,13 +979,23 @@ func (p groupsPage) View() string {
 		infoTitle = g.Name
 		bodyTitle += p.nodeView.sortTitle()
 		if n := len(p.markedIDs()); n > 0 {
-			bodyTitle += i18n.T(" · 已选 %d", n)
+			// The clear hint rides the count — the place a user looks when
+			// they want to undo a (possibly range) selection.
+			bodyTitle += i18n.T(" · 已选 %d", n) + ui.HelpStyle.Render(
+				i18n.T("（")+K(keymap.Groups, "U")+i18n.T(" 清除）"))
 		}
 	}
 
-	rightFooter := i18n.T("Enter 开合分区 · space 标记 · ") + kb(keymap.Groups, "x", "移除") +
+	rightFooter := i18n.T("Enter 开合分区 · space 标记 · ") + kb(keymap.Groups, "v", "区间") +
+		" · " + kb(keymap.Groups, "x", "移除") +
 		" · " + kb(keymap.Groups, "f", "固定") +
 		" · / " + i18n.T("过滤") + " · " + kb(keymap.Groups, "o", "排序")
+	if anchor := p.anchorLabel(); anchor != "" {
+		// While a range anchor is armed the footer becomes the state line:
+		// the pending half of the range is the thing the user most needs to
+		// know (and that esc cancels it).
+		rightFooter = anchor
+	}
 	switch p.mode {
 	case pickSub:
 		rightFooter = i18n.T("Enter 挂载 · j/k 移动 · esc 取消")
@@ -1112,6 +1207,11 @@ func (p groupsPage) renderRowBody(g *driver.Group, i int) string {
 	n := r.node
 	mark := "  "
 	switch {
+	case p.markAnchor == n.ID:
+		// The armed range anchor outranks everything else in this column:
+		// it is the one transient state the user must be able to see (esc
+		// cancels it; yellow matches the app's other "pending" language).
+		mark = ui.WarnStyle.Render("◆ ")
 	case p.marked[n.ID]:
 		mark = ui.OKStyle.Render("✓ ")
 	default:
@@ -1119,7 +1219,7 @@ func (p groupsPage) renderRowBody(g *driver.Group, i int) string {
 			mark = ui.OKStyle.Render("● ")
 		}
 	}
-	name := ui.SpaceAfterFlag(n.Name)
+	name := nodeName(n, p.nodeView.filter())
 	if r.manual {
 		name += ui.HelpStyle.Render(i18n.T(" (手动)"))
 	}
@@ -1207,7 +1307,7 @@ func (p groupsPage) candidateLines(inner int) []string {
 		} else {
 			src = i18n.T("·手动")
 		}
-		window = append(window, ui.HiRow(style.Render(mark+ui.PadRight(ui.SpaceAfterFlag(r.node.Name), max0(p.rightW-34)))+tick+
+		window = append(window, ui.HiRow(style.Render(mark+ui.PadRight(nodeName(r.node, p.nodeView.filter()), max0(p.rightW-34)))+tick+
 			ui.HelpStyle.Render(ui.PadRight(src, 16)+r.node.Protocol), p.rightW-4, i == p.pickCursor))
 	}
 	return append(lines, ui.WithScrollbar(window, p.rightW-4, len(rows), start, true)...)

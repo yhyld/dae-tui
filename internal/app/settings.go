@@ -49,6 +49,45 @@ type settings struct {
 	// autoReload mirrors cfg.AutoReload for the menu row's state suffix;
 	// the root model keeps it in step (enterMain + the toggle's msg).
 	autoReload bool
+
+	// chain snapshots the backend-chain self-check at About-open time (the
+	// About overlay is rendered off a value copy with no driver access).
+	chain chainState
+}
+
+// chainProber is the daed driver's optional window into its schema-fallback
+// state, exposed by the driver next to driver.Driver on purpose: the domain
+// interface stays backend-agnostic, and a backend that cannot answer simply
+// does not implement it (the About window then shows no chain line).
+type chainProber interface {
+	SelectionsFallback() bool
+	GroupsFallback() bool
+}
+
+// chainState is what the About window needs to say which daed chain it is
+// talking to: legacy = selections fell back to the frozen v2.1.1 field set
+// (stock chain, broken traffic counters), oldGroups = even the group query
+// fell back (daed < 2026-04), hasSel gates the verdict on selections data
+// actually having arrived — no answer yet means "not probed", not "new".
+type chainState struct {
+	known     bool
+	legacy    bool
+	oldGroups bool
+	hasSel    bool
+}
+
+func (m Model) chainSelfCheck() chainState {
+	cp, ok := m.drv.(chainProber)
+	if !ok {
+		return chainState{}
+	}
+	sel := m.configs.sel
+	return chainState{
+		known:     true,
+		legacy:    cp.SelectionsFallback(),
+		oldGroups: cp.GroupsFallback(),
+		hasSel:    len(sel.Configs)+len(sel.Dns)+len(sel.Routings) > 0,
+	}
 }
 
 const (
@@ -251,6 +290,7 @@ func (s *settings) key(m *Model, msg tea.KeyMsg) tea.Cmd {
 				s.sub = subKeys
 				s.keysScroll = 0
 			case itemAbout:
+				s.chain = m.chainSelfCheck()
 				s.sub = subAbout
 			}
 		}
@@ -546,11 +586,40 @@ func (s settings) aboutOverlay() *overlaySpec {
 		"    "+ui.HelpStyle.Render(i18n.T("dae 网络代理的终端管理界面")),
 		"",
 		"    "+ui.HelpStyle.Render(i18n.T("后端  daed GraphQL API（schema 冻结）")),
+	)
+	lines = append(lines, s.chainLines()...)
+	lines = append(lines,
 		"    "+ui.HelpStyle.Render(i18n.T("配置  ~/.config/dae-tui/config.toml")),
 		"    "+ui.HelpStyle.Render(i18n.T("架构  可插拔 driver，可扩展其他后端")),
 	)
 	return &overlaySpec{lines: append(lines, "",
 		ui.HelpStyle.Render(i18n.T(" esc 返回")))}
+}
+
+// chainLines renders the backend-chain self-check. The selections fallback is
+// the live tell for which daed chain answers: stock v2.1.1 pins the old wing
+// submodule and its traffic counters are wrong (a backend problem dae-tui
+// cannot fix — the cure is repinning wing and rebuilding daed, so the About
+// window names it instead of leaving the user to rediscover it from skewy
+// numbers). Translated here at render time per the i18n law.
+func (s settings) chainLines() []string {
+	if !s.chain.known {
+		return nil
+	}
+	if !s.chain.hasSel {
+		return []string{"    " + ui.HelpStyle.Render(i18n.T("链路  尚未检测（刷新后再看）"))}
+	}
+	switch {
+	case s.chain.legacy:
+		return []string{
+			"    " + ui.WarnStyle.Render(i18n.T("链路  ⚠ 官方 daed v2.1.1 旧链（wing 未重钉）")),
+			"    " + ui.HelpStyle.Render(i18n.T("      该链上下行流量统计失真；修法是把 wing 子模块")),
+			"    " + ui.HelpStyle.Render(i18n.T("      重钉到 b089b56 并重建 daed，不是 dae-tui 的问题")),
+		}
+	case s.chain.oldGroups:
+		return []string{"    " + ui.WarnStyle.Render(i18n.T("链路  ⚠ 老版本 daed（组页无订阅挂载信息）"))}
+	}
+	return []string{"    " + ui.OKStyle.Render(i18n.T("链路  ✓ daed 修复链（流量统计可信）"))}
 }
 
 func (s settings) themeOverlay() *overlaySpec {

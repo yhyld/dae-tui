@@ -111,6 +111,19 @@ func (d *Driver) Capabilities() driver.Caps {
 	}
 }
 
+// SelectionsFallback reports whether ListSelections permanently fell back to
+// the frozen v2.1.1 field set — the tell for the stock (pre-traffic-fix)
+// chain, whose runtime traffic counters are known-broken. The About window
+// surfaces it as the backend-chain self-check. Deliberately NOT part of
+// driver.Driver: the domain interface stays backend-agnostic, and the app
+// reaches this through a local optional-interface assertion.
+func (d *Driver) SelectionsFallback() bool { return d.selectionsFallback.Load() }
+
+// GroupsFallback reports whether ListGroups permanently fell back to the
+// minimal query (the backend lacks the GroupSubscription type, daed <
+// 2026-04): the group page then carries no subscription attribution.
+func (d *Driver) GroupsFallback() bool { return d.groupsFallback.Load() }
+
 func (d *Driver) Connect(ctx context.Context) (driver.Status, error) {
 	if err := d.client.HealthCheck(ctx); err != nil {
 		return driver.Status{}, err

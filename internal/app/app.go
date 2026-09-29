@@ -59,6 +59,10 @@ type Model struct {
 	helpScroll int
 	logs       logsViewer
 
+	// palette is the ctrl+p command palette; its keys are dispatched ahead
+	// of every page while open (like the help/settings overlays).
+	palette paletteState
+
 	settings settings
 
 	login loginForm
@@ -919,6 +923,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if m.palette.open {
+		return m, m.paletteKey(msg)
+	}
+
 	if m.settings.open {
 		return m, m.settings.key(&m, msg)
 	}
@@ -985,6 +993,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.helpOpen = true
 			m.helpScroll = clampHelpScroll(helpSectionStart(m.page), helpWinBody(m.height-6))
 			return m, nil
+		case "ctrl+p":
+
+			m.openPalette()
+			return m, nil
 		case "r":
 
 			if m.refreshing {
@@ -1011,7 +1023,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) anyModal() bool {
-	if m.helpOpen || m.settings.open || m.logs.open {
+	if m.helpOpen || m.settings.open || m.logs.open || m.palette.open {
 		return true
 	}
 	switch m.page {
@@ -1247,6 +1259,9 @@ func (m Model) View() string {
 	}
 	if m.confirmApply {
 		body = ui.Overlay(body, overlayBox(m.applyOverlay(), cw-1), cw-1, avail)
+	}
+	if m.palette.open {
+		body = ui.Overlay(body, overlayBox(m.paletteOverlay(), cw-1), cw-1, avail)
 	}
 	if m.helpOpen {
 		body = ui.Overlay(body, helpOverlayBox(cw-1, avail, m.helpScroll), cw-1, avail)
