@@ -2,6 +2,7 @@ package app
 
 import (
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -54,6 +55,20 @@ type groupsPage struct {
 	pickErr    string
 	input      textinput.Model
 
+	// pinGroupID is the managed pinned group's ID (empty = feature unused);
+	// mutations on that group are refused with a toast (pin.go's design).
+	// pinTarget is the node the pin confirm overlay was armed for.
+	// routingName/routingBody mirror the selected routing so f can count the
+	// references it would rewrite before asking for confirmation.
+	// switchFrom is the group that routing currently references (managed
+	// pinned group while a pin is active); S switches it to the viewed group.
+	pinGroupID  string
+	pinTarget   driver.Node
+	routingName string
+	routingBody string
+	switchFrom  string
+	pinActive   bool
+
 	nodeView
 
 	caps driver.Caps
@@ -79,6 +94,8 @@ const (
 	inputRename
 	pickRemoveNode
 	pickRemoveNodes
+	pickPin
+	pickSwitch
 )
 
 type trow struct {
@@ -218,6 +235,77 @@ func (p *groupsPage) setReferences(routings []driver.ConfigItem) {
 		}
 	}
 	p.refs = refs
+	p.routingName, p.routingBody = "", ""
+	for _, r := range routings {
+		if r.Selected {
+			p.routingName, p.routingBody = r.Name, r.Body
+			break
+		}
+	}
+}
+
+// setPin is the root model's push of the re-derived pin state (rederivePin).
+func (p *groupsPage) setPin(pin pinState) {
+	p.pinGroupID = pin.groupID
+	p.pinActive = pin.active
+}
+
+// pinGuarded reports whether the current group is the TUI-managed pinned
+// group, whose membership/policy/existence all belong to the pin flow.
+func (p *groupsPage) pinGuarded() bool {
+	g := p.curGroup()
+	return g != nil && p.pinGroupID != "" && g.ID == p.pinGroupID
+}
+
+// startPin arms the pin confirm overlay for the node row under the cursor.
+func (p *groupsPage) startPin() tea.Cmd {
+	if !p.caps.ConfigMgmt {
+		return unsupportedCmd(i18n.T("固定节点"))
+	}
+	r := p.cur()
+	g := p.curGroup()
+	if r == nil || r.kind != rowNode || g == nil {
+		return nil
+	}
+	if p.pinGuarded() || g.Name == pinGroupName {
+		return pinGuardCmd(i18n.T("固定节点"))
+	}
+	if p.routingBody == "" {
+		return opErrCmd(i18n.T("固定节点"), errors.New(i18n.T("路由方案未加载，按 r 刷新后重试")))
+	}
+	if countOutboundRefs(p.routingBody, g.Name) == 0 {
+		return opErrCmd(i18n.T("固定节点"), fmt.Errorf(
+			i18n.T("路由方案 %s 未引用组 %s，固定不会改变流量走向"), p.routingName, g.Name))
+	}
+	p.pinTarget = r.node
+	p.mode = pickPin
+	return nil
+}
+
+// startSwitch arms the switch-group confirm overlay for the group being
+// viewed: the selected routing's references move from switchFrom to it.
+func (p *groupsPage) startSwitch() tea.Cmd {
+	if !p.caps.ConfigMgmt {
+		return unsupportedCmd(i18n.T("切换代理组"))
+	}
+	g := p.curGroup()
+	if g == nil {
+		return nil
+	}
+	if p.routingBody == "" || p.switchFrom == "" {
+		return opErrCmd(i18n.T("切换代理组"), errors.New(i18n.T("路由方案未加载，按 r 刷新后重试")))
+	}
+	if g.Name == p.switchFrom {
+		return opErrCmd(i18n.T("切换代理组"), fmt.Errorf(i18n.T("%s 已是当前路由使用的组"), g.Name))
+	}
+	// The managed group is a valid target — S to it re-uses the fixed(0) node
+	// that stayed behind after an unpin, no re-pinning by hand. With no member
+	// left it is the empty-fixed-group reload blocker, so demand a fresh f.
+	if p.pinGroupID != "" && g.ID == p.pinGroupID && len(g.Members()) == 0 {
+		return opErrCmd(i18n.T("切换代理组"), errors.New(i18n.T("固定组当前没有节点，请在来源组对节点按 f 重新固定")))
+	}
+	p.mode = pickSwitch
+	return nil
 }
 
 func (p *groupsPage) refNote(name string) string {
@@ -226,6 +314,21 @@ func (p *groupsPage) refNote(name string) string {
 		return ""
 	}
 	return i18n.T("该组被路由方案 ") + strings.Join(quoteAll(profiles), "、") + i18n.T(" 引用，改名/删除后这些规则将静默失效")
+}
+
+// refProfilesContain reports whether the selected routing is among the
+// profiles a group's reference list names (refs maps group → profiles for
+// ALL routings; the ● marker must only track the selected one).
+func refProfilesContain(profiles []string, selected string) bool {
+	if selected == "" {
+		return false
+	}
+	for _, p := range profiles {
+		if p == selected {
+			return true
+		}
+	}
+	return false
 }
 
 func quoteAll(items []string) []string {
@@ -444,6 +547,47 @@ func (p groupsPage) overlay() *overlaySpec {
 			return &overlaySpec{lines: append(lines, "",
 				ui.HelpStyle.Render(i18n.T(" Enter 确认  esc 取消")))}
 		}
+	case pickPin:
+		if g := p.curGroup(); g != nil {
+			n := countOutboundRefs(p.routingBody, g.Name)
+			lines := []string{
+				ui.TitleStyle.Render(i18n.T(" 固定节点")),
+				"",
+				i18n.T(" 节点  ") + ui.SpaceAfterFlag(p.pinTarget.Name),
+				i18n.T(" 来源组 ") + g.Name,
+				"",
+				ui.HelpStyle.Render(i18n.T(" 固定组 ") + pinGroupName + i18n.T(" 的成员将设为该节点 (fixed)，")),
+				ui.HelpStyle.Render(i18n.T(" 路由方案 ") + p.routingName + i18n.T(" 中对 ") + g.Name +
+					i18n.T(" 的 %d 处引用改指固定组", n)),
+				ui.HelpStyle.Render(i18n.T(" 原有组的成员与订阅保持不动；A 重载后生效")),
+				"",
+				ui.OKStyle.Render(i18n.T(" y 确认")) + "    " + ui.ErrorStyle.Render(i18n.T("n / esc 取消")),
+			}
+			return &overlaySpec{lines: lines}
+		}
+	case pickSwitch:
+		if g := p.curGroup(); g != nil {
+			lines := []string{
+				ui.TitleStyle.Render(i18n.T(" 切换代理组")),
+				"",
+				i18n.T(" 当前  ") + ui.SelectedStyle.Render(p.switchFrom) + " → " +
+					ui.SelectedStyle.Render(g.Name),
+				ui.HelpStyle.Render(i18n.T(" 路由方案 ") + p.routingName + i18n.T(" 中对 ") +
+					p.switchFrom + i18n.T(" 的 %d 处引用将改指 ",
+					countOutboundRefs(p.routingBody, p.switchFrom)) + g.Name),
+				"",
+				ui.HelpStyle.Render(i18n.T(" A 重载后生效")),
+			}
+			if p.pinGroupID != "" && g.ID == p.pinGroupID {
+				lines = append(lines,
+					ui.HelpStyle.Render(i18n.T(" 目标是固定节点专用组：复用其中已固定的节点")),
+					ui.HelpStyle.Render(i18n.T(" 解除固定回到 ")+p.switchFrom+i18n.T(" 用首页 x")))
+			} else if p.pinActive {
+				lines = append(lines, ui.ErrorStyle.Render(i18n.T(" ⚠ 当前的固定节点将同时解除")))
+			}
+			return &overlaySpec{lines: append(lines, "",
+				ui.OKStyle.Render(i18n.T(" y 确认"))+"    "+ui.ErrorStyle.Render(i18n.T("n / esc 取消")))}
+		}
 	}
 	return nil
 }
@@ -513,6 +657,9 @@ func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		if !p.caps.SwitchNode {
 			return unsupportedCmd(i18n.T("切换策略"))
 		}
+		if p.pinGuarded() {
+			return pinGuardCmd(i18n.T("切换策略"))
+		}
 		if g := p.curGroup(); g != nil {
 			return switchNodeCmd(d, g.ID, driver.Policy{Name: "min_moving_avg"})
 		}
@@ -552,6 +699,9 @@ func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			if !p.caps.Subscriptions {
 				return unsupportedCmd(i18n.T("挂载订阅"))
 			}
+			if p.pinGuarded() {
+				return pinGuardCmd(i18n.T("挂载订阅"))
+			}
 			g := p.curGroup()
 			if g == nil {
 				return nil
@@ -567,6 +717,9 @@ func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			p.pickCursor = 0
 			p.pickErr = ""
 		case "n":
+			if p.pinGuarded() {
+				return pinGuardCmd(i18n.T("加节点"))
+			}
 			if g := p.curGroup(); g != nil {
 				p.mode = pickNode
 				p.pickCursor = 0
@@ -584,6 +737,9 @@ func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			p.input.Focus()
 			return textinput.Blink
 		case "R":
+			if p.pinGuarded() {
+				return pinGuardCmd(i18n.T("重命名群组"))
+			}
 			if g := p.curGroup(); g != nil {
 				p.mode = inputRename
 				p.input.SetValue(g.Name)
@@ -591,14 +747,22 @@ func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 				return textinput.Blink
 			}
 		case "D":
+			if p.pinGuarded() {
+				return pinGuardCmd(i18n.T("删除群组"))
+			}
 			if p.curGroup() != nil {
 				p.mode = pickDeleteGroup
 			}
 		case "p":
+			if p.pinGuarded() {
+				return pinGuardCmd(i18n.T("修改策略"))
+			}
 			if p.curGroup() != nil {
 				p.mode = pickPolicy
 				p.pickCursor = 0
 			}
+		case "S":
+			return p.startSwitch()
 		}
 		return nil
 	}
@@ -644,7 +808,16 @@ func (p *groupsPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 				p.marked[r.node.ID] = true
 			}
 		}
+	case "f":
+		return p.startPin()
+	case "S":
+		// The right pane shows one group; S switches the routing to that
+		// group — same action as in the left pane, where gi selects it.
+		return p.startSwitch()
 	case "x":
+		if p.pinGuarded() {
+			return pinGuardCmd(i18n.T("移除节点"))
+		}
 		if len(p.marked) > 0 {
 			if len(p.markedDirectNodes()) == 0 {
 
@@ -726,6 +899,7 @@ func (p groupsPage) View() string {
 	}
 
 	rightFooter := i18n.T("Enter 开合分区 · space 标记 · ") + kb(keymap.Groups, "x", "移除") +
+		" · " + kb(keymap.Groups, "f", "固定") +
 		" · / " + i18n.T("过滤") + " · " + kb(keymap.Groups, "o", "排序")
 	switch p.mode {
 	case pickSub:
@@ -734,7 +908,7 @@ func (p groupsPage) View() string {
 		rightFooter = i18n.T("Enter 添加 · space 标记 · esc 取消")
 	case pickPolicy:
 		rightFooter = i18n.T("Enter 确认 · j/k 移动 · esc 取消")
-	case pickDetach, pickDeleteGroup, pickRemoveNode, pickRemoveNodes:
+	case pickDetach, pickDeleteGroup, pickRemoveNode, pickRemoveNodes, pickPin, pickSwitch:
 		rightFooter = i18n.T("y 确认 · n/esc 取消")
 	}
 	return strings.Join(ui.PaneRowColumn(
@@ -761,15 +935,22 @@ func (p groupsPage) leftLines() []string {
 		if i == p.gi {
 			cursor = ui.CursorStyle.Render("❯")
 		}
+		// Same ● the home group box uses: the group the selected routing
+		// currently sends traffic through (builtin names skipped — a group
+		// sharing one is shadowed by the dae builtin in the DSL anyway).
+		mark := "  "
+		if !isBuiltinOutbound(g.Name) && refProfilesContain(p.refs[g.Name], p.routingName) {
+			mark = ui.OKStyle.Render("● ")
+		}
 		cur := ""
 		if sel := g.SelectedNode(); sel != nil {
 			cur = " → " + ui.SpaceAfterFlag(sel.Name)
 		} else if g.Policy != "fixed" {
 			cur = i18n.T(" · 自动")
 		}
-		line := cursor + " " + ui.PadRight(g.Name, max0(p.leftW-20)) +
+		line := cursor + " " + mark + ui.PadRight(g.Name, max0(p.leftW-22)) +
 			ui.HelpStyle.Render(i18n.T("%3d节点", len(g.Members())))
-		line += ui.Truncate(cur, max0(p.leftW-14))
+		line += ui.Truncate(cur, max0(p.leftW-16))
 		lines = append(lines, ui.HiRow(line, p.leftW-4, i == p.gi))
 	}
 	lines = ui.WithScrollbar(lines, p.leftW-4, len(p.groups), start, p.focus == 0)
@@ -797,6 +978,10 @@ func (p groupsPage) infoLines() []string {
 			row += warn
 		}
 		lines = append(lines, row)
+	}
+	if p.pinGroupID != "" && g.ID == p.pinGroupID {
+		lines = append(lines, ui.SelectedStyle.Render(i18n.T("固定  "))+
+			ui.HelpStyle.Render(i18n.T("TUI 固定节点专用组：换节点去来源组按 f，解除去首页按 x")))
 	}
 	return lines
 }

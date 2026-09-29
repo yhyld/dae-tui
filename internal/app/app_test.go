@@ -93,6 +93,7 @@ func (stubDriver) ImportNodes(_ context.Context, links []string, tag string) ([]
 	}
 	return out, nil
 }
+
 // lastRemoveNodeIDs records what RemoveNodes was last asked to delete, so
 // the modal target lock can be told from cursor-drift submissions.
 var lastRemoveNodeIDs []string
@@ -4208,11 +4209,14 @@ func TestHomeSingleCursorAcrossFocus(t *testing.T) {
 	if n := strings.Count(v, "❯"); n != 1 {
 		t.Fatalf("group focus should carry exactly one cursor, got %d:\n%s", n, v)
 	}
-	// The preset rows keep their state marks but lose the cursor highlight:
-	// the highlighted (background-bar) row is the group row, not a preset.
-	if i := strings.Index(v, "❯"); i >= 0 && strings.Contains(v[:max0(i)], "●") && strings.Contains(v[max0(i):], "●") {
-		// both a ● before and after the cursor means the cursor sits between
-		// preset rows — i.e. it never left the picker
+	// The cursor lands on the group row — which now also carries the in-use
+	// ● marker — and the preset rows above keep only their state marks: no
+	// cursor may sit inside the picker block.
+	pv := plain(v)
+	if !strings.Contains(pv, "❯ ● proxy") {
+		t.Fatalf("group focus should cursor the marked group row:\n%s", v)
+	}
+	if i := strings.Index(pv, "❯"); strings.Contains(pv[max0(i):], "中国列表以外") {
 		t.Fatalf("the cursor should have left the preset picker:\n%s", v)
 	}
 }

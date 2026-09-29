@@ -84,6 +84,11 @@ type Model struct {
 	// connFails counts consecutive probe failures (traffic and status
 	// polls); any success resets it. Trip level => the top bar badge.
 	connFails int
+
+	// pin is the pinned-node state; the persisted half mirrors cfg.Pin and
+	// the runtime half is re-derived by rederivePin on every groups/
+	// selections refresh (see pin.go).
+	pin pinState
 }
 
 const (
@@ -125,6 +130,7 @@ func New(drv driver.Driver, cfg *config.Config, cfgPath string) Model {
 	// The E backup lands next to the app's own config, not in $PWD: launched
 	// from anywhere, the destination must stay predictable.
 	m.configs.exportDir = filepath.Join(filepath.Dir(cfgPath), "export")
+	m.rederivePin()
 	return m
 }
 
@@ -364,11 +370,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case pinRequestedMsg:
+		return m, pinNodeCmd(m.drv, m.cfg, m.cfgPath, msg.NodeID, msg.NodeName, msg.FromGroup)
+
+	case unpinRequestedMsg:
+		return m, unpinNodeCmd(m.drv, m.cfg, m.cfgPath)
+
+	case switchGroupRequestedMsg:
+		return m, switchGroupCmd(m.drv, m.cfg, m.cfgPath, msg.From, msg.To, m.pinManagedName())
+
 	case groupsMsg:
 		m.groups.handleGroups(msg.Groups, msg.Err)
 		m.home.handleGroups(msg.Groups, msg.Err)
 		m.nodes.setGroups(msg.Groups)
 		m.configs.setGroups(msg.Groups)
+		m.rederivePin()
 		return m, nil
 
 	case manualNodesMsg:
@@ -433,6 +449,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.configs.handleSelections(msg.Sel, msg.Err)
 		m.home.handleSelections(msg.Sel, msg.Err, m.drv)
 		m.groups.setReferences(msg.Sel.Routings)
+		m.rederivePin()
 		return m, nil
 
 	case ifacesMsg:
@@ -525,6 +542,84 @@ func msgAuthErr(msg tea.Msg) error {
 		return v.Err
 	}
 	return nil
+}
+
+// rederivePin recomputes the pin's runtime flags from live groups and the
+// selected routing's references, then pushes the ID/facts the pages need.
+// The persisted pair (groupID, restore) is read straight off cfg — the pin
+// cmds are the only writers, and their completion messages order the read —
+// so an in-memory mirror can never drift from what was persisted.
+// "Active" is derived from the routing, not from a stored flag: if the user
+// switches routing schemes or hand-edits the DSL, the pin honestly reads as
+// 失效 and home's x still cleans the state up.
+func (m *Model) rederivePin() {
+	p := m.pin
+	p.groupID, p.restore = m.cfg.Pin.GroupID, m.cfg.Pin.Restore
+	p.active, p.empty, p.nodeID, p.node, p.subID = false, false, "", "", ""
+	var g *driver.Group
+	if p.groupID != "" {
+		for i := range m.groups.groups {
+			if m.groups.groups[i].ID == p.groupID {
+				g = &m.groups.groups[i]
+				break
+			}
+		}
+	}
+	// The name the routing would reference; when the managed group is gone
+	// (deleted out from under us) the last name we can assume is the
+	// canonical one, and home's missing-group warning covers the rest.
+	managedName := pinGroupName
+	if g != nil {
+		managedName = g.Name
+	}
+	if p.restore != "" {
+		for _, r := range m.home.routingRefs {
+			if r == managedName {
+				p.active = true
+				break
+			}
+		}
+	}
+	if g != nil {
+		if sel := g.SelectedNode(); sel != nil {
+			p.nodeID, p.node, p.subID = sel.ID, sel.Name, sel.SubscriptionID
+		} else if len(g.Nodes) > 0 {
+			p.nodeID, p.node, p.subID = g.Nodes[0].ID, g.Nodes[0].Name, g.Nodes[0].SubscriptionID
+		}
+		// The reload blocker is "a routing-referenced group with no member";
+		// Members() (not just direct nodes) is the honest count here.
+		p.empty = p.active && len(g.Members()) == 0
+	}
+	m.pin = p
+	m.groups.pinGroupID = p.groupID
+	m.groups.setPin(p)
+	m.nodes.pinGroupID = p.groupID
+	m.home.pin = p
+	// The group a switch (S) re-points away from: the managed group while
+	// the pin is live (that is what the routing literally references), the
+	// rederive-mapped proxy group otherwise.
+	switchFrom := m.home.proxyGroup()
+	if p.restore != "" && p.active {
+		switchFrom = managedName
+	}
+	m.home.switchFrom = switchFrom
+	m.groups.switchFrom = switchFrom
+}
+
+// pinManagedName resolves the managed group's live name for switchGroupCmd's
+// pin bookkeeping: "" while no pin is recorded or the group is gone — in both
+// cases a switch to it is a plain rewrite with nothing to re-arm (unlike
+// rederivePin, no canonical-name fallback: re-arming needs the real group).
+func (m *Model) pinManagedName() string {
+	if m.pin.groupID == "" {
+		return ""
+	}
+	for _, g := range m.groups.groups {
+		if g.ID == m.pin.groupID {
+			return g.Name
+		}
+	}
+	return ""
 }
 
 func (m *Model) enterMain() {
@@ -808,7 +903,8 @@ func (m Model) anyModal() bool {
 		return m.configs.mode != 0
 	case pageHome:
 
-		return m.home.confirmSwitch || m.home.confirmPreset >= 0
+		return m.home.confirmSwitch || m.home.confirmPreset >= 0 || m.home.confirmUnpin ||
+			m.home.confirmGroupTo != ""
 	}
 	return false
 }
@@ -1194,6 +1290,7 @@ func (m Model) helpKeys() (keys, hint string) {
 			"  " + gA + "  " + gR
 	case pageTree:
 		keys = i18n.T("Tab 切栏") + "  " + kb(keymap.Groups, "a", "自动策略") +
+			"  " + kb(keymap.Groups, "S", "切换组") +
 			"  " + K(keymap.Groups, "t") + "/" + K(keymap.Groups, "T") + " " + i18n.T("测速") +
 			"  " + gA + "  " + gR
 	case pageSubs:

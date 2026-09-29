@@ -43,10 +43,10 @@ type logsViewer struct {
 	// it, the late logsSpawnMsg would flip following back on and the new
 	// follower would start streaming over the pause.
 	wantFollow bool
-	err       string
-	lines     []string
-	scroll    int // index of the first visible line
-	proc      *logsProc
+	err        string
+	lines      []string
+	scroll     int // index of the first visible line
+	proc       *logsProc
 }
 
 // logsProc is one journalctl child. lines streams its merged stdout/stderr

@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/BurntSushi/toml"
+	tea "github.com/charmbracelet/bubbletea"
 
 	"dae-tui/internal/driver"
 	"dae-tui/internal/i18n"

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -50,6 +51,23 @@ type homePage struct {
 
 	groupCursor int
 	groupFocus  bool
+
+	// pin mirrors the root model's re-derived pin state (rederivePin); the
+	// routing box renders its status line and x unpins through it.
+	pin pinState
+
+	confirmUnpin bool
+
+	// switchFrom is the group the selected routing currently references
+	// (rederive-mapped: the managed pinned group while a pin is active);
+	// S in the group box re-points it at the cursor's group.
+	// confirmGroupTo is the pending switch target of the confirm overlay;
+	// confirmGroupPin freezes "the target is the managed pinned group" at
+	// arm time so the overlay explains the re-pin without re-deriving from
+	// a group list that may have refreshed mid-confirm.
+	switchFrom      string
+	confirmGroupTo  string
+	confirmGroupPin bool
 
 	scroll int
 	follow bool
@@ -372,6 +390,12 @@ func (p *homePage) rederiveGroupIdx() {
 		if target == "" || isBuiltinOutbound(target) {
 			continue
 		}
+		// The managed group's lines belong to the group the pin displaced:
+		// presets and the g picker must keep addressing that one, or the next
+		// Enter would silently rewrite the pin away.
+		if target == p.managedName() && p.pin.restore != "" {
+			target = p.pin.restore
+		}
 		for i, g := range p.groups {
 			if g.Name == target {
 				p.groupIdx = i
@@ -381,7 +405,7 @@ func (p *homePage) rederiveGroupIdx() {
 	}
 
 	for i, g := range p.groups {
-		if !strings.EqualFold(g.Name, "direct") {
+		if !strings.EqualFold(g.Name, "direct") && g.ID != p.pin.groupID {
 			p.groupIdx = i
 			return
 		}
@@ -400,8 +424,42 @@ func (p *homePage) cycleGroup() {
 	if len(p.groups) == 0 {
 		return
 	}
-	p.groupIdx = (p.groupIdx + 1) % len(p.groups)
-	p.groupChosen = true
+	// Skip the managed pinned group: pointing a preset at it would make the
+	// DSL depend on a group whose membership the pin flow swaps around.
+	for i := 1; i <= len(p.groups); i++ {
+		idx := (p.groupIdx + i) % len(p.groups)
+		if p.pin.groupID != "" && p.groups[idx].ID == p.pin.groupID {
+			continue
+		}
+		p.groupIdx = idx
+		p.groupChosen = true
+		return
+	}
+}
+
+// startSwitch arms the switch-group confirm overlay for the group under the
+// group-box cursor: the selected routing's references move from switchFrom
+// to that group (and a pin, if active, is dissolved by the same rewrite;
+// targeting the managed group instead re-arms the pin — see switchGroupCmd).
+func (p *homePage) startSwitch() tea.Cmd {
+	if p.groupCursor < 0 || p.groupCursor >= len(p.groups) {
+		return nil
+	}
+	g := p.groups[p.groupCursor]
+	if p.routingBody == "" || p.switchFrom == "" {
+		return opErrCmd(i18n.T("切换代理组"), errors.New(i18n.T("路由方案未加载，按 r 刷新后重试")))
+	}
+	if g.Name == p.switchFrom {
+		return opErrCmd(i18n.T("切换代理组"), fmt.Errorf(i18n.T("%s 已是当前路由使用的组"), g.Name))
+	}
+	// Re-using the pinned group is fine (its node never left); an empty one
+	// is the reload blocker, so point at f instead.
+	if p.pin.groupID != "" && g.ID == p.pin.groupID && len(g.Members()) == 0 {
+		return opErrCmd(i18n.T("切换代理组"), errors.New(i18n.T("固定组当前没有节点，请在来源组对节点按 f 重新固定")))
+	}
+	p.confirmGroupTo = g.Name
+	p.confirmGroupPin = p.pin.groupID != "" && g.ID == p.pin.groupID
+	return nil
 }
 
 func (p *homePage) renderPresetText(d driver.Driver) {
@@ -457,6 +515,27 @@ func (p *homePage) handleKey(msg tea.KeyMsg, d driver.Driver, running bool) tea.
 		}
 		return nil
 	}
+	if p.confirmUnpin {
+		switch key {
+		case "y":
+			p.confirmUnpin = false
+			return func() tea.Msg { return unpinRequestedMsg{} }
+		case "n", "esc":
+			p.confirmUnpin = false
+		}
+		return nil
+	}
+	if p.confirmGroupTo != "" {
+		switch key {
+		case "y":
+			to, from := p.confirmGroupTo, p.switchFrom
+			p.confirmGroupTo, p.confirmGroupPin = "", false
+			return func() tea.Msg { return switchGroupRequestedMsg{From: from, To: to} }
+		case "n", "esc":
+			p.confirmGroupTo, p.confirmGroupPin = "", false
+		}
+		return nil
+	}
 
 	if p.groupFocus {
 		switch key {
@@ -479,6 +558,8 @@ func (p *homePage) handleKey(msg tea.KeyMsg, d driver.Driver, running bool) tea.
 				return func() tea.Msg { return gotoGroupMsg{ID: id} }
 			}
 			return nil
+		case "S":
+			return p.startSwitch()
 		}
 	}
 	switch key {
@@ -510,6 +591,12 @@ func (p *homePage) handleKey(msg tea.KeyMsg, d driver.Driver, running bool) tea.
 		p.presetText, p.presetErr, p.confirmPreset = text, nil, idx
 	case "g":
 		p.cycleGroup()
+	case "x":
+		// The pin status line in the routing box names this key; pressing it
+		// without a pin recorded is a no-op, not an error.
+		if p.pin.restore != "" {
+			p.confirmUnpin = true
+		}
 	}
 	return nil
 }
@@ -610,6 +697,37 @@ func (p homePage) overlay() *overlaySpec {
 		return &overlaySpec{destructive: true, lines: append(lines, "",
 			ui.OKStyle.Render(i18n.T(" y 确认"))+"    "+ui.ErrorStyle.Render(i18n.T("n / esc 取消"))+"    "+
 				ui.HelpStyle.Render(i18n.T("g 换组")))}
+	case p.confirmUnpin:
+		lines := []string{
+			ui.TitleStyle.Render(i18n.T(" 解除固定节点")),
+			"",
+			i18n.T(" 路由方案中固定组的引用将改回 ") + ui.SelectedStyle.Render(p.pin.restore),
+			ui.HelpStyle.Render(i18n.T(" 固定组与其中节点保留不动；A 重载后生效")),
+			"",
+			ui.OKStyle.Render(i18n.T(" y 确认")) + "    " + ui.ErrorStyle.Render(i18n.T("n / esc 取消")),
+		}
+		return &overlaySpec{lines: lines}
+	case p.confirmGroupTo != "":
+		lines := []string{
+			ui.TitleStyle.Render(i18n.T(" 切换代理组")),
+			"",
+			i18n.T(" 当前  ") + ui.SelectedStyle.Render(p.switchFrom) + " → " +
+				ui.SelectedStyle.Render(p.confirmGroupTo),
+			ui.HelpStyle.Render(i18n.T(" 路由方案 ") + p.routingName + i18n.T(" 中对 ") +
+				p.switchFrom + i18n.T(" 的 %d 处引用将改指 ", countOutboundRefs(p.routingBody, p.switchFrom)) +
+				p.confirmGroupTo),
+			"",
+			ui.HelpStyle.Render(i18n.T(" A 重载后生效")),
+		}
+		if p.confirmGroupPin {
+			lines = append(lines,
+				ui.HelpStyle.Render(i18n.T(" 目标是固定节点专用组：复用其中已固定的节点")),
+				ui.HelpStyle.Render(i18n.T(" 解除固定回到 ")+p.switchFrom+i18n.T(" 用首页 x")))
+		} else if p.pin.active {
+			lines = append(lines, ui.ErrorStyle.Render(i18n.T(" ⚠ 当前的固定节点将同时解除")))
+		}
+		return &overlaySpec{lines: append(lines, "",
+			ui.OKStyle.Render(i18n.T(" y 确认"))+"    "+ui.ErrorStyle.Render(i18n.T("n / esc 取消")))}
 	}
 	return nil
 }
@@ -701,13 +819,21 @@ func (p homePage) bodyLines(status driver.Status) ([]string, int, homeAnchors) {
 		groupRows = append(groupRows, " "+ui.HelpStyle.Render(i18n.T("（加载中…）")))
 	}
 	cw := full - 4
+	refSet := referencedGroups(p.routingRefs)
 	for i, g := range p.groups {
 		label, style := p.currentNode(g)
 		cursor := " "
 		if i == p.groupCursor && p.groupFocus {
 			cursor = ui.CursorStyle.Render("❯")
 		}
-		row := " " + cursor + " " + ui.PadRight(g.Name, 16) + style.Render(label)
+		// Same ● the routing box uses for the active preset: the groups the
+		// selected routing actually sends traffic through (with a pin, that
+		// is the managed group — the 📌 line above explains why).
+		mark := "  "
+		if refSet[g.Name] {
+			mark = ui.OKStyle.Render("● ")
+		}
+		row := " " + cursor + " " + mark + ui.PadRight(g.Name, 16) + style.Render(label)
 
 		if cw >= 68 {
 			if h := p.groupHealth(g); h != "" {
@@ -728,9 +854,10 @@ func (p homePage) bodyLines(status driver.Status) ([]string, int, homeAnchors) {
 	if p.groupFocus && p.groupCursor >= 0 && p.groupCursor < len(groupRows) {
 		groupRows[p.groupCursor] = ui.HiRow(groupRows[p.groupCursor], cw, true)
 	}
-	groupFooter := i18n.T("Tab 切到组列表 · Enter 跳群组页")
+	groupFooter := i18n.T("Tab 切到组列表 · Enter 跳群组页 · ") + kb(keymap.Home, "S", "切换到此组")
 	if p.groupFocus {
-		groupFooter = i18n.T("Enter 跳群组页 · Tab 返回路由切换")
+		groupFooter = i18n.T("Enter 跳群组页 · ") + kb(keymap.Home, "S", "切换到此组") +
+			" · " + i18n.T("Tab 返回路由切换")
 	}
 	groupStart := len(lines) + 1
 	anchors.groupStart = groupStart
@@ -920,6 +1047,45 @@ func maxF(series []float64) float64 {
 	return m
 }
 
+// managedName is the name the routing DSL references for the managed group.
+// Derived per call so a theme of stale copies cannot drift from the group
+// list; the canonical name is the only guess left once the group is gone.
+func (p homePage) managedName() string {
+	if p.pin.groupID != "" {
+		for _, g := range p.groups {
+			if g.ID == p.pin.groupID {
+				return g.Name
+			}
+		}
+	}
+	return pinGroupName
+}
+
+// pinLine renders the routing box's pin status line: what is pinned and how
+// to unpin, or the honest degraded states (stale pin, empty group). Empty
+// return = no pin recorded. "Active" comes from the live routing refs, so a
+// switched scheme or hand-edited DSL reads as 失效 instead of lying.
+func (p homePage) pinLine() string {
+	if p.pin.restore == "" {
+		return ""
+	}
+	key := " " + K(keymap.Home, "x") + " "
+	switch {
+	case !p.pin.active:
+		return " " + lipgloss.NewStyle().Foreground(ui.Yellow).Render(
+			ui.Truncate(i18n.T("⚠ 固定已失效（路由未引用固定组） · ")+K(keymap.Home, "x")+" "+i18n.T("清理"), 60))
+	case p.pin.empty:
+		return " " + ui.ErrorStyle.Render(
+			ui.Truncate(i18n.T("⚠ 固定组已空（重载会失败） · ")+K(keymap.Home, "x")+" "+i18n.T("解除固定"), 60))
+	case p.pin.node == "":
+		return " " + ui.ErrorStyle.Render(
+			ui.Truncate(i18n.T("⚠ 固定组不存在 · ")+K(keymap.Home, "x")+" "+i18n.T("解除固定"), 60))
+	}
+	return " " + ui.OKStyle.Render(ui.Truncate("📌 "+i18n.T("固定 ")+
+		ui.SpaceAfterFlag(p.pin.node), 36)) +
+		ui.HelpStyle.Render(key+i18n.T("解除"))
+}
+
 func (p homePage) routingLines(w int) (body []string, presetStart int) {
 	if len(p.presets) == 0 {
 		return nil, -1
@@ -933,6 +1099,9 @@ func (p homePage) routingLines(w int) (body []string, presetStart int) {
 		head += ui.HelpStyle.Render(i18n.T(" · 代理组: ")) + ui.SelectedStyle.Render(g)
 	}
 	body = append(body, " "+head)
+	if line := p.pinLine(); line != "" {
+		body = append(body, line)
+	}
 	if p.routingID == "" {
 		body = append(body, " "+ui.HelpStyle.Render(i18n.T("（无路由方案：在 5 配置页创建后可用）")))
 	} else if p.proxyGroup() == "" {

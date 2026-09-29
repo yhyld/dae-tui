@@ -86,11 +86,11 @@ const (
 // Keymap is the loaded binding set. Read-only after Load; Reload swaps the
 // whole value behind the pointer.
 type Keymap struct {
-	mu   sync.RWMutex
-	over map[string]map[string]string // scope -> default key -> new key
-	rev  map[string]map[string]string // scope -> new key -> default key
-	dead map[string]map[string]bool   // scope -> default keys moved away
-	notes []string                    // load warnings, shown in the keys viewer
+	mu    sync.RWMutex
+	over  map[string]map[string]string // scope -> default key -> new key
+	rev   map[string]map[string]string // scope -> new key -> default key
+	dead  map[string]map[string]bool   // scope -> default keys moved away
+	notes []string                     // load warnings, shown in the keys viewer
 }
 
 // New returns a keymap with no overrides (every key at its default).

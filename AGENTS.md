@@ -75,13 +75,16 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   节点 + 直接节点，按 ID 去重）。
 - 切固定节点：`groupSetPolicy(id, policy: fixed, policyParams: [{val: "<index>"}])`，
   **key 留空**才会渲染成 dae DSL 的位置参数 `fixed(<index>)`。index 相对
-  `group.nodes` 顺序。**UI 已移除"固定节点"入口**（见下），但驱动仍保留该能力，
-  `driver.Policy.FixedIndex` 与 `Group.FixedIndex()/SelectedNode()` 仍在（只读展示
-  已有 fixed 组）。
-- daed v2 的 fixed 组只允许一个成员，"固定节点"因此是摘掉所有订阅挂载 → 移除其他
-  直接节点 → 确保目标节点是直接成员 → `fixed(0)` 的一串操作：整组被静默重组且无法
-  一键恢复。这就是 UI 去掉该功能的原因；要恢复需按同样顺序重放 mutation（历史上在
-  `msgs.go` 的 `pinNodeCmd`，已删除，git 历史可查）。
+  `group.nodes` 顺序。UI 只在**专用固定组**上用它（见"固定节点（专用组方案）"节）；
+  `driver.Policy.FixedIndex` 与 `Group.FixedIndex()/SelectedNode()` 也为该方案服务。
+- daed v2 的 fixed 组只允许一个成员，且组成员渲染走 **map 迭代**（多成员 fixed 组的
+  `fixed(0)` 指向哪个节点不稳定）——单成员是唯一稳健形态，专用固定组因此常驻单节点。
+  wing 源码事实（改 pin 流程前必读）：fixed 多成员与"被路由引用的组为空"都在 **reload
+  装配路径**检查（`config/mutation_utils.go`），SetPolicy 本身不校验；**未被路由引用的
+  组完全不参与配置生成**（只有 `NecessaryOutbounds` 命中的组才加载）——固定组解除后
+  留着无害，这正是"常驻不删"的依据；订阅刷新（UpdateById）只删**未挂组**的节点，固定
+  节点因此能在机场更新后存活，但**删除订阅**（Remove）无条件删节点——这是"固定组被掏
+  空 → reload 被拒"的唯一现实路径，首页红字告警兜底。
 - `configFlatDesc` 给出 config.dae 全部字段的元数据；`mapping`（如
   `global.tproxy_port`）与 GraphQL `globalInput` 的 camelCase 键按 snake→camel 对应
   （驱动里是 `globalInputKey`）。可编辑字段清单由它 + `configs { global }` 实际返回的
@@ -506,10 +509,17 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
 - **首页组行跳转**：`Tab` 在路由选择器与组列表间切焦点（`home.groupFocus`），组行
   `Enter` 发 `gotoGroupMsg{ID}`，根模型开群组页、选中该组并聚焦右栏（`focus=1`，
   并 `collapseSections()` 清上一组的标记/分区——与 `selectGroupAt` 同一套重置）。
-  焦点在组列表时只吞导航键，`o/P/L/g` 等仍走原路径。
+  焦点在组列表时只吞导航键，`o/P/L/g` 等仍走原路径；组行 `S` 切换代理组（见
+  「固定节点」节的切组条目）。
   **全页恰好一个光标**：`routingLines` 的预设行光标/高亮以 `!p.groupFocus` 门控
   （组行光标以 `p.groupFocus` 门控，两侧对称）——聚焦组列表时预设行只留 ● 状态标记，
-  同时亮两个 ❯ 会被读成"选中没切走"（`TestHomeSingleCursorAcrossFocus` 兜底）。
+  同时亮两个 ❯ 会被读成"选中没切走"（`TestHomeSingleCursorAcrossFocus` 兜底；组行
+  自己的 ● 引用标识不算第二个光标，测试按「❯ ● 组名」相邻断言）。
+- **组行 ● 引用标识（首页组盒 + 群组页左栏）**：绿点 = 该组被**当前选中的路由方案**
+  引用（`referencedGroups` 过滤 builtin——组名撞 builtin 时 DSL 里赢的是 builtin，不标）。
+  首页用 `home.routingRefs`（Selections 的 References），群组页用 `refs[name]` 是否含
+  `routingName`（refs 表按全部方案建，标记只认选中的那个）。固定中流量实际走固定组，
+  标固定组——路由盒的 📌 行负责解释。
 - **订阅页节点缓存**：`subsMsg` **不再**清空 `subNodes`；只有 `u`（更新）把对应 ID 记入
   `stale`，下次 `handleSubs` 时删那一条（并顺带清理已删除订阅的残留），根模型随后
   `ensureNodes` 重取。节点列表常驻右栏下盒，`ensureNodes` 只看缓存与 loading——j/k
@@ -564,7 +574,46 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   格式与 `printGroups` 共用）。**switch 只选择不重载**：方案切换在 daed 侧只是标记
   运行配置过期，重载是确认门控的破坏性操作（TUI 内 `A`），CLI 静默重载代理是
   意外突变——打印"重载后生效"提示而不是替用户按下去。刻意没有组切换类子命令：
-  fixed 组改组是破坏性操作，理由见"已知限制"。
+  固定/切换节点要连带改路由 DSL，CLI 里没有确认面。
+
+## 固定节点（专用组方案，`app/pin.go`）
+
+- **设计**：固定 = 专用组（默认名 `pinned`，首次固定创建、此后**常驻不删**）承担
+  `fixed(0)`，路由 DSL 里**来源组**的引用改指固定组；解除 = 引用原样改回。来源组从不
+  被重组——非破坏性是整个方案的存在理由，也正因此不需要 Phase 2。删除固定组有顺序
+  陷阱（必须先改路由再删组，否则 reload 报 groups not defined）且换来 ID 反复变化，
+  常驻 + 按 ID 守卫是更稳的解。
+- **改写算法**（`rewriteOutboundRefs`）：按行取 outbound 槽位（`->` 之后 /
+  `fallback:` 的值）**整词精确匹配**（含 `must_` 前缀变体），绝不子串替换——组名
+  `cn` 不能碰 `dip(geoip:cn)`。builtin outbound 任一侧直接拒绝；行尾带注释的行保守
+  跳过；保留原行缩进与 token 间距，round-trip 严格还原。`countOutboundRefs` 同一口径
+  计数，确认框与 f 前置校验共用。
+- **pin 编排**（`pinNodeCmd`，单 cmd 内串行）：拉组+方案 →（有旧 pin 先反向还原
+  ——换组重固定的正确性关键）→ 改写→计数 0 报错拒办 → `ValidateRouting` →
+  建/找固定组（**按存储 ID，不按名收养**陌生组；重名时 fallback `pinned2`…）→
+  清多余成员/外挂订阅 → 加目标节点 → `fixed(0)` → `UpdateRoutingText` **最后落** →
+  `cfg.UpdatePin`。中途失败停在"未激活"的安全中间态；重载永远留给 `A`。
+- **unpin**（`unpinNodeCmd`）：反向改写（0 处命中=失效路径，退化成只清状态）→
+  `UpdatePin` 只清 `restore`、**保留组 ID**。
+- **状态**：config.toml `[pin]`（group_id+restore）；`rederivePin` 每次 groups/
+  selections 刷新时**直接读 cfg** 重算 active/empty/node（内存镜像会与 cmd 写盘
+  脱节——踩过），active 以 `home.routingRefs` 是否含固定组名为准（换方案/手改 DSL
+  诚实显示"已失效"）；首页路由盒状态行 + `x` 解除（`confirmUnpin` 浮窗）。
+- **守卫**：群组页对固定组的 `D/R/p/a/s/n/x` 一律 toast 拒绝；节点页 `G` 选择器、
+  首页 `g` 换组、`rederiveGroupIdx` 都跳过它（换组重固定时 rederive 把固定组名映射回
+  `restore` 组，预设继续指向真实代理组）。被绕过（daed web UI）删组后按 ID 自愈重建。
+- **切组（`S`，首页组行/群组页两栏均可）**：`switchGroupCmd` 把选中路由的引用从
+  `switchFrom` 整体改写到目标组——pin 机器去掉固定组的那一半。`switchFrom` 由
+  rederivePin 推送：固定中 = 固定组名（路由字面引用的就是它），否则 = rederive 映射的
+  代理组。因此**切组天然连带解除固定**（pinned→目标的单次改写 + 清 restore；对来源组
+  按 S 恰好等价解除固定），0 处命中报错拒办。**切到固定组是反方向**：unpin 后固定组与
+  其节点仍在，对它按 S 即复用该节点重建 pin（restore=来源组，根模型把 `pinManagedName`
+  ——按 ID 解析、组不在即 ""，无 canonical 兜底——传给 cmd 做方向判定）；固定组为空时
+  拒绝并指引回 f（空 fixed 组=重载阻断）。确认浮窗报引用处数；固定中多一行红字提醒、
+  切到固定组则是"复用已固定节点"说明。群组页的 S 两栏都生效，按键位法则上外框键位条
+  （helpKeys pageTree），首页的 S 只在组盒聚焦时生效、钉组盒底边。
+- 页面（值类型）拿不到 cfg：`pinRequestedMsg`/`unpinRequestedMsg` 路由回根模型执行
+  ——和包级 appKeys 是两种接线，新的"页面请求根模型资源"场景照此办理。
 
 ## 测试约定
 

@@ -21,10 +21,35 @@ func (p *groupsPage) pickerKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		return p.removeNodeConfirmKey(msg, d)
 	case pickRemoveNodes:
 		return p.removeNodesConfirmKey(msg, d)
+	case pickPin:
+		return p.pinConfirmKey(msg)
+	case pickSwitch:
+		return p.switchConfirmKey(msg)
 	case inputCreate, inputRename:
 		return p.groupNameInputKey(msg, d)
 	case pickSub, pickNode, pickPolicy:
 		return p.pickerNavKey(msg, d)
+	}
+	return nil
+}
+
+// pinConfirmKey finishes the pin confirm overlay: the command itself is a
+// msg routed through the root model, which owns the config the pin persists
+// into (pages are value types and never see it).
+func (p *groupsPage) pinConfirmKey(msg tea.KeyMsg) tea.Cmd {
+	switch msg.String() {
+	case "y":
+		g := p.curGroup()
+		node := p.pinTarget
+		p.mode = pickNone
+		if g == nil || node.ID == "" {
+			return nil
+		}
+		return func() tea.Msg {
+			return pinRequestedMsg{NodeID: node.ID, NodeName: node.Name, FromGroup: g.Name}
+		}
+	case "n", "esc", "enter":
+		p.mode = pickNone
 	}
 	return nil
 }
@@ -92,6 +117,25 @@ func (p *groupsPage) removeNodesConfirmKey(msg tea.KeyMsg, d driver.Driver) tea.
 		}
 		return groupMutateCmd(d, groupMutation{kind: 7, groupID: p.groups[p.gi].ID, ids: ids},
 			i18n.T("移除组内 ")+strconv.Itoa(len(ids))+i18n.T(" 个节点"))
+	case "n", "esc", "enter":
+		p.mode = pickNone
+	}
+	return nil
+}
+
+// switchConfirmKey finishes the switch-group confirm overlay; like the pin
+// confirm it routes through the root model (msgs, not direct cmds) because
+// the switch persists into the config-held pin state.
+func (p *groupsPage) switchConfirmKey(msg tea.KeyMsg) tea.Cmd {
+	switch msg.String() {
+	case "y":
+		g := p.curGroup()
+		p.mode = pickNone
+		if g == nil {
+			return nil
+		}
+		from := p.switchFrom
+		return func() tea.Msg { return switchGroupRequestedMsg{From: from, To: g.Name} }
 	case "n", "esc", "enter":
 		p.mode = pickNone
 	}

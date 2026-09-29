@@ -216,10 +216,10 @@ type Selections struct {
 type Policy struct {
 	Name       string // random | fixed | min_avg10 | min_moving_avg | min
 	FixedIndex int    // used when Name == "fixed"
-	// FixedIndex is retained for API completeness: daed supports fixed
-	// groups, but the TUI no longer creates them (a v2 fixed group may hold
-	// exactly one member, so pinning silently rebuilt the whole group).
-	// Existing fixed groups are still displayed read-only.
+	// The TUI sets fixed only on its dedicated pinned group, whose single
+	// member the pin flow maintains (see internal/app/pin.go): daed v2 fixed
+	// groups may hold exactly one member and are order-stable only then.
+	// Fixed groups created elsewhere are displayed read-only.
 }
 
 // RoutingPreset is a ready-made routing template a backend can render as

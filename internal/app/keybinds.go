@@ -80,6 +80,8 @@ var keyCatalog = []keyEntry{
 	{keymap.Home, "j", "移动光标"},
 	{keymap.Home, "k", "移动光标"},
 	{keymap.Home, "g", "切换预设的代理组"},
+	{keymap.Home, "x", "解除固定节点"},
+	{keymap.Home, "S", "切换到此组"},
 	// groups
 	{keymap.Groups, "j", "移动"},
 	{keymap.Groups, "k", "移动"},
@@ -90,6 +92,8 @@ var keyCatalog = []keyEntry{
 	{keymap.Groups, "D", "删除群组"},
 	{keymap.Groups, "p", "修改策略"},
 	{keymap.Groups, "a", "切回自动策略"},
+	{keymap.Groups, "f", "固定节点"},
+	{keymap.Groups, "S", "切换代理组"},
 	{keymap.Groups, "t", "测速（组/订阅）"},
 	{keymap.Groups, "T", "测速（选中）"},
 	{keymap.Groups, "s", "挂订阅"},

@@ -50,6 +50,14 @@ type Config struct {
 	// settings window (which rewrites this field and saves).
 	Theme string `toml:"theme"`
 
+	// Pin is the TUI-managed pinned-node state: a dedicated fixed group
+	// ("pinned") whose single member carries the pinned node, plus the
+	// outbound the pin displaced in the routing DSL (what unpin restores).
+	// GroupID survives unpin — the group is deliberately kept around: an
+	// unreferenced group is inert in daed's apply path, and the stable ID
+	// makes re-pinning a pure membership swap.
+	Pin Pin `toml:"pin"`
+
 	// mu serializes mutations + saves: driver hooks persist new tokens and
 	// credentials from background request goroutines while the UI's logout
 	// clears the session on the tea goroutine. Unexported, so the struct
@@ -59,6 +67,12 @@ type Config struct {
 
 // DefaultEndpoint is the daed default GraphQL address.
 const DefaultEndpoint = "http://127.0.0.1:2023/graphql"
+
+// Pin is the persisted pinned-node state (Config.Pin).
+type Pin struct {
+	GroupID string `toml:"group_id"`
+	Restore string `toml:"restore"` // outbound the pin displaced; "" = no pin
+}
 
 func Path() (string, error) {
 	dir, err := os.UserConfigDir()
@@ -142,6 +156,16 @@ func (c *Config) UpdateLang(path, lang string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.Lang = lang
+	return c.saveLocked(path)
+}
+
+// UpdatePin replaces the pinned-node state and persists it. Locked like
+// UpdateTheme: background token refreshes save the whole config file
+// concurrently with pin/unpin completions on the tea goroutine.
+func (c *Config) UpdatePin(path, groupID, restore string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Pin.GroupID, c.Pin.Restore = groupID, restore
 	return c.saveLocked(path)
 }
 

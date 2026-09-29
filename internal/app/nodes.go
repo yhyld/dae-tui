@@ -22,6 +22,10 @@ type nodesPage struct {
 	focus  int
 	groups []driver.Group
 
+	// pinGroupID is the managed pinned group's ID; the G picker hides it —
+	// its membership belongs to the pin flow, not to ad-hoc additions.
+	pinGroupID string
+
 	lat map[string]driver.Latency
 
 	testing   bool
@@ -271,11 +275,12 @@ func (p *nodesPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 		return nil
 	}
 	if p.mode == 3 {
+		groups := p.pickGroups()
 		switch msg.String() {
 		case "esc":
 			p.mode = 0
 		case "j", "down":
-			if p.pickCursor < len(p.groups)-1 {
+			if p.pickCursor < len(groups)-1 {
 				p.pickCursor++
 			}
 		case "k", "up":
@@ -284,14 +289,14 @@ func (p *nodesPage) handleKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
 			}
 		case "enter":
 			n := p.opNode()
-			if n == nil || p.pickCursor >= len(p.groups) {
+			if n == nil || p.pickCursor >= len(groups) {
 				p.mode = 0
 				if n == nil {
 					return opGone(i18n.T("加入群组"))
 				}
 				return nil
 			}
-			g := p.groups[p.pickCursor]
+			g := groups[p.pickCursor]
 			p.mode = 0
 			return groupMutateCmd(d, groupMutation{kind: 2, groupID: g.ID, ids: []string{n.ID}},
 				i18n.T("添加节点 ")+ui.SpaceAfterFlag(n.Name)+i18n.T(" 到组 ")+g.Name)
@@ -557,6 +562,20 @@ func (p nodesPage) overlay() *overlaySpec {
 	return nil
 }
 
+// pickGroups is the G picker's candidate list: every group except the
+// managed pinned one. Navigation, Enter and rendering all go through it so
+// the cursor index cannot drift from what is on screen.
+func (p nodesPage) pickGroups() []driver.Group {
+	out := make([]driver.Group, 0, len(p.groups))
+	for _, g := range p.groups {
+		if p.pinGroupID != "" && g.ID == p.pinGroupID {
+			continue
+		}
+		out = append(out, g)
+	}
+	return out
+}
+
 func (p nodesPage) modalTitle() string {
 	switch p.mode {
 	case 2:
@@ -575,7 +594,7 @@ func (p nodesPage) modalLines() []string {
 		}
 	case 3:
 		lines := []string{ui.TitleStyle.Render(i18n.T(" 选择要加入的群组"))}
-		for i, g := range p.groups {
+		for i, g := range p.pickGroups() {
 			mark, style := "  ", ui.HelpStyle
 			if i == p.pickCursor {
 				mark, style = "❯ ", ui.CursorStyle
