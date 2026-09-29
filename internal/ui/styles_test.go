@@ -116,6 +116,59 @@ func TestApplyTheme(t *testing.T) {
 	}
 }
 
+// ApplyPalette is the full-surface entry: every slot applies (or keeps the
+// current value when empty/invalid), the derived styles follow, SelBG
+// derives from the accent when unset and applies verbatim when set, and the
+// legacy ApplyTheme wrapper retunes only the neutrals.
+func TestApplyPalette(t *testing.T) {
+	orig := Palette{
+		Accent: string(Accent), Border: string(BorderCol), Dim: string(DimText),
+		OK: string(OK), Warn: string(Warn), Err: string(Err), Gray: string(Gray), SelBG: string(SelBG),
+	}
+	t.Cleanup(func() { ApplyPalette(orig) })
+
+	ApplyPalette(Palette{Accent: "201", Border: "250", Dim: "240", OK: "82", Warn: "220", Err: "196", Gray: "245"})
+	if OK != lipgloss.Color("82") || Warn != lipgloss.Color("220") || Err != lipgloss.Color("196") || Gray != lipgloss.Color("245") {
+		t.Fatalf("semantic trio/gray = %v/%v/%v/%v", OK, Warn, Err, Gray)
+	}
+	if ErrorStyle.GetForeground() != Err || OKStyle.GetForeground() != OK || WarnStyle.GetForeground() != Warn {
+		t.Fatal("semantic styles not rebuilt from the palette")
+	}
+	if got := LatencyStyle(50, true, true); got.GetForeground() != OK {
+		t.Fatalf("latency ramp did not pick up the themed OK: %v", got.GetForeground())
+	}
+	// Inactive tabs ride the dim color (TabDim was folded away).
+	if TabStyle.GetForeground() != DimText {
+		t.Fatalf("TabStyle foreground = %v, want the dim %v", TabStyle.GetForeground(), DimText)
+	}
+	// SelBG derives from the accent while unset…
+	if SelBG != selBGFromAccent(Accent) {
+		t.Fatalf("SelBG = %v, want the accent-derived %v", SelBG, selBGFromAccent(Accent))
+	}
+	// …and applies verbatim when set (light themes want a light bar).
+	ApplyPalette(Palette{SelBG: "#d0d0d0"})
+	if SelBG != lipgloss.Color("#d0d0d0") {
+		t.Fatalf("explicit SelBG = %v", SelBG)
+	}
+	// The compat wrapper retunes the neutrals only — it must not wipe the
+	// semantic trio.
+	ApplyTheme("62", "238", "245")
+	if OK != lipgloss.Color("82") || Warn != lipgloss.Color("220") || Err != lipgloss.Color("196") {
+		t.Fatalf("ApplyTheme wiped the semantic trio: %v/%v/%v", OK, Warn, Err)
+	}
+	// Invalid values keep the current theme, per color — SelBG included
+	// (an unparsable sel_bg must not silently re-derive and change the bar;
+	// ApplyTheme above already re-derived it from accent 62).
+	before := [5]lipgloss.Color{OK, Warn, Err, Gray, SelBG}
+	for _, bad := range []string{"999", "-1", "xyz", "#12345", "#gggggg"} {
+		ApplyPalette(Palette{OK: bad, Warn: bad, Err: bad, Gray: bad, SelBG: bad})
+	}
+	if OK != before[0] || Warn != before[1] || Err != before[2] || Gray != before[3] || SelBG != before[4] {
+		t.Fatalf("invalid input must keep the current values: %v/%v/%v/%v/%v (was %v/%v/%v/%v/%v)",
+			OK, Warn, Err, Gray, SelBG, before[0], before[1], before[2], before[3], before[4])
+	}
+}
+
 // parseColor accepts ANSI-256 indexes and hex, rejects everything else.
 func TestParseColor(t *testing.T) {
 	for _, ok := range []string{"0", "62", "255", "#ff00aa", "#AABBCC"} {

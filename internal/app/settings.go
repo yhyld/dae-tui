@@ -79,35 +79,38 @@ var langEntries = []struct{ name, code string }{
 }
 
 // aboutLogo is the About window's mark: the home page's traffic chart
-// miniaturized on a 30x20 dot grid (15 cells x 5 rows) — six bar columns
-// over a dotted axis inside a rounded frame. Frame and axis take the
-// accent at normal weight and the columns the accent bold: the mark reads
-// in the theme's brand color end to end — a dim gray frame washed out to
-// near-invisible on real terminals — while the data still leads through
-// weight and density. Six candidates were designed (catalog with dot maps
-// in logo_test.go); to swap, paste another candidate's braille —
-// single-tone candidates go entirely in aboutLogoBars with an all-blank
-// aboutLogoFrame — TestAboutLogoIsKnownCandidate keeps the file honest.
+// miniaturized on a 34x24 dot grid (17 cells x 6 rows) — six bar columns
+// over a solid axis inside a rounded frame with 3-dot diagonal corners.
+// Frame and axis take the accent at normal weight and the columns the
+// accent bold: the mark reads in the theme's brand color end to end — a
+// dim gray frame washed out to near-invisible on real terminals — while
+// the data still leads through weight and density. Seven candidates were
+// designed (catalog with dot maps in logo_test.go); to swap, paste another
+// candidate's braille — single-tone candidates go entirely in aboutLogoBars
+// with an all-blank aboutLogoFrame — TestAboutLogoIsKnownCandidate keeps
+// the file honest.
 var (
-	// aboutLogoFrame is the furniture layer: frame edges, 3-dot-radius
-	// corner arcs and the dotted axis, rendered in the accent at normal
+	// aboutLogoFrame is the furniture layer: frame edges, 3-dot diagonal
+	// corner arcs and the solid axis, rendered in the accent at normal
 	// weight.
 	aboutLogoFrame = []string{
-		"⠀⢀⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⡀⠀",
-		"⠀⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢸⠀",
-		"⠀⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢸⠀",
-		"⠀⡇⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⢸⠀",
-		"⠀⠈⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠁⠀",
+		"⠀⠀⠀⡠⠤⠤⠤⠤⠤⠤⠤⠤⠤⢄⠀⠀⠀",
+		"⠀⠀⡎⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢱⠀⠀",
+		"⠀⠀⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢸⠀⠀",
+		"⠀⠀⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢸⠀⠀",
+		"⠀⠀⢇⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⡸⠀⠀",
+		"⠀⠀⠀⠑⠒⠒⠒⠒⠒⠒⠒⠒⠒⠊⠀⠀⠀",
 	}
 	// aboutLogoBars is the data layer: the six columns, bottoms one dot
 	// row above the axis — the sparkline's grammar, bars rise from just
 	// over the reference line — rendered bold in the accent.
 	aboutLogoBars = []string{
-		"⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
-		"⠀⠀⠀⠀⣤⠀⣿⠀⣶⠀⣤⠀⠀⠀⠀",
-		"⠀⠀⣤⠀⣿⠀⣿⠀⣿⠀⣿⠀⣤⠀⠀",
-		"⠀⠀⠿⠀⠿⠀⠿⠀⠿⠀⠿⠀⠿⠀⠀",
-		"⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+		"⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+		"⠀⠀⠀⠀⠀⠀⠀⣀⠀⣶⠀⠀⠀⠀⠀⠀⠀",
+		"⠀⠀⠀⠀⠀⣀⠀⣿⠀⣿⠀⣶⠀⠀⠀⠀⠀",
+		"⠀⠀⠀⣀⠀⣿⠀⣿⠀⣿⠀⣿⠀⣶⠀⠀⠀",
+		"⠀⠀⠀⠿⠀⠿⠀⠿⠀⠿⠀⠿⠀⠿⠀⠀⠀",
+		"⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
 	}
 )
 
@@ -290,7 +293,7 @@ func (m *Model) openThemePicker() {
 		s.themeNotes = notes
 	}
 	for _, t := range append(config.BuiltinThemes(), user...) {
-		s.themes = append(s.themes, t.Resolved(m.cfg.Accent, m.cfg.Border, m.cfg.Dim))
+		s.themes = append(s.themes, t.Resolved(m.cfg.InlineTheme()))
 	}
 	s.themeActive = m.cfg.Theme
 	if s.themeActive == "" {
@@ -312,7 +315,7 @@ func (m *Model) themeKey(msg tea.KeyMsg) tea.Cmd {
 	s := &m.settings
 	switch msg.String() {
 	case "esc":
-		ui.ApplyTheme(m.theme.Accent, m.theme.Border, m.theme.Dim)
+		ui.ApplyPalette(m.theme.Palette())
 		s.sub = subMenu
 	case "j", "down":
 		if s.themeCur < len(s.themes)-1 {
@@ -342,7 +345,7 @@ func (m *Model) themeKey(msg tea.KeyMsg) tea.Cmd {
 
 func (m *Model) previewTheme() {
 	t := m.settings.themes[m.settings.themeCur]
-	ui.ApplyTheme(t.Accent, t.Border, t.Dim)
+	ui.ApplyPalette(t.Palette())
 }
 
 func (s *settings) acctKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {
@@ -863,12 +866,16 @@ func (s settings) keysOverlay() *overlaySpec {
 	return &overlaySpec{lines: lines}
 }
 
+// themeSwatches previews a theme's palette: accent first, then the semantic
+// trio, then the neutrals — the six slots a theme actually retunes. SelBG
+// stays out (it is derived, invisible in a two-char swatch).
 func themeSwatches(t config.Theme) string {
 	block := func(c string) string {
 		if c == "" {
-			return ui.HelpStyle.Render("··")
+			return ui.HelpStyle.Render("·")
 		}
-		return lipgloss.NewStyle().Foreground(lipgloss.Color(c)).Render("██")
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(c)).Render("█")
 	}
-	return block(t.Accent) + block(t.Border) + block(t.Dim)
+	return block(t.Accent) + block(t.OK) + block(t.Warn) + block(t.Err) +
+		block(t.Border) + block(t.Dim)
 }

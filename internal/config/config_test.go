@@ -83,7 +83,8 @@ func TestConcurrentMutationsAndSaves(t *testing.T) {
 func TestThemeFieldsRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
-	c := &Config{Endpoint: "http://127.0.0.1:2023/graphql", Accent: "62", Border: "250", Dim: "#d0d0d0"}
+	c := &Config{Endpoint: "http://127.0.0.1:2023/graphql", Accent: "62", Border: "250", Dim: "#d0d0d0",
+		OK: "82", Warn: "220", Err: "196", Gray: "245", SelBG: "#d8d8d8"}
 	if err := c.Save(path); err != nil {
 		t.Fatalf("save: %v", err)
 	}
@@ -93,6 +94,9 @@ func TestThemeFieldsRoundTrip(t *testing.T) {
 	}
 	if got.Accent != "62" || got.Border != "250" || got.Dim != "#d0d0d0" {
 		t.Fatalf("theme fields = %q/%q/%q, want 62/250/#d0d0d0", got.Accent, got.Border, got.Dim)
+	}
+	if got.OK != "82" || got.Warn != "220" || got.Err != "196" || got.Gray != "245" || got.SelBG != "#d8d8d8" {
+		t.Fatalf("semantic slots = %q/%q/%q/%q/%q", got.OK, got.Warn, got.Err, got.Gray, got.SelBG)
 	}
 	empty, err := Load(filepath.Join(dir, "missing.toml"))
 	if err != nil {
@@ -106,40 +110,48 @@ func TestThemeFieldsRoundTrip(t *testing.T) {
 
 func TestResolvedCascadesToInlineThenDefaults(t *testing.T) {
 	// A full theme file wins outright.
-	got := (Theme{Name: "nord", Accent: "#001", Border: "10", Dim: "20"}).Resolved("#x", "1", "2")
-	if got.Accent != "#001" || got.Border != "10" || got.Dim != "20" {
+	got := (Theme{Name: "nord", Accent: "#001", Border: "10", Dim: "20"}).
+		Resolved(Theme{Accent: "#x", Border: "1", Dim: "2", OK: "#3"})
+	if got.Accent != "#001" || got.Border != "10" || got.Dim != "20" || got.OK != "#3" {
 		t.Fatalf("full theme must keep its colors: %+v", got)
 	}
 	// Empty slots inherit the inline values…
-	got = (Theme{Name: "partial", Accent: "#001"}).Resolved("200", "250", "240")
-	if got.Accent != "#001" || got.Border != "250" || got.Dim != "240" {
+	got = (Theme{Name: "partial", Accent: "#001", OK: "#0a0"}).
+		Resolved(Theme{Accent: "200", Border: "250", Dim: "240", OK: "#0b0", Warn: "#0e0"})
+	if got.Accent != "#001" || got.Border != "250" || got.Dim != "240" || got.OK != "#0a0" || got.Warn != "#0e0" {
 		t.Fatalf("partial theme must inherit inline colors: %+v", got)
 	}
 	// …and empty inline values fall through to the built-in palette.
-	got = (Theme{Name: "bare"}).Resolved("", "", "")
-	if got.Accent != ui.DefaultAccent || got.Border != ui.DefaultBorder || got.Dim != ui.DefaultDim {
+	got = (Theme{Name: "bare"}).Resolved(Theme{})
+	if got.Accent != ui.DefaultAccent || got.Border != ui.DefaultBorder || got.Dim != ui.DefaultDim ||
+		got.OK != ui.DefaultOK || got.Warn != ui.DefaultWarn || got.Err != ui.DefaultErr || got.Gray != ui.DefaultGray {
 		t.Fatalf("bare theme must land on the built-in palette: %+v", got)
+	}
+	// SelBG deliberately does NOT resolve: empty is meaningful there
+	// (ApplyPalette derives it from the accent).
+	if got.SelBG != "" {
+		t.Fatalf("SelBG must pass through unresolved, got %q", got.SelBG)
 	}
 }
 
 func TestResolveTheme(t *testing.T) {
 	// No name: the inline colors are the theme.
-	got, ok := ResolveTheme("", "62", "250", "240")
+	got, ok := ResolveTheme("", Theme{Accent: "62", Border: "250", Dim: "240"})
 	if !ok || got.Name != "默认" || got.Border != "250" {
 		t.Fatalf("no name should resolve to inline: %+v ok=%v", got, ok)
 	}
 	// Builtins resolve by name.
-	got, ok = ResolveTheme("浅色", "", "", "")
-	if !ok || got.Border != "250" || got.Dim != "240" {
+	got, ok = ResolveTheme("浅色", Theme{})
+	if !ok || got.Border != "250" || got.Dim != "240" || got.SelBG != "#d0d0d0" {
 		t.Fatalf("builtin 浅色 should resolve: %+v ok=%v", got, ok)
 	}
 	// 默认 over inline: picking it keeps the inline tuning.
-	got, ok = ResolveTheme("默认", "99", "", "")
+	got, ok = ResolveTheme("默认", Theme{Accent: "99"})
 	if !ok || got.Accent != "99" {
 		t.Fatalf("默认 should resolve over inline: %+v ok=%v", got, ok)
 	}
 	// Unknown name: inline fallback, found=false.
-	if _, ok := ResolveTheme("nope", "62", "238", "245"); ok {
+	if _, ok := ResolveTheme("nope", Theme{Accent: "62", Border: "238", Dim: "245"}); ok {
 		t.Fatal("unknown theme must report found=false")
 	}
 }
@@ -160,8 +172,16 @@ func TestBuiltinThemesResolve(t *testing.T) {
 	if themes[1].Border != "250" || themes[1].Dim != "240" {
 		t.Fatalf("浅色 must keep the light-terminal neutrals: %+v", themes[1])
 	}
+	if themes[1].SelBG != "#d0d0d0" {
+		t.Fatalf("浅色 must carry a light selection bar: %+v", themes[1])
+	}
 	seen := map[string]bool{}
-	reset := func() { ui.ApplyTheme(ui.DefaultAccent, ui.DefaultBorder, ui.DefaultDim) }
+	reset := func() {
+		ui.ApplyPalette(ui.Palette{
+			Accent: ui.DefaultAccent, Border: ui.DefaultBorder, Dim: ui.DefaultDim,
+			OK: ui.DefaultOK, Warn: ui.DefaultWarn, Err: ui.DefaultErr, Gray: ui.DefaultGray,
+		})
+	}
 	defer reset()
 	for _, th := range themes {
 		if seen[th.Name] {
@@ -169,15 +189,20 @@ func TestBuiltinThemesResolve(t *testing.T) {
 		}
 		seen[th.Name] = true
 		reset()
-		ui.ApplyTheme(th.Accent, th.Border, th.Dim)
-		if th.Accent != "" && string(ui.Accent) != th.Accent {
-			t.Fatalf("%s: accent %q did not parse (got %q)", th.Name, th.Accent, ui.Accent)
-		}
-		if th.Border != "" && string(ui.BorderCol) != th.Border {
-			t.Fatalf("%s: border %q did not parse (got %q)", th.Name, th.Border, ui.BorderCol)
-		}
-		if th.Dim != "" && string(ui.DimText) != th.Dim {
-			t.Fatalf("%s: dim %q did not parse (got %q)", th.Name, th.Dim, ui.DimText)
+		ui.ApplyPalette(th.Palette())
+		for _, slot := range []struct{ name, want, got string }{
+			{"accent", th.Accent, string(ui.Accent)},
+			{"border", th.Border, string(ui.BorderCol)},
+			{"dim", th.Dim, string(ui.DimText)},
+			{"ok", th.OK, string(ui.OK)},
+			{"warn", th.Warn, string(ui.Warn)},
+			{"err", th.Err, string(ui.Err)},
+			{"gray", th.Gray, string(ui.Gray)},
+			{"sel_bg", th.SelBG, string(ui.SelBG)},
+		} {
+			if slot.want != "" && slot.got != slot.want {
+				t.Fatalf("%s: %s %q did not parse (got %q)", th.Name, slot.name, slot.want, slot.got)
+			}
 		}
 	}
 }
@@ -190,7 +215,7 @@ func TestLoadThemes(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write("nord.toml", "accent = \"#88C0D0\"\nborder = \"241\"\n")
+	write("nord.toml", "accent = \"#88C0D0\"\nborder = \"241\"\nok = \"#a3be8c\"\nwarn = \"#ebcb8b\"\nerr = \"#bf616a\"\ngray = \"244\"\nsel_bg = \"#2e3440\"\n")
 	write("broken.toml", "accent = [unclosed\n")
 	write("readme.txt", "not a theme")
 	themes, notes, err := LoadThemes(dir)
@@ -199,6 +224,10 @@ func TestLoadThemes(t *testing.T) {
 	}
 	if len(themes) != 1 || themes[0].Name != "nord" || themes[0].Accent != "#88C0D0" || themes[0].Dim != "" {
 		t.Fatalf("nord.toml should load: %+v", themes)
+	}
+	if themes[0].OK != "#a3be8c" || themes[0].Warn != "#ebcb8b" || themes[0].Err != "#bf616a" ||
+		themes[0].Gray != "244" || themes[0].SelBG != "#2e3440" {
+		t.Fatalf("nord.toml semantic slots should load: %+v", themes[0])
 	}
 	if len(notes) != 1 || !strings.Contains(notes[0], "broken.toml") {
 		t.Fatalf("broken file should produce a note: %v", notes)

@@ -883,7 +883,7 @@ func (p groupsPage) View() string {
 		if p.loading {
 			left = []string{ui.HelpStyle.Render(i18n.T("加载中…"))}
 		} else {
-			left = []string{ui.HelpStyle.Render(i18n.T("无路由组（按 c 创建）"))}
+			left = []string{ui.HelpStyle.Render(centerLine(i18n.T("无路由组（按 c 创建）"), p.leftW-4))}
 		}
 	}
 	info := p.infoLines()
@@ -966,13 +966,13 @@ func (p groupsPage) infoLines() []string {
 		return []string{ui.HelpStyle.Render(i18n.T("（无组）"))}
 	}
 	lines := []string{
-		ui.SelectedStyle.Render(i18n.T("策略  ")) + policyLabel(g),
-		ui.SelectedStyle.Render(i18n.T("成员  ")) + i18n.T("%d（订阅挂载 %d 个，直接挂载 %d 个）",
+		detailLabel("策略") + policyLabel(g),
+		detailLabel("成员") + i18n.T("%d（订阅挂载 %d 个，直接挂载 %d 个）",
 			len(g.Members()), len(g.Subscriptions), len(g.Nodes)),
 	}
 
 	if profiles := p.refs[g.Name]; len(profiles) > 0 {
-		row := ui.SelectedStyle.Render(i18n.T("引用  ")) + ui.HelpStyle.Render(strings.Join(quoteAll(profiles), "、"))
+		row := detailLabel("引用") + ui.HelpStyle.Render(strings.Join(quoteAll(profiles), "、"))
 		warn := ui.HelpStyle.Render(i18n.T(" · 改名/删除将静默失效"))
 		if lipgloss.Width(row)+lipgloss.Width(warn) <= p.rightW-4 {
 			row += warn
@@ -980,7 +980,7 @@ func (p groupsPage) infoLines() []string {
 		lines = append(lines, row)
 	}
 	if p.pinGroupID != "" && g.ID == p.pinGroupID {
-		lines = append(lines, ui.SelectedStyle.Render(i18n.T("固定  "))+
+		lines = append(lines, detailLabel("固定")+
 			ui.HelpStyle.Render(i18n.T("TUI 固定节点专用组：换节点去来源组按 f，解除去首页按 x")))
 	}
 	return lines

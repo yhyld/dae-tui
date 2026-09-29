@@ -38,6 +38,23 @@ type Config struct {
 	Border string `toml:"border"`
 	Dim    string `toml:"dim"`
 
+	// OK/Warn/Err theme the semantic trio: success/warning/error text and
+	// the latency ramp (good/mid/bad) share one slot each. Defaults 42/214/
+	// 203. Same format as Accent; empty or invalid keeps the default.
+	OK   string `toml:"ok"`
+	Warn string `toml:"warn"`
+	Err  string `toml:"err"`
+
+	// Gray themes the untested/dead latency tier (default 241); light
+	// terminals want something like "249". Same format as Accent; empty or
+	// invalid keeps the default.
+	Gray string `toml:"gray"`
+
+	// SelBG overrides the selected-row bar's background. Empty (the
+	// default) derives it from the accent blended into a dark base; light
+	// terminals want an explicit light bar, e.g. "#d0d0d0".
+	SelBG string `toml:"sel_bg"`
+
 	// Lang selects the UI language: "en" for English, empty/"zh" for
 	// Chinese (the source language). Switchable live from the settings
 	// window, which rewrites this field and saves.
@@ -75,6 +92,15 @@ type Config struct {
 
 // DefaultEndpoint is the daed default GraphQL address.
 const DefaultEndpoint = "http://127.0.0.1:2023/graphql"
+
+// InlineTheme returns the config's inline color tuning as a Theme — the
+// cascade's middle tier between a named theme and the built-in palette.
+func (c *Config) InlineTheme() Theme {
+	return Theme{
+		Accent: c.Accent, Border: c.Border, Dim: c.Dim,
+		OK: c.OK, Warn: c.Warn, Err: c.Err, Gray: c.Gray, SelBG: c.SelBG,
+	}
+}
 
 // Pin is the persisted pinned-node state (Config.Pin).
 type Pin struct {

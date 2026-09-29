@@ -8,7 +8,6 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 
 	"dae-tui/internal/driver"
 	"dae-tui/internal/i18n"
@@ -613,7 +612,7 @@ func (p nodesPage) leftLines() []string {
 		lines = append(lines, ui.ErrorStyle.Render("✗ "+shortErr(p.err)))
 	}
 	if len(p.nodes) == 0 {
-		lines = append(lines, ui.HelpStyle.Render(i18n.T("无手动节点（按 a 导入）")))
+		lines = append(lines, ui.HelpStyle.Render(centerLine(i18n.T("无手动节点（按 a 导入）"), p.leftW-4)))
 	}
 	if prompt := p.nodeView.prompt(); prompt != "" {
 		lines = append(lines, ui.HelpStyle.Render(prompt))
@@ -688,20 +687,20 @@ func (p nodesPage) rightLines() []string {
 		return []string{ui.HelpStyle.Render(i18n.T("（无节点）"))}
 	}
 	lines := []string{
-		ui.SelectedStyle.Render(i18n.T("名称  ")) + ui.SpaceAfterFlag(n.Name),
-		ui.SelectedStyle.Render(i18n.T("协议  ")) + n.Protocol,
-		ui.SelectedStyle.Render(i18n.T("地址  ")) + ui.Truncate(n.Address, max0(p.rightW-10)),
+		detailLabel("名称") + ui.SpaceAfterFlag(n.Name),
+		detailLabel("协议") + n.Protocol,
+		detailLabel("地址") + ui.Truncate(n.Address, max0(p.rightW-10)),
 	}
 	if n.Tag != "" {
-		lines = append(lines, ui.SelectedStyle.Render(i18n.T("标签  "))+n.Tag)
+		lines = append(lines, detailLabel("标签")+n.Tag)
 	}
 	if n.Link != "" {
-		lines = append(lines, ui.SelectedStyle.Render(i18n.T("链接  "))+ui.Truncate(n.Link, max0(p.rightW-10)))
+		lines = append(lines, detailLabel("链接")+ui.Truncate(n.Link, max0(p.rightW-10)))
 	}
 
-	lines = append(lines, ui.SelectedStyle.Render(i18n.T("群组  "))+p.groupMembership(n.ID))
+	lines = append(lines, detailLabel("群组")+p.groupMembership(n.ID))
 	if row, ok := latencyDetail(p.lat, n.ID); ok {
-		line := ui.SelectedStyle.Render(i18n.T("延迟  ")) + row
+		line := detailLabel("延迟") + row
 
 		if l := p.lat[n.ID]; !l.Alive && l.Message != "" {
 			line += ui.HelpStyle.Render("  " + ui.Truncate(firstLine(l.Message), max0(p.rightW-26)))
@@ -733,7 +732,7 @@ func (p nodesPage) groupMembership(id string) string {
 		}
 	}
 	if len(names) == 0 {
-		return lipgloss.NewStyle().Foreground(ui.Yellow).Render(i18n.T("未加入任何群组（G 加入）"))
+		return ui.WarnStyle.Render(i18n.T("未加入任何群组（G 加入）"))
 	}
 	return strings.Join(names, "、")
 }

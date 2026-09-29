@@ -136,7 +136,7 @@ func New(drv driver.Driver, cfg *config.Config, cfgPath string) Model {
 	m.nodes.hist = m.latHist
 	m.configs = newConfigsPage(m.caps)
 	m.settings = newSettings()
-	m.theme, _ = config.ResolveTheme(cfg.Theme, cfg.Accent, cfg.Border, cfg.Dim)
+	m.theme, _ = config.ResolveTheme(cfg.Theme, cfg.InlineTheme())
 	loadKeys(cfgPath)
 
 	m.configs.builtin = cfg.Editor == "builtin"
@@ -794,6 +794,35 @@ func (m *Model) showErrToast(s string) {
 	m.toast, m.toastAt, m.toastDur = s, time.Now(), 8*time.Second
 }
 
+// detailLabelW is the info-card label column. Labels are translated and
+// padded to this width at render time — the old fixed-width keys ("名称  ")
+// relied on every translation happening to be exactly six cells, which the
+// English table already failed ("protocol  " is ten).
+const detailLabelW = 6
+
+// detailLabel renders one info-card label in the shared label column.
+// Over-long translations keep their full text and one separator space —
+// one shifted row is honest, a truncated label is not.
+func detailLabel(key string) string {
+	l := i18n.T(key)
+	if pad := detailLabelW - lipgloss.Width(l); pad > 0 {
+		l += strings.Repeat(" ", pad)
+	} else {
+		l += " "
+	}
+	return ui.SelectedStyle.Render(l)
+}
+
+// centerLine centers one content line in a pane's inner width — empty
+// states otherwise hug the left edge like the first row of a list that
+// isn't there.
+func centerLine(s string, inner int) string {
+	if pad := (inner - lipgloss.Width(s)) / 2; pad > 0 {
+		return strings.Repeat(" ", pad) + s
+	}
+	return s
+}
+
 func stackedDetail(infoLen, h int) (topH, bottomInner int) {
 	topH = infoLen + 2
 	if topH > h-2 {
@@ -1317,15 +1346,18 @@ func (m Model) statusBar() string {
 		if n := len(m.reloadNotes); n > 0 {
 			txt += i18n.T(" · %d 项", n)
 		}
-		mod = " " + lipgloss.NewStyle().Foreground(ui.Yellow).Render(txt)
+		mod = " " + ui.WarnStyle.Render(txt)
 	}
 	left := ui.TitleStyle.Render("dae-tui") + ui.HelpStyle.Render(" ("+shortEndpoint(m.cfg.Endpoint)+")") +
 		"  " + run + ui.HelpStyle.Render(" dae "+m.status.Version) + mod
 	right := ""
 	if m.caps.TrafficStats && !down {
 		// Rates frozen at the moment the link died would read as current.
+		// The two chunks ride the same colors as the home traffic box, so
+		// the same figures in two places read as one system.
 		s := m.home.snap
-		right = ui.HelpStyle.Render("↑" + ui.Rate(s.UpRate) + " ↓" + ui.Rate(s.DownRate))
+		right = lipgloss.NewStyle().Foreground(ui.OK).Render("↑"+ui.Rate(s.UpRate)) + " " +
+			lipgloss.NewStyle().Foreground(ui.Warn).Render("↓"+ui.Rate(s.DownRate))
 	}
 	inner := m.width - 8
 	if right != "" {
@@ -1400,8 +1432,18 @@ func (m Model) toastLine() string {
 	if m.toast == "" {
 		return ""
 	}
-
-	return " " + ui.Truncate(m.toast, m.width-3)
+	line := " " + ui.Truncate(m.toast, m.width-3)
+	// The verdict glyph colors the whole line: a transient notice reads at
+	// a glance and expires on its own, and styling the full line (rather
+	// than the glyph alone) keeps the "✓ 文案" substring contiguous for
+	// the headless assertions.
+	switch {
+	case strings.HasPrefix(m.toast, "✓"):
+		return ui.OKStyle.Render(line)
+	case strings.HasPrefix(m.toast, "✗"):
+		return ui.ErrorStyle.Render(line)
+	}
+	return line
 }
 
 // helpKeys composes the frame's key strip from the keymap, so it always

@@ -12,38 +12,48 @@ import (
 )
 
 // The built-in palette. Theme resolution (config package) cascades down to
-// these as the floor, so ApplyTheme always receives concrete colors — it
-// treats "" as "keep the current value" and must never see it.
+// these as the floor, so ApplyPalette always receives concrete colors — it
+// treats "" as "keep the current value" and must never see it (SelBG alone
+// treats "" as "derive from the accent").
 const (
 	DefaultAccent = "62" // soft blue
 	DefaultBorder = "238"
 	DefaultDim    = "245"
+	DefaultOK     = "42"  // good latency / success
+	DefaultWarn   = "214" // medium latency / warning
+	DefaultErr    = "203" // high latency / error
+	DefaultGray   = "241" // dead / unknown
 )
 
 var (
 	// Base colors.
-	Accent  = lipgloss.Color(DefaultAccent)
-	Green   = lipgloss.Color("42")  // good latency
-	Yellow  = lipgloss.Color("214") // medium latency
-	Red     = lipgloss.Color("203") // high latency
-	Gray    = lipgloss.Color("241") // dead / unknown
+	Accent = lipgloss.Color(DefaultAccent)
+	// OK/Warn/Err are one semantic trio serving two readers at once: the
+	// latency ramp (good/mid/bad) and status text (success/warning/error).
+	// They were split-background colors once (latency vs semantics) but the
+	// hues overlap by design — "green means fine" reads the same either
+	// way — so the palette exposes one themed slot per tier.
+	OK      = lipgloss.Color(DefaultOK)
+	Warn    = lipgloss.Color(DefaultWarn)
+	Err     = lipgloss.Color(DefaultErr)
+	Gray    = lipgloss.Color(DefaultGray)
 	DimText = lipgloss.Color(DefaultDim)
 
 	// BorderCol is the unfocused box/frame edge; BorderDim renders it.
 	BorderCol = lipgloss.Color(DefaultBorder)
-	// TabDim is the inactive tab's gray — darker than DimText on purpose:
-	// the active tab stays text-on-a-line (bold + accent + underline), so
-	// the active/inactive contrast has to come from brightness, not from a
-	// filled chip.
-	TabDim = lipgloss.Color("240")
 	// SelBG is the selected-row background bar: the accent blended into a
 	// dark neutral base — a faint theme-colored bar, not a flat gray (too
-	// lifeless) and not a solid accent block (too loud). ApplyTheme
-	// re-derives it whenever the accent changes.
+	// lifeless) and not a solid accent block (too loud). ApplyPalette
+	// re-derives it whenever the accent changes, unless the theme set an
+	// explicit sel_bg (light terminals want a light bar).
 	SelBG = selBGFromAccent(Accent)
 
 	TitleStyle = lipgloss.NewStyle().Bold(true).Foreground(Accent)
-	TabStyle   = lipgloss.NewStyle().Foreground(TabDim).Padding(0, 1)
+	// Inactive tabs ride the dim color — one neutral tier for all secondary
+	// text. The active tab stays text-on-a-line (bold + accent + underline),
+	// so the active/inactive contrast comes from weight and hue, never from
+	// a filled chip.
+	TabStyle = lipgloss.NewStyle().Foreground(DimText).Padding(0, 1)
 	// TabActive recolors only — same padding/width as TabStyle so tabs never
 	// shift and the click-span math in the app stays trivial. The underline
 	// is the emphasis: it rides the border line the same way the label does,
@@ -52,8 +62,9 @@ var (
 	// ignore SGR 4.
 	TabActive     = lipgloss.NewStyle().Bold(true).Underline(true).Foreground(Accent).Padding(0, 1)
 	HelpStyle     = lipgloss.NewStyle().Foreground(DimText)
-	ErrorStyle    = lipgloss.NewStyle().Foreground(Red)
-	OKStyle       = lipgloss.NewStyle().Foreground(Green)
+	ErrorStyle    = lipgloss.NewStyle().Foreground(Err)
+	OKStyle       = lipgloss.NewStyle().Foreground(OK)
+	WarnStyle     = lipgloss.NewStyle().Foreground(Warn)
 	SelectedStyle = lipgloss.NewStyle().Bold(true).Foreground(Accent)
 	CursorStyle   = lipgloss.NewStyle().Bold(true).Foreground(Accent)
 	BorderDim     = lipgloss.NewStyle().Foreground(BorderCol)
@@ -81,11 +92,11 @@ func LatencyStyle(ms int, alive, tested bool) lipgloss.Style {
 	}
 	switch {
 	case ms > 0 && ms < LatGoodMs:
-		return lipgloss.NewStyle().Foreground(Green)
+		return lipgloss.NewStyle().Foreground(OK)
 	case ms >= LatGoodMs && ms < LatMidMs:
-		return lipgloss.NewStyle().Foreground(Yellow)
+		return lipgloss.NewStyle().Foreground(Warn)
 	default:
-		return lipgloss.NewStyle().Foreground(Red)
+		return lipgloss.NewStyle().Foreground(Err)
 	}
 }
 
@@ -172,37 +183,70 @@ func HiRow(row string, w int, on bool) string {
 	return reassertBG(row, selBGOpen())
 }
 
-// ApplyTheme overrides the theme colors from config at startup: accent
-// (titles, cursor, active tab), border (every box/frame edge) and dim
-// (secondary text). Each value is an ANSI-256 index ("0"-"255"), a
-// "#rrggbb" hex string, or anything else (including "") to keep the
-// default — a half-valid config still themes what it could parse. Styles
-// built from these at package init are rebuilt here; call sites that read
-// the vars at render time pick the new colors up on their own.
-// Startup-only — there is no live re-theming.
-//
-// The border/dim pair exists for light-terminal users: the defaults
-// (238/245) are tuned for a dark background, where a 245 gray is a quiet
-// footnote. On a white background the same values are nearly invisible, so
-// those users want border ≈ "250" and dim ≈ "240".
-func ApplyTheme(accent, border, dim string) {
-	if c, ok := parseColor(accent); ok {
+// Palette is the full theme surface, one slot per themed color: accent
+// (titles, cursor, active tab), border (every box/frame edge), dim
+// (secondary text), the semantic trio ok/warn/err (success/warning/error
+// text and the latency ramp together) and gray (untested/dead). Each value
+// is an ANSI-256 index ("0"-"255") or a "#rrggbb" hex string; anything
+// else (including "") keeps the current value — a half-valid config still
+// themes what it could parse. SelBG is the one slot where "" is
+// meaningful: it means "derive from the accent" (the dark-base blend), so
+// themes only spell it out when they want the opposite — light terminals
+// set a light bar.
+type Palette struct {
+	Accent, Border, Dim string
+	OK, Warn, Err, Gray string
+	SelBG               string
+}
+
+// ApplyPalette overrides the theme colors from config at startup (and from
+// the settings theme picker's live preview). Styles built from these at
+// package init are rebuilt here; call sites that read the vars at render
+// time pick the new colors up on their own.
+func ApplyPalette(p Palette) {
+	if c, ok := parseColor(p.Accent); ok {
 		Accent = c
 	}
-	if c, ok := parseColor(border); ok {
+	if c, ok := parseColor(p.Border); ok {
 		BorderCol = c
 	}
-	if c, ok := parseColor(dim); ok {
+	if c, ok := parseColor(p.Dim); ok {
 		DimText = c
 	}
+	if c, ok := parseColor(p.OK); ok {
+		OK = c
+	}
+	if c, ok := parseColor(p.Warn); ok {
+		Warn = c
+	}
+	if c, ok := parseColor(p.Err); ok {
+		Err = c
+	}
+	if c, ok := parseColor(p.Gray); ok {
+		Gray = c
+	}
+	if p.SelBG == "" {
+		SelBG = selBGFromAccent(Accent)
+	} else if c, ok := parseColor(p.SelBG); ok {
+		SelBG = c
+	}
 	TitleStyle = lipgloss.NewStyle().Bold(true).Foreground(Accent)
-	TabStyle = lipgloss.NewStyle().Foreground(TabDim).Padding(0, 1)
+	TabStyle = lipgloss.NewStyle().Foreground(DimText).Padding(0, 1)
 	TabActive = lipgloss.NewStyle().Bold(true).Underline(true).Foreground(Accent).Padding(0, 1)
 	HelpStyle = lipgloss.NewStyle().Foreground(DimText)
+	ErrorStyle = lipgloss.NewStyle().Foreground(Err)
+	OKStyle = lipgloss.NewStyle().Foreground(OK)
+	WarnStyle = lipgloss.NewStyle().Foreground(Warn)
 	SelectedStyle = lipgloss.NewStyle().Bold(true).Foreground(Accent)
 	CursorStyle = lipgloss.NewStyle().Bold(true).Foreground(Accent)
 	BorderDim = lipgloss.NewStyle().Foreground(BorderCol)
-	SelBG = selBGFromAccent(Accent)
+}
+
+// ApplyTheme retunes the three neutral slots only — the compat entry point
+// for callers (and tests) predating the palette, kept so a partial retune
+// never wipes the semantic trio.
+func ApplyTheme(accent, border, dim string) {
+	ApplyPalette(Palette{Accent: accent, Border: border, Dim: dim})
 }
 
 // parseColor accepts an ANSI-256 index ("0"-"255") or a "#rrggbb" hex
@@ -254,7 +298,7 @@ func BoxLines(destructive bool, lines ...string) []string {
 	}
 	st := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
 	if destructive {
-		st = st.BorderForeground(Red)
+		st = st.BorderForeground(Err)
 	} else {
 		st = st.BorderForeground(Accent)
 	}

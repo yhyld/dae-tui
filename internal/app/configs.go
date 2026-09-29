@@ -430,7 +430,7 @@ func errLineNo(err error) int {
 func (p *configsPage) bodyLines() []string {
 	r := p.curRow()
 	if r == nil {
-		return []string{ui.HelpStyle.Render(i18n.T("（无配置）"))}
+		return []string{ui.HelpStyle.Render(centerLine(i18n.T("（无配置）"), p.rightW-4))}
 	}
 	it := p.item(*r)
 	if r.section == "config" {

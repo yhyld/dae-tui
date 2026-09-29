@@ -85,14 +85,18 @@ func Truncate(s string, w int) string {
 // full block and a thin sliver. The caller styles the result (usually the
 // same color as the numeric value); callers pass ms > 0 only for alive,
 // tested nodes, everything else renders blank so the column stays aligned.
-func LatencyBar(ms int) string {
-	const w = 5
+func LatencyBar(ms int) string { return LatencyBarN(ms, 5) }
+
+// LatencyBarN is LatencyBar at a caller-chosen cell count: node panes
+// squeeze a 3-cell bar where the 5-cell one no longer fits, instead of
+// dropping the bar entirely.
+func LatencyBarN(ms, w int) string {
 	if ms <= 0 {
 		return spaces(w)
 	}
-	v := float64(ms) / LatMidMs * w
-	if v > w {
-		v = w
+	v := float64(ms) / LatMidMs * float64(w)
+	if v > float64(w) {
+		v = float64(w)
 	}
 	dots := int(v * 8)
 	full := dots / 8

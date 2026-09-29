@@ -128,7 +128,7 @@ func (p homePage) subLines() []string {
 			if tag == "" {
 				tag = s.ID
 			}
-			lines = append(lines, " "+lipgloss.NewStyle().Foreground(ui.Yellow).Render(
+			lines = append(lines, " "+ui.WarnStyle.Render(
 				"⚠ "+tag+i18n.T(" 上次更新 ")+ui.TimeAgo(s.UpdatedAt)+i18n.T("，定时刷新已开启")))
 		}
 	}
@@ -154,12 +154,12 @@ func (p homePage) groupHealth(g driver.Group) string {
 	if measured == 0 {
 		return ui.HelpStyle.Render(i18n.T("未测速"))
 	}
-	st := lipgloss.NewStyle().Foreground(ui.Green)
+	st := lipgloss.NewStyle().Foreground(ui.OK)
 	switch {
 	case alive == 0:
-		st = lipgloss.NewStyle().Foreground(ui.Red)
+		st = lipgloss.NewStyle().Foreground(ui.Err)
 	case alive < measured:
-		st = lipgloss.NewStyle().Foreground(ui.Yellow)
+		st = ui.WarnStyle
 	}
 	return st.Render(fmt.Sprintf("%d/%d", alive, measured)) +
 		ui.HelpStyle.Render(" · "+ui.TimeAgo(newest))
@@ -181,7 +181,7 @@ func (p homePage) missingRefLines(cw int) []string {
 		if found {
 			continue
 		}
-		out = append(out, " "+lipgloss.NewStyle().Foreground(ui.Yellow).Render(
+		out = append(out, " "+ui.WarnStyle.Render(
 			ui.Truncate(i18n.T("⚠ 路由引用的组 ")+ref+i18n.T(" 不存在，相关规则已失效"), cw-1)))
 	}
 	return out
@@ -190,9 +190,22 @@ func (p homePage) missingRefLines(cw int) []string {
 func (p homePage) rulesDigest(cw int) (warn, rules []string) {
 	warn = p.missingRefLines(cw)
 	for _, l := range p.routingSummary {
-		rules = append(rules, " "+ui.HelpStyle.Render(ui.Truncate(l, cw-1)))
+		rules = append(rules, " "+digestRuleLine(l, cw))
 	}
 	return warn, rules
+}
+
+// digestRuleLine renders one digest rule: the conditions dim, the outbound
+// after "-> " in the accent — in a box of lookalike lines the destination
+// is the part worth scanning. Truncation happens on the plain text first
+// (a cut outbound still re-splits cleanly); lines without an arrow (the
+// fallback line) stay whole-dim like before.
+func digestRuleLine(l string, cw int) string {
+	t := ui.Truncate(l, cw-1)
+	if i := strings.Index(t, "-> "); i >= 0 {
+		return ui.HelpStyle.Render(t[:i+3]) + ui.SelectedStyle.Render(t[i+3:])
+	}
+	return ui.HelpStyle.Render(t)
 }
 
 func (p homePage) dnsLines(w int) []string {
@@ -820,6 +833,21 @@ func (p homePage) bodyLines(status driver.Status) ([]string, int, homeAnchors) {
 	}
 	cw := full - 4
 	refSet := referencedGroups(p.routingRefs)
+	// The name column sizes to the visible groups (clamped): a fixed 16
+	// squeezed long names into their node labels while short lists wasted
+	// the slack.
+	nameW := 0
+	for _, g := range p.groups {
+		if w := lipgloss.Width(g.Name); w > nameW {
+			nameW = w
+		}
+	}
+	if nameW < 10 {
+		nameW = 10
+	}
+	if nameW > 20 {
+		nameW = 20
+	}
 	for i, g := range p.groups {
 		label, style := p.currentNode(g)
 		cursor := " "
@@ -833,7 +861,7 @@ func (p homePage) bodyLines(status driver.Status) ([]string, int, homeAnchors) {
 		if refSet[g.Name] {
 			mark = ui.OKStyle.Render("● ")
 		}
-		row := " " + cursor + " " + mark + ui.PadRight(g.Name, 16) + style.Render(label)
+		row := " " + cursor + " " + mark + ui.PadRight(g.Name, nameW) + style.Render(label)
 
 		if cw >= 68 {
 			if h := p.groupHealth(g); h != "" {
@@ -951,8 +979,11 @@ func (p homePage) proxyRows(status driver.Status, w int) []string {
 
 	badge := " " + ui.OKStyle.Render("● ") + lipgloss.NewStyle().Bold(true).Render(i18n.T("代理运行中"))
 	if !status.Running {
+		// The one solid block in the app: white on the err color, the
+		// loudest thing on the page — "your proxy is down" outranks the
+		// line-art language.
 		badge = lipgloss.NewStyle().Bold(true).
-			Foreground(lipgloss.Color("15")).Background(ui.Red).
+			Foreground(lipgloss.Color("15")).Background(ui.Err).
 			Padding(0, 1).Render(i18n.T("○ 代理已停止"))
 	}
 	rows := []string{badge, ""}
@@ -980,17 +1011,17 @@ func (p homePage) trafficRows(w int) []string {
 		w = 24
 	}
 	const chartH = 3
-	green := lipgloss.NewStyle().Foreground(ui.Green)
-	yellow := lipgloss.NewStyle().Foreground(ui.Yellow)
-	greenBold := lipgloss.NewStyle().Bold(true).Foreground(ui.Green)
-	yellowBold := lipgloss.NewStyle().Bold(true).Foreground(ui.Yellow)
+	okSt := lipgloss.NewStyle().Foreground(ui.OK)
+	warnSt := lipgloss.NewStyle().Foreground(ui.Warn)
+	okBold := lipgloss.NewStyle().Bold(true).Foreground(ui.OK)
+	warnBold := lipgloss.NewStyle().Bold(true).Foreground(ui.Warn)
 	s := p.snap
 
 	cw := (w - 3) / 2
-	up := ui.HelpStyle.Render(i18n.T("↑ 上行 ")) + greenBold.Render(ui.Rate(s.UpRate))
-	down := ui.HelpStyle.Render(i18n.T("↓ 下行 ")) + yellowBold.Render(ui.Rate(s.DownRate))
-	peakUp := ui.HelpStyle.Render(i18n.T(" · 峰值 ")) + green.Render(ui.Rate(maxF(s.UpSeries)))
-	peakDown := ui.HelpStyle.Render(i18n.T(" · 峰值 ")) + yellow.Render(ui.Rate(maxF(s.DownSeries)))
+	up := ui.HelpStyle.Render(i18n.T("↑ 上行 ")) + okBold.Render(ui.Rate(s.UpRate))
+	down := ui.HelpStyle.Render(i18n.T("↓ 下行 ")) + warnBold.Render(ui.Rate(s.DownRate))
+	peakUp := ui.HelpStyle.Render(i18n.T(" · 峰值 ")) + okSt.Render(ui.Rate(maxF(s.UpSeries)))
+	peakDown := ui.HelpStyle.Render(i18n.T(" · 峰值 ")) + warnSt.Render(ui.Rate(maxF(s.DownSeries)))
 
 	peakNote := ""
 	if lipgloss.Width(up)+lipgloss.Width(peakUp)+lipgloss.Width(down)+lipgloss.Width(peakDown)+2 <= w {
@@ -1011,9 +1042,9 @@ func (p homePage) trafficRows(w int) []string {
 	}
 	rates := " " + up + strings.Repeat(" ", gap) + down
 	charts := lipgloss.JoinHorizontal(lipgloss.Top,
-		ui.Sparkline(s.UpSeries, cw, chartH, green),
+		ui.Sparkline(s.UpSeries, cw, chartH, okSt),
 		" ",
-		ui.Sparkline(s.DownSeries, cw, chartH, yellow))
+		ui.Sparkline(s.DownSeries, cw, chartH, warnSt))
 
 	head := ui.HelpStyle.Render(i18n.T("近 10s")) + peakNote
 	tail := ui.HelpStyle.Render(i18n.T("连接 %d · UDP %d", s.Conns, s.UDPSessions))
@@ -1026,8 +1057,8 @@ func (p homePage) trafficRows(w int) []string {
 		foot = []string{" " + head, " " + tail}
 	}
 
-	total := ui.HelpStyle.Render(i18n.T("累计 ")) + green.Render("↑ "+ui.Bytes(s.UpTotal)) +
-		ui.HelpStyle.Render(" · ") + yellow.Render("↓ "+ui.Bytes(s.DownTotal)) +
+	total := ui.HelpStyle.Render(i18n.T("累计 ")) + okSt.Render("↑ "+ui.Bytes(s.UpTotal)) +
+		ui.HelpStyle.Render(" · ") + warnSt.Render("↓ "+ui.Bytes(s.DownTotal)) +
 		ui.HelpStyle.Render(i18n.T(" · 自 daed 启动"))
 
 	rows := []string{rates}
@@ -1072,7 +1103,7 @@ func (p homePage) pinLine() string {
 	key := " " + K(keymap.Home, "x") + " "
 	switch {
 	case !p.pin.active:
-		return " " + lipgloss.NewStyle().Foreground(ui.Yellow).Render(
+		return " " + ui.WarnStyle.Render(
 			ui.Truncate(i18n.T("⚠ 固定已失效（路由未引用固定组） · ")+K(keymap.Home, "x")+" "+i18n.T("清理"), 60))
 	case p.pin.empty:
 		return " " + ui.ErrorStyle.Render(

@@ -16,22 +16,31 @@ import (
 
 const (
 	latCellWide = 15
+	latCellMid  = 13
 	latCellSlim = 9
 )
 
+// latCellW sizes the latency column for a pane's content width: a 5-cell
+// bar plus the figure on wide panes, a 3-cell bar on mid-width panes (the
+// bar degrades instead of vanishing), the bare right-aligned figure below
+// that.
 func latCellW(w int) int {
-	if w >= 56 {
+	switch {
+	case w >= 56:
 		return latCellWide
+	case w >= 46:
+		return latCellMid
 	}
 	return latCellSlim
 }
 
 func latencyCell(lat map[string]driver.Latency, id string, cellW int) string {
-	latStr, bar, st := "-", ui.LatencyBar(0), ui.LatencyStyle(0, false, false)
+	latStr, st := "-", ui.LatencyStyle(0, false, false)
+	ms := 0
 	if l, ok := lat[id]; ok && !l.TestedAt.IsZero() {
 		if l.Alive && l.Ms > 0 {
 			latStr = strconv.Itoa(l.Ms) + "ms"
-			bar = ui.LatencyBar(l.Ms)
+			ms = l.Ms
 		} else if !l.Alive {
 			latStr = i18n.T("超时")
 		} else {
@@ -39,8 +48,15 @@ func latencyCell(lat map[string]driver.Latency, id string, cellW int) string {
 		}
 		st = ui.LatencyStyle(l.Ms, l.Alive, true)
 	}
-	if cellW >= latCellWide {
-		return st.Render(bar) + " " + st.Render(ui.PadLeft(latStr, 9))
+	barW := 0
+	switch {
+	case cellW >= latCellWide:
+		barW = 5
+	case cellW >= latCellMid:
+		barW = 3
+	}
+	if barW > 0 {
+		return st.Render(ui.LatencyBarN(ms, barW)) + " " + st.Render(ui.PadLeft(latStr, 9))
 	}
 	return st.Render(ui.PadLeft(latStr, 9))
 }

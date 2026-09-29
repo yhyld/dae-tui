@@ -462,15 +462,15 @@ func (p subsPage) showNodeInfo() bool {
 
 func (p subsPage) nodeInfoLines(n *driver.Node) []string {
 	lines := []string{
-		ui.SelectedStyle.Render(i18n.T("名称  ")) + ui.SpaceAfterFlag(n.Name),
-		ui.SelectedStyle.Render(i18n.T("协议  ")) + n.Protocol,
-		ui.SelectedStyle.Render(i18n.T("地址  ")) + ui.Truncate(n.Address, max0(p.rightW-10)),
+		detailLabel("名称") + ui.SpaceAfterFlag(n.Name),
+		detailLabel("协议") + n.Protocol,
+		detailLabel("地址") + ui.Truncate(n.Address, max0(p.rightW-10)),
 	}
 	if n.Link != "" {
-		lines = append(lines, ui.SelectedStyle.Render(i18n.T("链接  "))+ui.Truncate(n.Link, max0(p.rightW-10)))
+		lines = append(lines, detailLabel("链接")+ui.Truncate(n.Link, max0(p.rightW-10)))
 	}
 	if row, ok := latencyDetail(p.lat, n.ID); ok {
-		lines = append(lines, ui.SelectedStyle.Render(i18n.T("延迟  "))+row)
+		lines = append(lines, detailLabel("延迟")+row)
 	}
 	return lines
 }
@@ -706,7 +706,7 @@ func (p subsPage) leftLines() []string {
 		lines = append(lines, ui.ErrorStyle.Render("✗ "+shortErr(p.err)))
 	}
 	if len(p.subs) == 0 {
-		lines = append(lines, ui.HelpStyle.Render(i18n.T("无订阅（按 n 添加）")))
+		lines = append(lines, ui.HelpStyle.Render(centerLine(i18n.T("无订阅（按 n 添加）"), p.leftW-4)))
 	}
 	rowsH := max0(p.height - 2)
 	start := 0
@@ -834,15 +834,15 @@ func (p subsPage) infoLines() []string {
 		cron += ui.HelpStyle.Render(" (" + s.CronExp + ")")
 	}
 	lines := []string{
-		ui.SelectedStyle.Render(i18n.T("标签  ")) + s.Tag,
-		ui.SelectedStyle.Render(i18n.T("状态  ")) + status,
-		ui.SelectedStyle.Render(i18n.T("定时  ")) + cron,
-		ui.SelectedStyle.Render(i18n.T("链接  ")) + ui.Truncate(s.Link, max0(p.rightW-10)),
+		detailLabel("标签") + s.Tag,
+		detailLabel("状态") + status,
+		detailLabel("定时") + cron,
+		detailLabel("链接") + ui.Truncate(s.Link, max0(p.rightW-10)),
 	}
 	if s.Info != "" {
-		lines = append(lines, ui.SelectedStyle.Render(i18n.T("信息  "))+ui.Truncate(firstLine(s.Info), max0(p.rightW-10)))
+		lines = append(lines, detailLabel("信息")+ui.Truncate(firstLine(s.Info), max0(p.rightW-10)))
 	}
-	return append(lines, ui.SelectedStyle.Render(i18n.T("更新  "))+ui.TimeAgo(s.UpdatedAt))
+	return append(lines, detailLabel("更新")+ui.TimeAgo(s.UpdatedAt))
 }
 
 func (p subsPage) bodyLines(inner int) []string {

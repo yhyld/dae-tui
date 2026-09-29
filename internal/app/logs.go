@@ -18,6 +18,7 @@ import (
 	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"dae-tui/internal/i18n"
 	"dae-tui/internal/ui"
@@ -200,6 +201,43 @@ func clampLogsScroll(scroll, n, win int) int {
 	return scroll
 }
 
+// logsLineView styles one journalctl line: the metadata prefix (timestamp,
+// host, unit[pid]) dims, the message stays default, and a failure-looking
+// message goes red — in a stream of hundreds of lines the eye needs those
+// two anchors. Long lines keep the message tail and drop the timestamp
+// side (the viewer's standing rule); truncation happens on the plain text
+// because styling first would lose the escape prefix with the dropped
+// runes.
+func logsLineView(line string, w int) string {
+	head, msg, ok := strings.Cut(line, "]: ")
+	if !ok {
+		// journalctl's own notices ("-- No entries --") and anything
+		// without the unit prefix: dim whole, nothing to split.
+		return ui.HelpStyle.Render(ui.TruncateHead(line, w))
+	}
+	head += "]: "
+	if lipgloss.Width(head)+lipgloss.Width(msg) > w {
+		if logLineIsErr(msg) {
+			return ui.ErrorStyle.Render(ui.TruncateHead(msg, w))
+		}
+		return ui.TruncateHead(msg, w)
+	}
+	if logLineIsErr(msg) {
+		return ui.HelpStyle.Render(head) + ui.ErrorStyle.Render(msg)
+	}
+	return ui.HelpStyle.Render(head) + msg
+}
+
+// logLineIsErr sniffs a message for failure markers. Deliberately broad:
+// daed mixes logrus "level=error" pairs with dae-core's plain "ERROR"
+// prefixes and Go panics, and a false positive only reddens a line the
+// user was probably worried about anyway.
+func logLineIsErr(msg string) bool {
+	l := strings.ToLower(msg)
+	return strings.Contains(l, "error") || strings.Contains(l, "fatal") ||
+		strings.Contains(l, "panic") || strings.Contains(l, "failed")
+}
+
 // logsOverlayBox renders the viewer as a wide floating window over any page.
 // Log lines are head-truncated: the tail of the line is the message, the
 // head is only the timestamp.
@@ -228,7 +266,7 @@ func logsOverlayBox(w, avail int, v *logsViewer) string {
 		body = append(body, " "+ui.HelpStyle.Render(hint))
 	default:
 		for _, l := range v.lines[scroll:end] {
-			body = append(body, " "+ui.TruncateHead(l, inner-1))
+			body = append(body, " "+logsLineView(l, inner-1))
 		}
 	}
 	for len(body) < win {

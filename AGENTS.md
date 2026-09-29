@@ -178,7 +178,7 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
 - **整个应用包在一个圆角外框里，恰好填满终端**：外框由 `ui.AppFrame` 手工构造（lipgloss
   的 Border 嵌不进文字），**帮助键位嵌在外框底边框**（键位先截断、`? 帮助` 固定右端
   不参与截断）。外框内第一层是**页头盒**（`ui.TitledBoxRight`，通栏 cw-2 宽）：页签嵌
-  上边框（活动页签 = `TabActive`：加粗+主题色+下划线，非活动页签用 `TabDim` 压暗——
+  上边框（活动页签 = `TabActive`：加粗+主题色+下划线，非活动页签用 dim 色压暗——
   强调走"线上的文字"这条通道，不用实心底色块，那会打破全应用的线稿语言）、测速指示右对齐在同一条上边框（放不下自动省略）、
   状态行是盒内容；然后是页面本体、toast 裸行（**瞬态消息不进容器**）。`layout()` 的
   chrome 数学 = 外框 2 行 + 页头盒 3 行 + toast 1 行，页面内容高度仍是 `height-6`、
@@ -209,7 +209,10 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
 - **一次性动作反馈走 `opDoneMsg` toast**（成功 4 秒、失败 8 秒自动消失——失败 toast 走
   `showErrToast`，错误里的路径/行列号 4 秒读不完），不要写进 `pickErr` 这类
   常驻面板字段——它会留到重启才消失，看起来像坏了的状态。`pickErr` 只留给"选择器打开
-  期间拉取失败"这种与当前模态绑定的错误，并在 groups/subs 刷新时清空。
+  期间拉取失败"这种与当前模态绑定的错误，并在 groups/subs 刷新时清空。toast 渲染时按
+  ✓/✗ 前缀**整行**着 OK/Err 色——刻意整行而不是只染前缀：转义码留在子串两端，
+  `Contains("✓ 文案")` 式断言才不断链（规则速览的 outbound 高亮同理需要测试走
+  `plain()` 剥 SGR）。
 - **浮窗与面板的分工——决策和填表用浮窗，浏览和对比用面板**。各页实现 `overlay() *overlaySpec`
   （表单/对话框），根模型 `pageOverlay()` 收集（设置浮窗最优先，`P` 已是全局键，任何页面可开），
   `ui.Overlay` 负责 ANSI 感知地居中叠到页面画面上（`Truncate` 取左 + 补 reset、`TruncateLeft`
@@ -235,21 +238,26 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   （j/k/G）在盒内滚动，`clampHelpScroll` 的窗口数来自 `helpWinBody`；帮助内容是
   `helpSections` 表驱动（渲染与 `helpSectionStart` 同源），`?` 打开即定位到当前页的
   小节（测试断言的是新行为，别改回"从顶开"）。
-- **主题色只有一处入口**：`config.toml` 的 `accent` / `border` / `dim`（均为 ANSI-256
-  序号或 `#rrggbb`）与 `theme`（命名主题：内置 `默认`/`浅色` + 九个色系主题
-  （北欧/夜航/布丁/玫瑰/青竹/石青/暖橙/水墨/晨光，accent 刻意避开延迟色阶的
-  绿/黄/红）+ `theme/*.toml` 文件，
-  名字=文件名主干；主题优先于内联三色，缺省槽位按 主题→内联→`ui.Default*` 级联成
-  具体色值——ApplyTheme 把 "" 当"保持现值"，绝不能让它收到空串）经
-  `ui.ApplyTheme(accent, border, dim)` 应用；启动时 main.go 解析一次，设置浮窗
-  （`settings.go` 的 theme picker）运行时预览/切换并回写 config.toml。它会重建——每个值独立
-  解析（`parseColor`，空/非法保持默认，半合法的配置照样主题化能解析的部分）。它会重建
-  `TitleStyle`/`TabStyle`/`TabActive`/`HelpStyle`/`SelectedStyle`/`CursorStyle`/`BorderDim`
-  这些 init 时从三者派生的包级样式，并重推 `SelBG`
-  （`selBGFromAccent`：主题色按 `selAccentMix` 掺进暗灰底，选中条因此跟着 accent 走）。
-  `border`/`dim` 是为浅色终端准备的：默认 238/245 按深色终端调，白底下几乎看不见；
-  新增样式要么 init 后可被 ApplyTheme 重建，要么在调用时读 `ui.*` 变量，禁止把颜色烤进
-  init 字符串。
+- **主题色只有一处入口（8 槽调色板）**：`config.toml` 的 `accent` / `border` / `dim` /
+  `ok` / `warn` / `err` / `gray` / `sel_bg`（均为 ANSI-256 序号或 `#rrggbb`）与 `theme`
+  （命名主题：内置 `默认`/`浅色` + 九个色系主题（北欧/夜航/布丁/玫瑰/青竹/石青/暖橙/水墨/
+  晨光，各自带语义三色，accent 刻意避开语义色相的绿/黄/红；水墨连语义色都灰阶化）+
+  `theme/*.toml` 文件，名字=文件名主干，同 8 键）。主题优先于内联值，缺省槽位按
+  主题→内联→`ui.Default*` 级联成具体色值——`Resolved` 保证到 `ApplyPalette` 手里的都是
+  具体色，绝不能让它收到空串。**唯一例外是 `sel_bg`：空值有语义**（=按 accent 派生，
+  `selBGFromAccent` 按 `selAccentMix` 掺暗灰底；浅色主题才显式写浅底，如 浅色 `#d0d0d0`、
+  晨光 `#eee8d5`），非法值则与其它槽一样保持现值。入口是
+  `ui.ApplyPalette(ui.Palette{...})`（`ApplyTheme(a,b,d)` 保留为只调中性的兼容包装，
+  语义三色与灰色由 `OK`/`Warn`/`Err`/`Gray` 四个包变量承载——延迟色阶 `LatencyStyle` 与
+  成功/警告/错误文本 `OKStyle`/`WarnStyle`/`ErrorStyle` 共用这套槽，刻意不拆两套）；
+  启动时 main.go 解析一次，设置浮窗（`settings.go` 的 theme picker，swatch 6 色块）运行时
+  预览/切换并回写 config.toml。每个值独立解析（`parseColor`，空/非法保持现值，半合法的
+  配置照样主题化能解析的部分）；它重建 `TitleStyle`/`TabStyle`/`TabActive`/`HelpStyle`/
+  `ErrorStyle`/`OKStyle`/`WarnStyle`/`SelectedStyle`/`CursorStyle`/`BorderDim` 这些 init 时
+  派生的包级样式（`TabStyle` 用 `DimText`——旧 `TabDim` 硬编码已折叠进 dim）。
+  `border`/`dim`/`gray` 是为浅色终端准备的：默认 238/245/241 按深色终端调，白底下几乎
+  看不见；新增样式要么 init 后可被 ApplyPalette 重建，要么在调用时读 `ui.*` 变量，禁止
+  把颜色烤进 init 字符串。
 - **鼠标已启用**（`tea.WithMouseCellMotion`）：滚轮 = 3×j/k（帮助浮窗/首页直接滚偏移），
   点页签切页（页签嵌在页头盒上边框：`y=1`、列从 `x-5` 起——页头盒与页面盒子共享同一
   1 格左边距；`tabClick` 按渲染宽度算
@@ -282,8 +290,11 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   （`ui.PaneRowColumn` + `app.stackedDetail`）：上盒是 content-sized 的信息卡（组=
   策略/成员/引用，订阅=标签/状态/定时/链接/更新），下盒占满剩余高度放节点内容；没有
   "展开后才显示"的门控（旧的 `expanded` 字段已删），订阅页节点**选中即拉取**。信息行
-  标签列统一 6 格（`SelectedStyle` 标签 + 两空格），三页一致。配置页左栏是例外（见
-  下面"三个等分竖排分区盒"条目）。
+  标签列统一 6 格，经 `detailLabel(key)` **渲染期翻译+补齐**（裸中文键，`ui.PadRight`
+  到 `detailLabelW`；超宽翻译保留全文+一个空格分隔）——别再写带尾随空格的键
+  （`"名称  "` 那一代靠每个翻译恰好 6 格，en 表早就错位了），新增信息卡照 `detailLabel`
+  办。空态行居中走 `centerLine(text, 盒内宽)`，文案整串不动（保住 Contains 断言）。
+  配置页左栏是例外（见下面"三个等分竖排分区盒"条目）。
   **订阅页的信息盒跟焦点换主题**（`showNodeInfo`）：右栏聚焦时上盒改显选中节点的
   名称/协议/地址/链接/延迟（标题用节点名），Tab 回左栏恢复订阅卡——选中节点因此从
   "视觉状态"变成"我看懂了它、我能操作它"（`T` 单测、右栏 `y` 复制该节点分享链接，
@@ -324,16 +335,18 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   未实现的菜单项 enabled=false（光标跳过、置灰
   加「即将支持」，实现一项开一项）。版本来源：main.go 的 `version` 变量吃 ldflags
   `-X main.version=`，缺省回退 `debug.ReadBuildInfo` 的 vcs 修订号；`app.Version`
-  只读展示。盲文徽标已是正式设计：`settings.go` 的 `aboutLogoFrame`（框层：圆角框+
-  虚线轴，强调色常规字重）+ `aboutLogoBars`（柱层：六根 2 点柱子，强调色加粗）=
-  30×20 点阵上的「框内流量柱」——首页流量火花图的微缩（15 字符宽 × 5 行，柱profile
-  5,9,11,10,9,5 单峰近对称，柱底悬在轴上方一行，与 Sparkline 同语法）；`aboutLogoLines()`
-  渲染时按格合并两层（含柱点的格整格加粗 accent，其余常规 accent——全图同一主题色，
-  层级靠字重与形状密度，别再退回暗灰框：238 在真实终端上几乎看不见），样式渲染期读取
-  所以主题预览能换色。
-  另五版候选（六边形/盾牌/波浪/节点/宝石）与点阵图在 `logo_test.go` 的目录里，换版=粘贴
-  两层 braille（单色候选全进 `aboutLogoBars`、`aboutLogoFrame` 留空行），
-  `TestAboutLogoIsKnownCandidate` 比对两层兜底防半 paste；
+  只读展示。盲文徽标已是正式设计：`settings.go` 的 `aboutLogoFrame`（框层：圆角框
+  （四角 3 点对角弧）+实线轴，强调色常规字重）+ `aboutLogoBars`（柱层：六根 2 点柱子，
+  强调色加粗）= 34×24 点阵上的「框内流量柱」——首页流量火花图的微缩（17 字符宽 × 6 行，
+  柱 profile 4,8,12,14,10,6 单峰右偏，柱底悬在轴上方一行，与 Sparkline 同语法）；
+  `aboutLogoLines()` 渲染时按格合并两层（含柱点的格整格加粗 accent，其余常规
+  accent——全图同一主题色，层级靠字重与形状密度，别再退回暗灰框：238 在真实终端上几乎
+  看不见），样式渲染期读取所以主题预览能换色。README 标题下也放了一份盲文徽标。
+  目录里存七版候选（traffic 一代、traffic2 精修当选、六边形/盾牌/波浪/节点/宝石）与
+  点阵图在 `logo_test.go`，换版=粘贴两层 braille（单色候选全进 `aboutLogoBars`、
+  `aboutLogoFrame` 留空行），`TestAboutLogoIsKnownCandidate` 比对两层兜底防半 paste；
+  点阵坐标改动后重新生成盲文的办法：临时加一个打印 `pack()` 的测试跑 `go test -v`
+  （plan/只读环境跑不了脚本，测试基建是唯一可靠生成途径），粘完即删；
   退出登录由根模型处理（`logoutMsg`：清 cfg + 存盘 + `drv.Logout` +
   回 `phaseLogin`），页面自己不能改 phase。首页 `L` 是 daed 日志视图：**应用内浮窗**
   （`app/logs.go`，journalctl 作普通子进程流式输出，不再 `tea.ExecProcess` 接管终端），
@@ -427,10 +440,12 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   列表、详情、标题、toast、确认框一处都不能漏。
 - 延迟色阶：未测/死亡 = 灰，<200ms 绿，<500ms 黄，其余红——阈值只有一对常量
   `ui.LatGoodMs`/`ui.LatMidMs`（LatencyStyle 取色与 LatencyBar 打满同刻度，
-  改一处必须两处同义）；节点行的延迟列统一走
+  改一处必须两处同义）；颜色取自调色板的 `ui.OK/Warn/Err/Gray` 槽（见主题节），
+  不再是独立硬编码。节点行的延迟列统一走
   `latencyCell`（`nodelist.go`）：≥56 列的面板在毫秒值前多一条 5 格微型条
-  （`ui.LatencyBar`，与数值同色）——窄面板（如 36 列的左栏）自动去掉条只留
-  数值，别在窄栏里硬塞。自动策略下的"当前节点"是
+  （`ui.LatencyBar`，与数值同色）；46–55 列降级为 3 格条（`ui.LatencyBarN`——条降格
+  而不是整个消失）；更窄的面板（如 36 列的左栏）只留数值，别在窄栏里硬塞。自动策略下的
+  "当前节点"是
   估算值，显示时加 `≈` 前缀（没有测量数据时首页标注「未测速」；首页不显示毫秒数，
   逐节点延迟去群组页看）。
 - 破坏性操作（删组/删节点/删配置/停止代理/重载）都要 `y` 确认。
@@ -523,7 +538,8 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
     `rulesDigestMinInner` 时渲染、内容超出就窗口化并给"… 其余 N 条"尾行、不足就
     补空行撑到页底**——它是"底部空旷"的解决方案，空间不足时整盒让位、由组盒补空行
     撑底（两条路径保证 bodyLines 行数恰好 `p.height`，`bodyLines` 长度 == 页高有
-    测试兜底）。看全量规则是配置页的职责，别把摘要做成第二份全文。
+    测试兜底）。行内 `-> ` 之后的 outbound 走 accent（`digestRuleLine`，截断先于着色），
+    测试断言经 `plain()` 剥 SGR。看全量规则是配置页的职责，别把摘要做成第二份全文。
   - **环境盒的 DNS 块**（`dnsLines`，订阅摘要与网卡行之间）：`DNS  <方案名>` 一行 +
     每条上游单独一行悬挂（上游内联会被 40 列的双栏环境盒截掉——和网关行同一个教训）。
     网卡行（`netLines`）默认路由行的网关同样自占一行悬挂（前缀多两格、嵌在网卡名下），
@@ -590,7 +606,10 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   goroutine 经 channel 流式喂给 `logsWaitCmd` 链（每行一个 msg，handler 重挂下一条）。
   键位：j/k/g/G 滚动、`f` 跟随开关（暂停=SIGTERM 子进程，恢复=`-n 0` 续流不重放历史）、
   `r` 重载（杀掉重来、缓冲清空）、q/esc 关闭；跟随中贴底自动滚，上滚即脱钩。缓冲上限
-  `logsMaxBuffer` 环形丢头。**消息必须带链路标识**（`logsLineMsg.lines`/`logsStoppedMsg.lines`
+  `logsMaxBuffer` 环形丢头。行着色走 `logsLineView`：journalctl 元数据前缀（首个
+  `"]: "` 之前）压暗、消息保持默认、失败样子的消息整段红（`logLineIsErr` 刻意宽匹配
+  error/fatal/panic/failed——误报只是把用户本来就会担心的行标红）；**截断永远先于着色**，
+  `TruncateHead` 丢掉的头几个 rune 会把行首转义序列一起丢掉。**消息必须带链路标识**（`logsLineMsg.lines`/`logsStoppedMsg.lines`
   与 `m.logs.proc.lines` 比对）：换链后旧链的回声直接吞掉，不能清掉新链的 following。
   本地 exec，远程隧道场景天然不可用（LookPath 失败时 toast 说明）。测试 seam：
   `startLogsProc` 是包级 var，`logs_test.go` 的 `withFakeLogs` 换成手喂 channel 的假进程，

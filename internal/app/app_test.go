@@ -4311,7 +4311,9 @@ func TestHomeRulesDigestFillsPageBottom(t *testing.T) {
 	}
 	v := m.View()
 	for _, want := range []string{"规则速览", "a(domain: example.com) -> proxy", "fallback: direct"} {
-		if !strings.Contains(v, want) {
+		// The outbound rides the accent now, so the assertion sees the
+		// view through plain() (SGR-stripped).
+		if !strings.Contains(plain(v), want) {
 			t.Fatalf("rules digest missing %q:\n%s", want, v)
 		}
 	}

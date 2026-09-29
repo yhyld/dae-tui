@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// This file is the About-window logo's design record: six candidates drawn
+// This file is the About-window logo's design record: seven candidates drawn
 // on a dot grid at braille resolution (each cell packs 2x4 dots), plus the
 // regression test that keeps the committed logo one of them. The dot maps
 // in the candidate comments are the human-readable spec of each design —
@@ -14,11 +14,12 @@ import (
 // Designs were iterated by rendering each candidate into the real About
 // overlay; the framed traffic bars won — the mark miniaturizes the home
 // page's signature braille chart, so the About window and the traffic view
-// speak the same visual language. It is also the only two-layer candidate:
-// the frame and axis form one layer rendered in the accent at normal
-// weight, the bars another rendered bold — a cell holding any bar dot
-// takes the bold style, so the two never share a cell except on the axis
-// row.
+// speak the same visual language. It is a two-layer design: the frame and
+// axis form one layer rendered in the accent at normal weight, the bars
+// another rendered bold — a cell holding any bar dot takes the bold style,
+// so the two never share a cell except on the axis row. The committed mark
+// is traffic2, the first-generation canvasTraffic pair kept below as the
+// design record it was refined from.
 
 // dotCanvas is a boolean grid at braille-dot resolution.
 type dotCanvas struct {
@@ -247,6 +248,41 @@ func canvasTrafficBars() *dotCanvas {
 	return c
 }
 
+// canvasTraffic2Frame is the frame layer of the committed mark, the refined
+// traffic pair on a 34x24 grid: the same rounded frame + axis grammar with
+// a 3-dot diagonal at each corner (against the first generation's single
+// diagonal dot), symmetric 4-dot side margins and a solid axis inset two
+// dots from the sides. Rendered in the accent at normal weight.
+func canvasTraffic2Frame() *dotCanvas {
+	c := newDotCanvas(34, 24)
+	c.hline(7, 26, 2)  // top edge
+	c.hline(7, 26, 21) // bottom edge
+	c.vline(5, 18, 4)  // left side
+	c.vline(5, 18, 29) // right side
+	c.line(4, 5, 7, 2) // corner diagonals
+	c.line(26, 2, 29, 5)
+	c.line(4, 18, 7, 21)
+	c.line(26, 21, 29, 18)
+	c.hline(6, 27, 19) // axis
+	return c
+}
+
+// canvasTraffic2Bars is the bars layer of the committed mark: six 2-dot
+// columns (each exactly one braille cell wide), bottoms one dot row above
+// the axis. Profile 4,8,12,14,10,6: a single peak skewed right — rising
+// into the peak and easing off, more motion than the first generation's
+// symmetric mass. Rendered bold in the accent.
+func canvasTraffic2Bars() *dotCanvas {
+	c := newDotCanvas(34, 24)
+	xs := []int{6, 10, 14, 18, 22, 26}
+	hs := []int{4, 8, 12, 14, 10, 6}
+	for i, x := range xs {
+		c.vline(18-hs[i]+1, 18, x)
+		c.vline(18-hs[i]+1, 18, x+1)
+	}
+	return c
+}
+
 // canvasWave: the traffic idea as a smooth curve — the trace the sparkline
 // would draw if its bars were connected.
 func canvasWave() *dotCanvas {
@@ -297,6 +333,7 @@ var logoCatalog = []struct {
 	{"shield", blank(24, 16), canvasShield},
 	{"hexagon", blank(24, 16), canvasHexagon},
 	{"traffic", canvasTrafficFrame, canvasTrafficBars},
+	{"traffic2", canvasTraffic2Frame, canvasTraffic2Bars},
 	{"wave", blank(24, 16), canvasWave},
 	{"nodes", blank(24, 16), canvasNodes},
 	{"gem", blank(24, 16), canvasGem},

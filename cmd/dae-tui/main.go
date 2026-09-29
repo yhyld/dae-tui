@@ -96,11 +96,11 @@ func main() {
 	// existed to localize the flag help strings.
 	i18n.SetLang(cfg.Lang)
 
-	theme, found := config.ResolveTheme(cfg.Theme, cfg.Accent, cfg.Border, cfg.Dim)
+	theme, found := config.ResolveTheme(cfg.Theme, cfg.InlineTheme())
 	if cfg.Theme != "" && !found {
 		fmt.Fprintf(os.Stderr, i18n.T("警告: 主题 %q 未找到（内置或 ~/.config/dae-tui/theme/），使用内联颜色\n"), cfg.Theme)
 	}
-	ui.ApplyTheme(theme.Accent, theme.Border, theme.Dim)
+	ui.ApplyPalette(theme.Palette())
 
 	warnSave := func(err error) {
 		if err != nil {
