@@ -665,9 +665,12 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   常驻 + 按 ID 守卫是更稳的解。
 - **改写算法**（`rewriteOutboundRefs`）：按行取 outbound 槽位（`->` 之后 /
   `fallback:` 的值）**整词精确匹配**（含 `must_` 前缀变体），绝不子串替换——组名
-  `cn` 不能碰 `dip(geoip:cn)`。builtin outbound 任一侧直接拒绝；行尾带注释的行保守
-  跳过；保留原行缩进与 token 间距，round-trip 严格还原。`countOutboundRefs` 同一口径
-  计数，确认框与 f 前置校验共用。
+  `cn` 不能碰 `dip(geoip:cn)`。builtin outbound 任一侧直接拒绝；保留原行缩进与 token
+  间距，round-trip 严格还原。`countOutboundRefs` 同一口径计数，**分两个值**：可改写的
+  引用数 `n` 与带行尾注释因而无法改写的 `skipped`。两者必须分开报——注释行粘着
+  outbound token，永远比不上相等，混进 `n` 会让确认框报"全部引用已改指"而一部分流量
+  仍走旧组。`refCommented` 只在 token 边界匹配，避免 `proxyx # c` 被当成 `proxy` 的
+  注释引用。
 - **pin 编排**（`pinNodeCmd`，单 cmd 内串行）：拉组+方案 →（有旧 pin 先反向还原
   ——换组重固定的正确性关键）→ 改写→计数 0 报错拒办 → `ValidateRouting` →
   建/找固定组（**按存储 ID，不按名收养**陌生组；重名时 fallback `pinned2`…）→

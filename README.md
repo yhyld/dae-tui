@@ -59,6 +59,11 @@ dip(geoip:private) -> direct
 - **识别**：启动/刷新时会把当前路由方案反解析成预设（要求公共前缀存在且所有规则都是
   预设自身能产生的），识别不了就是自定义——不会把相像的手写规则错标成预设。
 
+## 许可证
+
+MIT（见 [LICENSE](LICENSE)）。本工具是纯网络客户端，不链接 dae / dae-wing 源码，仅通过
+GraphQL 在其进程边界之外交互，因此不受 dae 与 dae-wing 的 AGPL-3.0 约束。
+
 ## 构建
 
 ```bash
@@ -226,7 +231,7 @@ internal/config/     ~/.config/dae-tui/config.toml（0600）
 Phase 1；规划中的 Phase 2 是"裸 dae 驱动"（编辑 `/etc/dae/config.dae` + `dae
 validate/reload` + journald 日志，`dae reload` 为 SIGUSR1 + 进度文件轮询），远期可加
 clash-api 驱动（honk / mihomo）。纯网络客户端不链接 dae/daed 源码，因此本仓库可保持
-宽松许可证（dae 本体与 dae-wing 均为 AGPL-3.0，仅在其进程边界之外交互）。
+宽松许可证（MIT，见 [LICENSE](LICENSE)；dae 本体与 dae-wing 均为 AGPL-3.0，仅在其进程边界之外交互）。
 
 ### daed API 要点（对二次开发有用）
 
@@ -324,8 +329,9 @@ fixed 会静默重组整组——所以固定走一个**专用组**（默认名 
 ## 已知限制
 
 1. **固定节点改写路由 DSL**：pin/unpin 按"outbound 槽位精确匹配"改写当前选中的路由方案
-   （`-> 组` 与 `fallback: 组`，含 `must_` 前缀变体）；行尾带注释的引用行会保守跳过（确认
-   框报的引用处数会如实少算）。固定是**方案内**状态：切到别的路由方案固定自然失效（首页
+   （`-> 组` 与 `fallback: 组`，含 `must_` 前缀变体）；行尾带注释的引用行无法改写，确认框
+   会**单独报出「另有 N 处引用带行尾注释，将保持原样」**（这些规则仍走旧组，去掉注释后
+   才能固定）。固定是**方案内**状态：切到别的路由方案固定自然失效（首页
    会点名、`x` 可清理），不会自动追着改其他方案。CLI 仍刻意没有 `-cmd switch`。
 2. **延迟数据按页轮询**：每 3 秒只轮询当前页可见节点的 `nodeLatencies`（群组页=展开
    分区的节点行/选择器候选，订阅页=右栏可见节点，手动节点页=列表；首页和配置页不轮询）。

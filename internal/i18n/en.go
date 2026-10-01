@@ -805,4 +805,6 @@ var en = map[string]string{
 	"组行前的绿点 = 该组被当前路由方案引用（即流量正在走的组）":                         "the green dot before a group row = the routing references that group (where traffic flows)",
 	"节点行的 ● = 当前组实际使用的节点（fixed 组只读显示）；左栏组行的 ● = 该组被当前路由方案引用": "node-row ● = the node the group actually uses (fixed groups render read-only); left-pane group-row ● = referenced by the selected routing",
 	"切换已生效，但写入 config.toml 失败: %v":                           "the switch took effect but saving config.toml failed: %v",
+	" ⚠ 另有 %d 处引用带行尾注释，将保持原样（这些规则仍走旧组）":                      " ⚠ %d more reference(s) carry a trailing comment and stay as they are (those rules still use the old group)",
+	"路由方案 %s 对组 %s 的 %d 处引用都带行尾注释，无法改写：请去掉注释后再固定":            "every one of the %d reference(s) to group %s in routing %s carries a trailing comment and cannot be rewritten: drop the comments before pinning",
 }
