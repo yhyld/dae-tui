@@ -75,7 +75,7 @@ type switchGroupRequestedMsg struct {
 func referencedGroups(refs []string) map[string]bool {
 	out := make(map[string]bool, len(refs))
 	for _, r := range refs {
-		if !isBuiltinOutbound(r) {
+		if !driver.IsBuiltinOutbound(r) {
 			out[r] = true
 		}
 	}
@@ -102,7 +102,7 @@ func switchGroupCmd(d driver.Driver, cfgr *config.Config, cfgPath, from, to, man
 		if !ok {
 			return opDoneMsg{Op: label, Err: errors.New(i18n.T("没有选中的路由方案"))}
 		}
-		next, n := rewriteOutboundRefs(rt.Body, from, to)
+		next, n, _ := rewriteOutboundRefs(rt.Body, from, to)
 		if n == 0 {
 			return opDoneMsg{Op: label, Err: fmt.Errorf(
 				i18n.T("路由方案 %s 未引用组 %s，切换不会改变流量走向"), rt.Name, from)}
@@ -117,15 +117,19 @@ func switchGroupCmd(d driver.Driver, cfgr *config.Config, cfgPath, from, to, man
 		// re-arms the pin (From becomes the restore home's x points back at);
 		// any other switch while a state is recorded dissolves it, so home
 		// stops showing a pin the routing no longer has. Only write on change.
-		nextRestore := cfgr.Pin.Restore
+		// The pair comes from one locked snapshot: reading the fields one at
+		// a time could pair a GroupID persisted by a concurrent unpin with
+		// the Restore that unpin had already cleared.
+		snap := cfgr.PinSnapshot()
+		nextRestore := snap.Restore
 		switch {
 		case managed != "" && to == managed:
 			nextRestore = from
-		case cfgr.Pin.Restore != "":
+		case snap.Restore != "":
 			nextRestore = ""
 		}
-		if nextRestore != cfgr.Pin.Restore {
-			if err := cfgr.UpdatePin(cfgPath, cfgr.Pin.GroupID, nextRestore); err != nil {
+		if nextRestore != snap.Restore {
+			if err := cfgr.UpdatePin(cfgPath, snap.GroupID, nextRestore); err != nil {
 				return opDoneMsg{Op: label, Err: fmt.Errorf(
 					i18n.T("切换已生效，但写入 config.toml 失败: %v"), err)}
 			}
@@ -161,31 +165,93 @@ func outboundOf(line string) (out string, ok bool) {
 	return out, out != ""
 }
 
+// refKind classifies one DSL line against an outbound reference to a group.
+type refKind int
+
+const (
+	// refNone: no outbound slot, or it names a different outbound.
+	refNone refKind = iota
+	// refMatch: the outbound slot names the group exactly (or its
+	// must_-prefixed form) — rewriteable.
+	refMatch
+	// refCommented: the slot names the group but carries a trailing
+	// comment, so the outbound token never compares equal and the line is
+	// left alone. Reported separately: a pin that silently skips a rule
+	// leaves traffic on the old group, and the user must be able to see
+	// that before confirming rather than infer it from a low count.
+	refCommented
+)
+
+// classifyOutboundLine reports how a line relates to an outbound reference
+// to `from`, and which spelling it uses ("" when it does not match).
+func classifyOutboundLine(line, from string) (refKind, string) {
+	if from == "" || driver.IsBuiltinOutbound(from) {
+		return refNone, ""
+	}
+	out, ok := outboundOf(line)
+	if !ok {
+		return refNone, ""
+	}
+	for _, variant := range [...]string{from, "must_" + from} {
+		if out == variant {
+			return refMatch, variant
+		}
+	}
+	if commentedMatch(out, from) {
+		return refCommented, out
+	}
+	return refNone, ""
+}
+
+// commentedMatch reports whether an outbound token names `from` but is
+// glued to a trailing comment ("proxy # keep"), which is why it never
+// compares equal and never gets rewritten. The check is anchored at the
+// token boundary so a longer name ("proxyx # c") is not mistaken for it.
+func commentedMatch(out, from string) bool {
+	for _, variant := range [...]string{from, "must_" + from} {
+		if !strings.HasPrefix(out, variant) {
+			continue
+		}
+		rest := strings.TrimLeft(out[len(variant):], " \t")
+		if strings.HasPrefix(rest, "#") {
+			return true
+		}
+	}
+	return false
+}
+
 // rewriteOutboundRefs rewrites routing DSL lines whose outbound is exactly
 // `from` — or its must_-prefixed form, which carries the same "no fallback"
 // modifier over to the replacement — to `to`. Everything else is returned
-// verbatim; the changed-reference count lets callers refuse a rewrite that
-// would do nothing. Builtin outbounds are refused on either side: a group
-// named like a builtin is shadowed in the DSL anyway, and rewriting e.g.
-// must_direct would change unrelated semantics.
-func rewriteOutboundRefs(raw, from, to string) (string, int) {
+// verbatim; n counts the references rewritten (a zero count means the
+// rewrite would do nothing) and skipped counts the lines that name `from`
+// but carry a trailing comment and were therefore left alone. Builtin
+// outbounds are refused on either side: a group named like a builtin is
+// shadowed in the DSL anyway, and rewriting e.g. must_direct would change
+// unrelated semantics.
+func rewriteOutboundRefs(raw, from, to string) (out string, n, skipped int) {
 	if from == "" || to == "" || from == to ||
-		isBuiltinOutbound(from) || isBuiltinOutbound(to) {
-		return raw, 0
+		driver.IsBuiltinOutbound(from) || driver.IsBuiltinOutbound(to) {
+		return raw, 0, 0
 	}
 	var b strings.Builder
-	n := 0
 	for i, line := range strings.Split(raw, "\n") {
 		if i > 0 {
 			b.WriteByte('\n')
 		}
-		newLine, changed := rewriteOutboundLine(line, from, to)
-		if changed {
+		kind, variant := classifyOutboundLine(line, from)
+		switch kind {
+		case refMatch:
 			n++
+			b.WriteString(rewriteOutboundToken(line, variant, strings.Replace(variant, from, to, 1)))
+		case refCommented:
+			skipped++
+			b.WriteString(line)
+		default:
+			b.WriteString(line)
 		}
-		b.WriteString(newLine)
 	}
-	return b.String(), n
+	return b.String(), n, skipped
 }
 
 // rewriteOutboundLine rewrites one line's outbound token in place, keeping
@@ -195,43 +261,55 @@ func rewriteOutboundRefs(raw, from, to string) (string, int) {
 // A trailing comment on the line suppresses the rewrite rather than risk
 // mangling it — the confirm overlay shows the reference count, so a skipped
 // line is visible before anything is applied.
-func rewriteOutboundLine(line, from, to string) (string, bool) {
-	out, ok := outboundOf(line)
-	if !ok {
-		return line, false
-	}
-	repl := ""
-	switch out {
-	case from:
-		repl = to
-	case "must_" + from:
-		repl = "must_" + to
-	default:
-		return line, false
-	}
+// rewriteOutboundToken replaces one occurrence of `variant` — the outbound
+// token a line actually spells — with repl inside the line's outbound slot,
+// keeping the line's own indentation and the spacing around the token. The
+// match is anchored strictly to the outbound slot: a plain substring
+// replace would also hit the same word inside a condition (group "cn" vs
+// dip(geoip:cn)).
+func rewriteOutboundToken(line, variant, repl string) string {
 	tailStart := strings.LastIndex(line, "->")
 	prefixLen := tailStart + 2
 	if tailStart < 0 {
 		prefixLen = strings.Index(line, "fallback:") + len("fallback:")
 	}
 	tail := line[prefixLen:]
-	i := strings.Index(tail, out)
-	return line[:prefixLen] + tail[:i] + repl + tail[i+len(out):], true
+	i := strings.Index(tail, variant)
+	if i < 0 {
+		return line
+	}
+	return line[:prefixLen] + tail[:i] + repl + tail[i+len(variant):]
 }
 
 // countOutboundRefs counts routing DSL references to `from` (plain and
-// must_-prefixed) without rewriting anything.
-func countOutboundRefs(raw, from string) int {
-	if from == "" || isBuiltinOutbound(from) {
-		return 0
-	}
-	n := 0
+// must_-prefixed) without rewriting anything, and reports separately how
+// many lines name it but carry a trailing comment — those would not be
+// rewritten, so the caller can say so instead of under-reporting the count.
+func countOutboundRefs(raw, from string) (n, skipped int) {
 	for _, line := range strings.Split(raw, "\n") {
-		if out, ok := outboundOf(line); ok && (out == from || out == "must_"+from) {
+		switch kind, _ := classifyOutboundLine(line, from); kind {
+		case refMatch:
 			n++
+		case refCommented:
+			skipped++
 		}
 	}
+	return n, skipped
+}
+
+// switchRefCount counts the references a group switch would rewrite. The
+// switch overlays only need the rewriteable count — the commented ones are
+// reported by switchSkipped next to it.
+func switchRefCount(raw, from string) int {
+	n, _ := countOutboundRefs(raw, from)
 	return n
+}
+
+// switchSkipped counts the references a group switch would leave alone
+// because they carry a trailing comment.
+func switchSkipped(raw, from string) int {
+	_, skipped := countOutboundRefs(raw, from)
+	return skipped
 }
 
 // resolvePinGroup finds the managed group by its stored ID only. Adopting a
@@ -304,7 +382,8 @@ func pinNodeCmd(d driver.Driver, cfgr *config.Config, cfgPath, nodeID, nodeName,
 		if err != nil {
 			return opDoneMsg{Op: label, Err: err}
 		}
-		g := resolvePinGroup(groups, cfgr.Pin.GroupID)
+		snap := cfgr.PinSnapshot()
+		g := resolvePinGroup(groups, snap.GroupID)
 		target := pinGroupName
 		if g != nil {
 			target = g.Name
@@ -324,10 +403,10 @@ func pinNodeCmd(d driver.Driver, cfgr *config.Config, cfgPath, nodeID, nodeName,
 		// A pin is already recorded: put its references back before pointing
 		// the new group's lines at the managed group, otherwise unpinning
 		// later would re-route the previous group's traffic to the new one.
-		if cfgr.Pin.Restore != "" && g != nil {
-			raw, _ = rewriteOutboundRefs(raw, target, cfgr.Pin.Restore)
+		if snap.Restore != "" && g != nil {
+			raw, _, _ = rewriteOutboundRefs(raw, target, snap.Restore)
 		}
-		next, n := rewriteOutboundRefs(raw, fromGroup, target)
+		next, n, _ := rewriteOutboundRefs(raw, fromGroup, target)
 		if n == 0 {
 			return opDoneMsg{Op: label, Err: fmt.Errorf(
 				i18n.T("路由方案 %s 未引用组 %s，固定不会改变流量走向"), rt.Name, fromGroup)}
@@ -410,7 +489,8 @@ func pinNodeCmd(d driver.Driver, cfgr *config.Config, cfgPath, nodeID, nodeName,
 func unpinNodeCmd(d driver.Driver, cfgr *config.Config, cfgPath string) tea.Cmd {
 	label := i18n.T("解除固定")
 	return withCtxT(30*time.Second, func(ctx context.Context) tea.Msg {
-		restore := cfgr.Pin.Restore
+		snap := cfgr.PinSnapshot()
+		restore := snap.Restore
 		if restore != "" {
 			sel, err := d.ListSelections(ctx)
 			if err != nil {
@@ -421,11 +501,11 @@ func unpinNodeCmd(d driver.Driver, cfgr *config.Config, cfgPath string) tea.Cmd 
 				return opDoneMsg{Op: label, Err: err}
 			}
 			if rt, ok := selectedRouting(sel); ok {
-				if g := resolvePinGroup(groups, cfgr.Pin.GroupID); g != nil {
+				if g := resolvePinGroup(groups, snap.GroupID); g != nil {
 					// Zero matches is the stale case (routing was switched or
 					// hand-edited away from the managed group): the rewrite is
 					// a no-op and unpin degrades to clearing the state.
-					if next, _ := rewriteOutboundRefs(rt.Body, g.Name, restore); next != rt.Body {
+					if next, _, _ := rewriteOutboundRefs(rt.Body, g.Name, restore); next != rt.Body {
 						if err := d.ValidateRouting(ctx, next); err != nil {
 							return opDoneMsg{Op: label, Err: err}
 						}
@@ -436,7 +516,7 @@ func unpinNodeCmd(d driver.Driver, cfgr *config.Config, cfgPath string) tea.Cmd 
 				}
 			}
 		}
-		if err := cfgr.UpdatePin(cfgPath, cfgr.Pin.GroupID, ""); err != nil {
+		if err := cfgr.UpdatePin(cfgPath, snap.GroupID, ""); err != nil {
 			return opDoneMsg{Op: label, Err: err}
 		}
 		return tea.BatchMsg{

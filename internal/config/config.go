@@ -203,6 +203,19 @@ func (c *Config) UpdatePin(path, groupID, restore string) error {
 	return c.saveLocked(path)
 }
 
+// PinSnapshot returns the persisted pin as a consistent pair. Readers must
+// use this instead of touching c.Pin directly: the pin cmds (pinNodeCmd,
+// unpinNodeCmd, switchGroupCmd) read and rewrite the pair from tea cmd
+// goroutines while the root model's rederivePin reads it on the tea
+// goroutine, so an unlocked read can observe the new GroupID next to the
+// old Restore — a half-applied pin that neither re-pinning nor unpinning
+// understands. Locked like UpdatePin.
+func (c *Config) PinSnapshot() Pin {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.Pin
+}
+
 // UpdateAutoReload flips the auto-reload preference and persists it. Locked
 // like UpdateTheme (whole-file saves race the background token refresh).
 func (c *Config) UpdateAutoReload(path string, on bool) error {

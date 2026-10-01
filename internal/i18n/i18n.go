@@ -14,27 +14,43 @@
 // Never store a T() result in a long-lived struct field.
 package i18n
 
-import "fmt"
+import (
+	"fmt"
+	"sync/atomic"
+)
 
-var lang = "zh"
+// lang is atomic, not a plain global: SetLang runs on the tea goroutine
+// (the settings language picker) while T runs on every tea cmd goroutine
+// (opDoneMsg labels and toasts are built inside those commands). A plain
+// string header write races those reads, and the race detector CI runs
+// flags it. T is the hot path (thousands of calls per frame), so it stays
+// a single atomic load with no lock.
+var lang atomic.Value
+
+func init() { lang.Store("zh") }
 
 // SetLang selects the UI language; anything but "en" means Chinese.
 func SetLang(l string) {
 	if l == "en" {
-		lang = "en"
+		lang.Store("en")
 		return
 	}
-	lang = "zh"
+	lang.Store("zh")
 }
 
 // Lang reports the active language ("zh" or "en").
-func Lang() string { return lang }
+func Lang() string {
+	if v, ok := lang.Load().(string); ok {
+		return v
+	}
+	return "zh"
+}
 
 // T translates and formats. With no args it never runs Sprintf, so a
 // literal % in the copy cannot corrupt the output.
 func T(key string, args ...any) string {
 	s := key
-	if lang == "en" {
+	if Lang() == "en" {
 		if v, ok := en[key]; ok {
 			s = v
 		}

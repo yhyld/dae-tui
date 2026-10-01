@@ -612,15 +612,17 @@ func msgAuthErr(msg tea.Msg) error {
 
 // rederivePin recomputes the pin's runtime flags from live groups and the
 // selected routing's references, then pushes the ID/facts the pages need.
-// The persisted pair (groupID, restore) is read straight off cfg — the pin
-// cmds are the only writers, and their completion messages order the read —
-// so an in-memory mirror can never drift from what was persisted.
+// The persisted pair (groupID, restore) comes from one locked snapshot: the
+// pin cmds rewrite it from tea cmd goroutines, so a field-by-field read here
+// could pair their new GroupID with the Restore they had not written yet —
+// and an in-memory mirror can never drift from what was persisted.
 // "Active" is derived from the routing, not from a stored flag: if the user
 // switches routing schemes or hand-edits the DSL, the pin honestly reads as
 // 失效 and home's x still cleans the state up.
 func (m *Model) rederivePin() {
 	p := m.pin
-	p.groupID, p.restore = m.cfg.Pin.GroupID, m.cfg.Pin.Restore
+	snap := m.cfg.PinSnapshot()
+	p.groupID, p.restore = snap.GroupID, snap.Restore
 	p.active, p.empty, p.nodeID, p.node, p.subID = false, false, "", "", ""
 	var g *driver.Group
 	if p.groupID != "" {

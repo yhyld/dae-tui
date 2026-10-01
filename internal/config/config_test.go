@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"dae-tui/internal/i18n"
 	"dae-tui/internal/ui"
 )
 
@@ -236,4 +237,74 @@ func TestLoadThemes(t *testing.T) {
 	if themes, notes, err := LoadThemes(filepath.Join(dir, "absent")); err != nil || themes != nil || notes != nil {
 		t.Fatalf("missing dir should be empty and nil: %v %v %v", themes, notes, err)
 	}
+}
+
+// TestPinSnapshotIsAtomic pins the contract the pin cmds rely on: they read
+// the persisted pair from tea cmd goroutines while the root model's
+// rederivePin reads it on the tea goroutine. A field-by-field read can pair
+// a half-applied state (new GroupID, old Restore), which neither re-pinning
+// nor unpinning can then interpret. Run with -race: an unlocked read fails
+// here rather than as a rare mis-routed pin in production.
+func TestPinSnapshotIsAtomic(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.toml")
+	c := &Config{Endpoint: "http://127.0.0.1:2023/graphql"}
+	if err := c.Save(p); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	// Writer: mirrors pinNodeCmd/unpinNodeCmd, which alternate the pair.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 2000; i++ {
+			if i%2 == 0 {
+				_ = c.UpdatePin(p, "g1", "proxy")
+			} else {
+				_ = c.UpdatePin(p, "g1", "")
+			}
+		}
+	}()
+	// Readers: one on the tea goroutine (rederivePin), one on a cmd
+	// goroutine (switchGroupCmd), plus the locked setter's own read.
+	for r := 0; r < 2; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 2000; i++ {
+				s := c.PinSnapshot()
+				// The pair must always be one the writer produced: a
+				// non-empty restore always belongs to a non-empty group.
+				if s.Restore != "" && s.GroupID == "" {
+					t.Error("torn pin snapshot: restore without group")
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// TestLangSwitchIsRaceFree guards i18n's global: SetLang runs on the tea
+// goroutine (settings language picker) while T runs inside every tea cmd.
+// Under -race an unsynchronized global is reported here.
+func TestLangSwitchIsRaceFree(t *testing.T) {
+	i18n.SetLang("zh")
+	defer i18n.SetLang("zh")
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 2000; i++ {
+			i18n.SetLang("en")
+			i18n.SetLang("zh")
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 2000; i++ {
+			_ = i18n.T("重载 (run)")
+		}
+	}()
+	wg.Wait()
 }
