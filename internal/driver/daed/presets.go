@@ -19,12 +19,6 @@ dip(geoip:private) -> direct`
 // routingPresetOrder is the order the UI lists the presets in.
 var routingPresetOrder = []string{"gfw", "nonCn", "cnOnly", "global"}
 
-// builtinOutbounds are not proxy groups: a routing target equal to one of
-// these does not count as "the proxy group" when detecting a preset.
-var builtinOutbounds = map[string]bool{
-	"direct": true, "must_direct": true, "block": true, "must_proxy": true,
-}
-
 func (d *Driver) RoutingPresets() []driver.RoutingPreset {
 	out := make([]driver.RoutingPreset, 0, len(routingPresetOrder))
 	for _, id := range routingPresetOrder {
@@ -64,7 +58,7 @@ func (d *Driver) BuildRoutingPreset(id, proxyGroup string) (string, error) {
 // "-> name" would route to the builtin instead of the group, and the result
 // would read back as custom rather than as the preset.
 func validGroupName(name string) bool {
-	if name == "" || builtinOutbounds[name] {
+	if name == "" || driver.BuiltinOutbounds[name] {
 		return false
 	}
 	for _, r := range name {
@@ -113,7 +107,7 @@ func (d *Driver) DetectRoutingPreset(raw string) string {
 		if !ok {
 			return "" // presetLine passed but there is no rule arrow
 		}
-		isProxy := !builtinOutbounds[target]
+		isProxy := !driver.BuiltinOutbounds[target]
 		switch {
 		case strings.HasPrefix(cond, "pname("):
 			pnames++
@@ -172,13 +166,13 @@ func (d *Driver) DetectRoutingPreset(raw string) string {
 	case gfwProxy == 1 && gfwOther == 0 && cnRules == 0 && fallback == "direct":
 		return "gfw"
 	case dipCnDirect == 1 && domCnDirect == 1 && dipCnProxy == 0 && domCnProxy == 0 &&
-		cnOther == 0 && gfwRules == 0 && !builtinOutbounds[fallback]:
+		cnOther == 0 && gfwRules == 0 && !driver.BuiltinOutbounds[fallback]:
 		return "nonCn"
 	case dipCnProxy == 1 && domCnProxy == 1 && len(proxyTargets) == 1 &&
 		dipCnDirect == 0 && domCnDirect == 0 && cnOther == 0 &&
 		gfwRules == 0 && fallback == "direct":
 		return "cnOnly"
-	case cnRules == 0 && gfwRules == 0 && !builtinOutbounds[fallback]:
+	case cnRules == 0 && gfwRules == 0 && !driver.BuiltinOutbounds[fallback]:
 		return "global"
 	}
 	return ""

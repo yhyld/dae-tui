@@ -168,7 +168,7 @@ func (p homePage) groupHealth(g driver.Group) string {
 func (p homePage) missingRefLines(cw int) []string {
 	var out []string
 	for _, ref := range p.routingRefs {
-		if isBuiltinOutbound(ref) {
+		if driver.IsBuiltinOutbound(ref) {
 			continue
 		}
 		found := false
@@ -400,7 +400,7 @@ func (p *homePage) rederiveGroupIdx() {
 		} else if strings.HasPrefix(line, "fallback:") {
 			target = strings.TrimSpace(strings.TrimPrefix(line, "fallback:"))
 		}
-		if target == "" || isBuiltinOutbound(target) {
+		if target == "" || driver.IsBuiltinOutbound(target) {
 			continue
 		}
 		// The managed group's lines belong to the group the pin displaced:
@@ -648,14 +648,6 @@ func presetLabel(id string) string {
 	return id
 }
 
-func isBuiltinOutbound(target string) bool {
-	switch target {
-	case "direct", "must_direct", "block", "must_proxy":
-		return true
-	}
-	return false
-}
-
 func (p *homePage) currentNode(g driver.Group) (label string, style lipgloss.Style) {
 	if sel := g.SelectedNode(); sel != nil && g.Policy == "fixed" {
 		return i18n.T("手动: ") + ui.SpaceAfterFlag(sel.Name), ui.OKStyle
@@ -727,10 +719,14 @@ func (p homePage) overlay() *overlaySpec {
 			i18n.T(" 当前  ") + ui.SelectedStyle.Render(p.switchFrom) + " → " +
 				ui.SelectedStyle.Render(p.confirmGroupTo),
 			ui.HelpStyle.Render(i18n.T(" 路由方案 ") + p.routingName + i18n.T(" 中对 ") +
-				p.switchFrom + i18n.T(" 的 %d 处引用将改指 ", countOutboundRefs(p.routingBody, p.switchFrom)) +
+				p.switchFrom + i18n.T(" 的 %d 处引用将改指 ", switchRefCount(p.routingBody, p.switchFrom)) +
 				p.confirmGroupTo),
 			"",
 			ui.HelpStyle.Render(i18n.T(" A 重载后生效")),
+		}
+		if skipped := switchSkipped(p.routingBody, p.switchFrom); skipped > 0 {
+			lines = append(lines, ui.WarnStyle.Render(
+				i18n.T(" ⚠ 另有 %d 处引用带行尾注释，将保持原样（这些规则仍走旧组）", skipped)))
 		}
 		if p.confirmGroupPin {
 			lines = append(lines,

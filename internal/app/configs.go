@@ -463,7 +463,7 @@ func (p *configsPage) bodyLines() []string {
 			switch {
 			case p.hasGroup(g):
 				parts = append(parts, g)
-			case isBuiltinOutbound(g):
+			case driver.IsBuiltinOutbound(g):
 				parts = append(parts, ui.HelpStyle.Render(g+i18n.T(" (内置)")))
 			case len(p.groups) > 0:
 				parts = append(parts, ui.ErrorStyle.Render(g+i18n.T(" (已不存在)")))

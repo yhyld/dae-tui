@@ -222,6 +222,23 @@ type Policy struct {
 	// Fixed groups created elsewhere are displayed read-only.
 }
 
+// BuiltinOutbounds are the dae directions that are not proxy groups: a
+// routing rule naming one of them is not traffic through a group, and a
+// group sharing one of these names is shadowed by it in the DSL anyway.
+//
+// This is the single copy of the list. It used to be spelled out three
+// times (driver/daed/presets.go, app/home.go, app/pin.go), which is how
+// they drift: the pinned-group rewrite refuses to rewrite a builtin on
+// either side, so a name missing from one copy but present in another is a
+// rewrite that silently changes semantics instead of being refused.
+var BuiltinOutbounds = map[string]bool{
+	"direct": true, "must_direct": true, "block": true, "must_proxy": true,
+}
+
+// IsBuiltinOutbound reports whether a routing outbound is one of dae's
+// built-in directions rather than a group.
+func IsBuiltinOutbound(name string) bool { return BuiltinOutbounds[name] }
+
 // RoutingPreset is a ready-made routing template a backend can render as
 // DSL. IDs are backend-stable; the UI owns the labels and descriptions.
 type RoutingPreset struct {

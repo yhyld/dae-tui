@@ -131,7 +131,7 @@ func (d *pinDriver) ListSelections(context.Context) (driver.Selections, error) {
 	// so the in-use markers track what the routing actually points at.
 	refs := []string{"must_direct"}
 	for _, line := range strings.Split(d.routingBody, "\n") {
-		if out, ok := outboundOf(line); ok && !isBuiltinOutbound(out) {
+		if out, ok := outboundOf(line); ok && !driver.IsBuiltinOutbound(out) {
 			refs = append(refs, strings.TrimPrefix(out, "must_"))
 		}
 	}
@@ -265,7 +265,10 @@ func TestRewriteOutboundRefs(t *testing.T) {
 		"domain(geosite:gfw) -> proxy\n" +
 		"  fallback: proxy\n"
 
-	out, n := rewriteOutboundRefs(raw, "proxy", "pinned")
+	out, n, skipped := rewriteOutboundRefs(raw, "proxy", "pinned")
+	if skipped != 0 {
+		t.Fatalf("commented refs = %d, want 0 on a clean fixture", skipped)
+	}
 	if n != 2 {
 		t.Fatalf("rewrote %d refs, want 2", n)
 	}
@@ -278,35 +281,76 @@ func TestRewriteOutboundRefs(t *testing.T) {
 		t.Fatalf("proxy refs survived:\n%s", out)
 	}
 	// Round-trip back must restore the original text exactly.
-	back, n := rewriteOutboundRefs(out, "pinned", "proxy")
+	back, n, _ := rewriteOutboundRefs(out, "pinned", "proxy")
 	if n != 2 || back != raw {
 		t.Fatalf("round-trip mismatch (n=%d):\n%s", n, back)
 	}
 
 	// A group name that only appears inside conditions is never touched.
-	if _, n := rewriteOutboundRefs(raw, "cn", "pinned"); n != 0 {
+	if _, n, _ := rewriteOutboundRefs(raw, "cn", "pinned"); n != 0 {
 		t.Fatalf("condition-only name matched %d refs", n)
 	}
 	// Builtin outbounds are refused on either side.
-	if _, n := rewriteOutboundRefs(raw, "direct", "pinned"); n != 0 {
+	if _, n, _ := rewriteOutboundRefs(raw, "direct", "pinned"); n != 0 {
 		t.Fatalf("builtin from-side matched %d refs", n)
 	}
-	if _, n := rewriteOutboundRefs(raw, "proxy", "direct"); n != 0 {
+	if _, n, _ := rewriteOutboundRefs(raw, "proxy", "direct"); n != 0 {
 		t.Fatalf("builtin to-side matched %d refs", n)
 	}
 
 	// The must_ modifier travels with the reference.
 	must := "dip(1.2.3.4) -> must_proxy\n"
-	out, n = rewriteOutboundRefs(must, "proxy", "pinned")
+	out, n, _ = rewriteOutboundRefs(must, "proxy", "pinned")
 	if n != 1 || !strings.Contains(out, "must_pinned") {
 		t.Fatalf("must_ variant not rewritten: n=%d %q", n, out)
 	}
 
-	if got := countOutboundRefs(raw, "proxy"); got != 2 {
-		t.Fatalf("countOutboundRefs = %d, want 2", got)
+	if got, skippedNow := countOutboundRefs(raw, "proxy"); got != 2 || skippedNow != 0 {
+		t.Fatalf("countOutboundRefs = (%d, %d), want (2, 0)", got, skippedNow)
 	}
-	if got := countOutboundRefs(raw, "cn"); got != 0 {
+	if got, _ := countOutboundRefs(raw, "cn"); got != 0 {
 		t.Fatalf("countOutboundRefs(condition decoy) = %d, want 0", got)
+	}
+}
+
+// TestCommentedRefsAreReportedNotSilentlySkipped guards the honest-count
+// contract: a reference glued to a trailing comment ("proxy # keep") never
+// compares equal, so it is left alone. Folding it into the rewritten count
+// would report a pin that moved every reference while some traffic stayed
+// on the old group — the two numbers must stay distinguishable, and the
+// confirm overlay shows the skipped one.
+func TestCommentedRefsAreReportedNotSilentlySkipped(t *testing.T) {
+	raw := "# a full-line comment -> proxy\n" +
+		"domain(geosite:gfw) -> proxy\n" +
+		"  fallback: proxy # keep local\n" +
+		"dip(1.2.3.4) -> must_proxy # pinned too\n"
+
+	n, skipped := countOutboundRefs(raw, "proxy")
+	if n != 1 {
+		t.Fatalf("rewriteable refs = %d, want 1", n)
+	}
+	if skipped != 2 {
+		t.Fatalf("commented refs = %d, want 2", skipped)
+	}
+
+	out, n2, skipped2 := rewriteOutboundRefs(raw, "proxy", "pinned")
+	if n2 != 1 || skipped2 != 2 {
+		t.Fatalf("rewrite = (%d, %d), want (1, 2)", n2, skipped2)
+	}
+	// The rewriteable line moved; the commented ones did not.
+	if !strings.Contains(out, "domain(geosite:gfw) -> pinned") {
+		t.Fatalf("rewriteable ref not rewritten:\n%s", out)
+	}
+	for _, keep := range []string{"fallback: proxy # keep local", "must_proxy # pinned too"} {
+		if !strings.Contains(out, keep) {
+			t.Fatalf("commented line should be untouched, missing %q:\n%s", keep, out)
+		}
+	}
+
+	// A name that merely starts with the group is not a commented match
+	// (otherwise "proxyx # c" would count as a skipped proxy reference).
+	if _, _, sk := rewriteOutboundRefs("dip(1.0.0.1) -> proxyx # c\n", "proxy", "pinned"); sk != 0 {
+		t.Fatalf("longer name counted as commented: skipped=%d", sk)
 	}
 }
 

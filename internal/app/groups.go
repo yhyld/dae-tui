@@ -68,12 +68,16 @@ type groupsPage struct {
 	// references it would rewrite before asking for confirmation.
 	// switchFrom is the group that routing currently references (managed
 	// pinned group while a pin is active); S switches it to the viewed group.
+	// pinSkipped is how many of those references carry a trailing comment
+	// and will therefore survive the pin — shown in the confirm overlay so
+	// "the count looks low" is explained rather than left to be noticed.
 	pinGroupID  string
 	pinTarget   driver.Node
 	routingName string
 	routingBody string
 	switchFrom  string
 	pinActive   bool
+	pinSkipped  int
 
 	nodeView
 
@@ -324,10 +328,19 @@ func (p *groupsPage) startPin() tea.Cmd {
 	if p.routingBody == "" {
 		return opErrCmd(i18n.T("固定节点"), errors.New(i18n.T("路由方案未加载，按 r 刷新后重试")))
 	}
-	if countOutboundRefs(p.routingBody, g.Name) == 0 {
+	n, skipped := countOutboundRefs(p.routingBody, g.Name)
+	if n == 0 && skipped == 0 {
 		return opErrCmd(i18n.T("固定节点"), fmt.Errorf(
 			i18n.T("路由方案 %s 未引用组 %s，固定不会改变流量走向"), p.routingName, g.Name))
 	}
+	// A reference the rewrite cannot touch leaves traffic on the old group,
+	// so it must be named rather than folded into the count.
+	if n == 0 && skipped > 0 {
+		return opErrCmd(i18n.T("固定节点"), fmt.Errorf(
+			i18n.T("路由方案 %s 对组 %s 的 %d 处引用都带行尾注释，无法改写：请去掉注释后再固定"),
+			p.routingName, g.Name, skipped))
+	}
+	p.pinSkipped = skipped
 	p.pinTarget = r.node
 	p.mode = pickPin
 	return nil
@@ -600,7 +613,7 @@ func (p groupsPage) overlay() *overlaySpec {
 		}
 	case pickPin:
 		if g := p.curGroup(); g != nil {
-			n := countOutboundRefs(p.routingBody, g.Name)
+			n, skipped := countOutboundRefs(p.routingBody, g.Name)
 			lines := []string{
 				ui.TitleStyle.Render(i18n.T(" 固定节点")),
 				"",
@@ -611,10 +624,13 @@ func (p groupsPage) overlay() *overlaySpec {
 				ui.HelpStyle.Render(i18n.T(" 路由方案 ") + p.routingName + i18n.T(" 中对 ") + g.Name +
 					i18n.T(" 的 %d 处引用改指固定组", n)),
 				ui.HelpStyle.Render(i18n.T(" 原有组的成员与订阅保持不动；A 重载后生效")),
-				"",
-				ui.OKStyle.Render(i18n.T(" y 确认")) + "    " + ui.ErrorStyle.Render(i18n.T("n / esc 取消")),
 			}
-			return &overlaySpec{lines: lines}
+			if skipped > 0 {
+				lines = append(lines, ui.WarnStyle.Render(
+					i18n.T(" ⚠ 另有 %d 处引用带行尾注释，将保持原样（这些规则仍走旧组）", skipped)))
+			}
+			return &overlaySpec{lines: append(lines, "",
+				ui.OKStyle.Render(i18n.T(" y 确认"))+"    "+ui.ErrorStyle.Render(i18n.T("n / esc 取消")))}
 		}
 	case pickSwitch:
 		if g := p.curGroup(); g != nil {
@@ -625,9 +641,13 @@ func (p groupsPage) overlay() *overlaySpec {
 					ui.SelectedStyle.Render(g.Name),
 				ui.HelpStyle.Render(i18n.T(" 路由方案 ") + p.routingName + i18n.T(" 中对 ") +
 					p.switchFrom + i18n.T(" 的 %d 处引用将改指 ",
-					countOutboundRefs(p.routingBody, p.switchFrom)) + g.Name),
+					switchRefCount(p.routingBody, p.switchFrom)) + g.Name),
 				"",
 				ui.HelpStyle.Render(i18n.T(" A 重载后生效")),
+			}
+			if skipped := switchSkipped(p.routingBody, p.switchFrom); skipped > 0 {
+				lines = append(lines, ui.WarnStyle.Render(
+					i18n.T(" ⚠ 另有 %d 处引用带行尾注释，将保持原样（这些规则仍走旧组）", skipped)))
 			}
 			if p.pinGroupID != "" && g.ID == p.pinGroupID {
 				lines = append(lines,
@@ -1034,7 +1054,7 @@ func (p groupsPage) leftLines() []string {
 		// currently sends traffic through (builtin names skipped — a group
 		// sharing one is shadowed by the dae builtin in the DSL anyway).
 		mark := "  "
-		if !isBuiltinOutbound(g.Name) && refProfilesContain(p.refs[g.Name], p.routingName) {
+		if !driver.IsBuiltinOutbound(g.Name) && refProfilesContain(p.refs[g.Name], p.routingName) {
 			mark = ui.OKStyle.Render("● ")
 		}
 		cur := ""
