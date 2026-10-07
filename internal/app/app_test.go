@@ -1079,15 +1079,23 @@ func TestSubsCronEdit(t *testing.T) {
 
 func TestEditorArgvResolution(t *testing.T) {
 	// VISUAL wins over EDITOR, and arguments in the value must stay separate
-	// argv entries: quoting the whole value made the shell look for one
-	// binary literally named "omarchy-launch-editor --inline" (exit 127).
-	t.Setenv("VISUAL", "omarchy-launch-editor --inline")
+	// argv entries: quoting the whole value once made the shell look for one
+	// binary literally named "<editor> --inline" (exit 127). The editor is
+	// faked in a temp dir so the test passes on any machine, not just one
+	// with the author's editor installed.
+	dir := t.TempDir()
+	const fake = "dae-tui-fake-editor"
+	if err := os.WriteFile(filepath.Join(dir, fake), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("VISUAL", fake+" --inline")
 	t.Setenv("EDITOR", "vim")
 	argv, err := editorArgv()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(argv, "|") != "omarchy-launch-editor|--inline" {
+	if strings.Join(argv, "|") != fake+"|--inline" {
 		t.Fatalf("argv = %v", argv)
 	}
 	if p, err := exec.LookPath(argv[0]); err != nil {
@@ -1123,19 +1131,25 @@ func TestEditorArgvResolution(t *testing.T) {
 // file path behind it. Treating the whole value as one program name is what
 // produced "exit status 127".
 func TestEditorCmdSplitsArguments(t *testing.T) {
-	t.Setenv("VISUAL", "omarchy-launch-editor --inline")
+	dir := t.TempDir()
+	const fake = "dae-tui-fake-editor"
+	if err := os.WriteFile(filepath.Join(dir, fake), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("VISUAL", fake+" --inline")
 	t.Setenv("EDITOR", "vim")
 	c, name, err := editorCmd("/tmp/dae-tui-test.dns")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(c.Args, "|"); got != "omarchy-launch-editor|--inline|/tmp/dae-tui-test.dns" {
+	if got := strings.Join(c.Args, "|"); got != fake+"|--inline|/tmp/dae-tui-test.dns" {
 		t.Fatalf("args = %q", got)
 	}
 	if c.Err != nil {
 		t.Fatalf("command not runnable: %v", c.Err)
 	}
-	if name != "omarchy-launch-editor --inline" {
+	if name != fake+" --inline" {
 		t.Fatalf("display name = %q", name)
 	}
 
