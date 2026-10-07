@@ -1,6 +1,6 @@
 // Package daed implements the driver.Driver interface on top of the daed
 // GraphQL API (daed v2.1.1, the final release of the archived project; the
-// schema is frozen, see schema.graphql in this package).
+// schema is frozen — no other daed release will ever exist).
 package daed
 
 import (

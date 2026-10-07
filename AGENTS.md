@@ -35,7 +35,7 @@ eBPF 的纯 API 实例，再用 `-endpoint http://127.0.0.1:2024/graphql` 指向
 ```
 cmd/dae-tui/main.go   入口：flag 解析、config 加载、driver 装配、probe 与 -cmd 子命令
 internal/driver/      Driver 接口 + 领域类型 + Caps 能力位（**不含任何 daed 细节**）
-internal/driver/daed/ daed GraphQL 驱动（client/auth/queries/types/driver + schema.graphql）
+internal/driver/daed/ daed GraphQL 驱动（client/auth/queries/types/driver）
 internal/app/         Bubble Tea 应用：根 model + 各页面（home/groups/subs/nodes/configs/login/help）
                       横切工具：nodelist.go（节点过滤/排序）、lathist.go（延迟历史）、
                       clip.go（OSC 52 剪贴板）、diff.go（DSL 行 diff）
@@ -51,7 +51,9 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
 - `internal/driver` 里的类型是归一化领域模型，不要为了迁就某个后端往里加特例字段；
   后端差异用 `Caps` 能力位让 UI 降级。
 - GraphQL 文档是 `queries.go` 里的手写字符串常量（`q*` 查询 / `m*` mutation），响应
-  结构体在 `types.go` 手写、json tag 对齐 `schema.graphql`。**不用 codegen。**
+  结构体在 `types.go` 手写、json tag 对齐 daed v2.1.1 冻结版 schema。**不用 codegen。**
+  仓库刻意不放 SDL 副本：上游 daed 是 AGPL，逐字复制与本项目 MIT 许可证冲突；
+  需要对照 schema 时去 daed 归档仓库查。
 
 ## daed API 坑（改驱动前必读）
 
@@ -120,11 +122,11 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   存在但数据不对，首页速率/图表/累计因此失真。**这是后端钉版问题，不是 dae-tui 的
   bug**；改 dae-tui 治不了它。解决方案：把 daed 仓库的 wing 子模块重钉到
   `b089b56`（"bump dae-core to v2.1.1 and follow its control plane API"，dae-core
-  `dbae2e8`，`dae/run.go` 控制面对接重写）并重新构建 daed。本机参考实现：
+  `dbae2e8`，`dae/run.go` 控制面对接重写）并重新构建 daed。作者本机的参考实现：
   `~/projects/daed` 的 `11ff432`（"build(deps): bump wing to b089b56 (dae-core
   v2.1.1, fixes traffic stats)"，嵌套 dae-core 用的是更新的 nightly `b59e375`），
-  以 `sudo /home/yang/projects/daed/daed run -c /etc/daed/` 运行——系统里 failed 的
-  `daed.service` 是发行版装的旧单元，与实际运行的这个**不是同一个**，别看错。
+  以 `sudo <克隆目录>/daed run -c /etc/daed/` 运行——系统里 failed 的
+  `daed.service` 可能是发行版装的旧单元，与实际运行的这个**不是同一个**，别看错。
   新链的 `Global` 类型删了 `soMarkFromDaeSet`（新 wing 的 globalInput 生成器把
   `so_mark_from_dae_set` 当保留字段过滤，见 wing `common.IsReservedConfigField`）、
   新增 `disableThp`/`autoSniffPunt`/`bpfConnStateMapSize`——globalInput 的 SDL 是
@@ -136,8 +138,8 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   硬编码。**误判警告（排查前先对表）**：①「流量显示不对/为零」先确认后端链版本
   ——`selectionsFallback` 是否触发就是现成判据（触发=官方旧链，流量数据天然不准，
   修法是重钉 wing 不是动 dae-tui）；②`qSelectionsLegacy`/`selectionsFallback` 是
-  两链兼容的承重墙，不是可以"简化"掉的死代码；③仓库里 `schema.graphql` 冻结的是
-  官方 v2.1.1 的 SDL，对照 traffic-fix 链时注意上述 Global 字段差；④本机后端已是
+  两链兼容的承重墙，不是可以"简化"掉的死代码；③手写字段集以官方 v2.1.1 的
+  schema 为准，对照 traffic-fix 链时注意上述 Global 字段差；④本机后端已是
   修复链，别按官方 v2.1.1 的字段集写死假设。
 - **routing 按名字引用组**：`routings { referenceGroups }` 给出每个路由方案引用的名字。
   改名/删组 daed 不报错、只是规则静默失效，所以群组页 `R`/`D` 确认框（`refNote`）和配置页
@@ -742,7 +744,7 @@ internal/config/      ~/.config/dae-tui/config.toml（0600）
   文件名带时间戳，toast 报全路径），`y` OSC 52 复制全文。输出是合法 TOML
   （`TestBuildExportRoundTrip` round-trip 兜底）——将来做导入就按这份结构解析。
 - daed 已归档、schema 冻结：这是特性不是 bug——永远不会有破坏性变更，但也不会有安全
-  修复。`schema.graphql` 是固化的 SDL 副本，用于回归对照，不参与编译。
+  修复。schema 对照去 daed 归档仓库查（本仓库不放 SDL 副本，原因见"目录与分层"）。
 
 ## 其他
 

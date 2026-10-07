@@ -2,7 +2,7 @@
 
 > 适用场景：不用 Docker，在 Linux 裸机上自建 daed，并把官方钉死的旧 wing 子模块
 > 换到修复链，解决「上下行流量统计不到/数据不对」的问题。
-> 本教程的每条命令都在本机参考实现上跑通过（见文末「参考实现」）。
+> 本教程的每条命令都在一处实际构建（v2.1.1 + wing `b089b56`）上跑通过。
 
 ## 背景：为什么流量统计不对
 
@@ -28,8 +28,8 @@ dae-tui 侧的现成判据：设置 → 关于 → **链路自检**。官方旧�
 - Linux x86_64/arm64，**root 权限**（dae 要挂 eBPF）。内核需满足 dae 的 eBPF
   要求（官方要求 ≥ 5.8，建议 5.15+/6.x）。
 - `git`、`make`、`gzip`
-- **Go ≥ 1.26**（wing 与 dae-core 的 go.mod 都写 1.26；本机用 go1.27.1 构建通过）
-- **Node + pnpm ≥ 10.24**（只用于构建前端；本机 pnpm 11.26 + Node 26 实测通过）
+- **Go ≥ 1.26**（wing 与 dae-core 的 go.mod 都写 1.26；实测 go1.27.1 构建通过）
+- **Node + pnpm ≥ 10.24**（只用于构建前端；实测 pnpm 11.26 + Node 26 通过）
 - **不需要 clang/llvm**：dae-core 的 eBPF 目标文件（`control/bpf_bpfeb.o`、
   `bpf_bpfel.o`）是预编译提交在仓库里的
 
@@ -129,8 +129,8 @@ sudo systemctl daemon-reload && sudo systemctl enable --now daed
 ```
 
 如果之前用发行版包装过 daed，先卸掉，别让新旧两个 daed 混淆；包装残留的
-not-found/failed 状态用 `systemctl reset-failed daed` 清理（本机那条 failed 的
-`daed.service` 就是发行版残留，与自建的这个无关）。
+not-found/failed 状态用 `systemctl reset-failed daed` 清理（那条 failed 的
+`daed.service` 是发行版残留，与自建的这个无关）。
 
 ## 4. 验证流量修复
 
@@ -153,10 +153,14 @@ not-found/failed 状态用 `systemctl reset-failed daed` 清理（本机那条 f
 - 重钉后流量仍不对：先确认跑的确实是新二进制（dae-tui About 自检
   `selectionsFallback` 是否触发），别去改 dae-tui——那是后端链版本问题。
 
-## 参考实现（本机）
+## 参考实现
 
-- 仓库：`~/projects/daed` @ `11ff432`（v2.1.1 + wing 重钉提交，dae-core 工作区
-  停在 nightly `b59e375`）
-- 二进制：`~/projects/daed/daed`（go1.27.1 构建，`go version -m` 显示模块
-  `github.com/daeuniverse/dae-wing v0.0.0-20260923111342-b089b568649f`）
-- 运行：`sudo /home/yang/projects/daed/daed run -c /etc/daed/`
+教程命令在一处参考构建上全部验证通过：daed v2.1.1 + wing 重钉提交（dae-core
+工作区停在 nightly `b59e375`，构建产物约 60MB）。构建完成后可以这样核对 wing
+版本是否重钉到位：
+
+```bash
+go version -m ./daed | grep dae-wing
+# 期望：github.com/daeuniverse/dae-wing v0.0.0-20260923111342-b089b568649f
+#（即 wing b089b56 的提交时间戳编码）
+```

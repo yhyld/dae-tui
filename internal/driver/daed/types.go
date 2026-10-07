@@ -25,7 +25,7 @@ func (r gqlResponse) errorString() string {
 	return s
 }
 
-// --- raw response types (field names mirror internal/driver/daed/schema.graphql) ---
+// --- raw response types (field names mirror the frozen daed GraphQL SDL) ---
 
 type rawDae struct {
 	Running  bool   `json:"running"`

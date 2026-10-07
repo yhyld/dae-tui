@@ -1,8 +1,8 @@
 package daed
 
 // Handwritten GraphQL documents. daed has no subscriptions; every operation
-// is a plain POST to /graphql. Field sets mirror schema.graphql (the frozen
-// SDL of daed v2.1.1, the final release).
+// is a plain POST to /graphql. Field sets mirror the frozen SDL of daed
+// v2.1.1, the archived project's final release.
 
 const qNumberUsers = `query NumberUsers { numberUsers }`
 
@@ -171,8 +171,8 @@ const mUpdateSubscriptionCron = `mutation UpdateSubscriptionCron($id: ID!, $cron
 }`
 
 // One document for all three sections: they are all root query fields.
-// global enumerates every Global field (schema.graphql); the field list the
-// UI offers is driven by qConfigFlatDesc, not by this selection set.
+// global enumerates every Global field of the frozen v2.1.1 SDL; the field
+// list the UI offers is driven by qConfigFlatDesc, not by this selection set.
 const qSelections = `query Selections {
 	configs {
 		id
