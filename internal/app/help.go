@@ -1,11 +1,11 @@
 package app
 
 import (
-	"dae-tui/internal/i18n"
+	"github.com/yhyld/dae-tui/internal/i18n"
 
 	"fmt"
 
-	"dae-tui/internal/ui"
+	"github.com/yhyld/dae-tui/internal/ui"
 )
 
 // helpSection is one titled block of the help overlay. The table is the

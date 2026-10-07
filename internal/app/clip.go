@@ -7,7 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"dae-tui/internal/i18n"
+	"github.com/yhyld/dae-tui/internal/i18n"
 )
 
 type clipboardMsg struct {

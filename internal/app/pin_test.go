@@ -8,8 +8,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"dae-tui/internal/config"
-	"dae-tui/internal/driver"
+	"github.com/yhyld/dae-tui/internal/config"
+	"github.com/yhyld/dae-tui/internal/driver"
 )
 
 // pinDriver is a stubDriver whose group and routing state actually mutates

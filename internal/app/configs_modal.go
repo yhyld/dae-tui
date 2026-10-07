@@ -8,8 +8,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"dae-tui/internal/driver"
-	"dae-tui/internal/i18n"
+	"github.com/yhyld/dae-tui/internal/driver"
+	"github.com/yhyld/dae-tui/internal/i18n"
 )
 
 func (p *configsPage) modalKey(msg tea.KeyMsg, d driver.Driver) tea.Cmd {

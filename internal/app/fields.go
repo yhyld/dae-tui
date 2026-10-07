@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"dae-tui/internal/driver"
-	"dae-tui/internal/i18n"
+	"github.com/yhyld/dae-tui/internal/driver"
+	"github.com/yhyld/dae-tui/internal/i18n"
 )
 
 func validateFieldValue(f driver.ConfigField, val string) error {

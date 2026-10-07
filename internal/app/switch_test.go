@@ -7,7 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"dae-tui/internal/driver"
+	"github.com/yhyld/dae-tui/internal/driver"
 )
 
 // stripSGR drops SGR escapes so marker-adjacency assertions can see the

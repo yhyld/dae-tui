@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"dae-tui/internal/i18n"
+	"github.com/yhyld/dae-tui/internal/i18n"
 )
 
 // Rate formats a bytes/sec value for display.

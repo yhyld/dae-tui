@@ -9,10 +9,10 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"dae-tui/internal/driver"
-	"dae-tui/internal/i18n"
-	"dae-tui/internal/keymap"
-	"dae-tui/internal/ui"
+	"github.com/yhyld/dae-tui/internal/driver"
+	"github.com/yhyld/dae-tui/internal/i18n"
+	"github.com/yhyld/dae-tui/internal/keymap"
+	"github.com/yhyld/dae-tui/internal/ui"
 )
 
 type nodesPage struct {

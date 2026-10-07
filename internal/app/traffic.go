@@ -1,7 +1,7 @@
 package app
 
 import (
-	"dae-tui/internal/driver"
+	"github.com/yhyld/dae-tui/internal/driver"
 )
 
 // trafficPage carries the traffic snapshot the home page renders into its

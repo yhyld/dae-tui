@@ -1,4 +1,4 @@
-module dae-tui
+module github.com/yhyld/dae-tui
 
 go 1.27.1
 

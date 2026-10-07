@@ -11,12 +11,12 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"dae-tui/internal/app"
-	"dae-tui/internal/config"
-	"dae-tui/internal/driver"
-	daeddrv "dae-tui/internal/driver/daed"
-	"dae-tui/internal/i18n"
-	"dae-tui/internal/ui"
+	"github.com/yhyld/dae-tui/internal/app"
+	"github.com/yhyld/dae-tui/internal/config"
+	"github.com/yhyld/dae-tui/internal/driver"
+	daeddrv "github.com/yhyld/dae-tui/internal/driver/daed"
+	"github.com/yhyld/dae-tui/internal/i18n"
+	"github.com/yhyld/dae-tui/internal/ui"
 )
 
 var version = "dev"

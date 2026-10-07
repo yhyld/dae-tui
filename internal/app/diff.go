@@ -1,7 +1,7 @@
 package app
 
 import (
-	"dae-tui/internal/i18n"
+	"github.com/yhyld/dae-tui/internal/i18n"
 	"strconv"
 	"strings"
 )

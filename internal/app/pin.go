@@ -9,10 +9,10 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"dae-tui/internal/config"
-	"dae-tui/internal/driver"
-	"dae-tui/internal/i18n"
-	"dae-tui/internal/ui"
+	"github.com/yhyld/dae-tui/internal/config"
+	"github.com/yhyld/dae-tui/internal/driver"
+	"github.com/yhyld/dae-tui/internal/i18n"
+	"github.com/yhyld/dae-tui/internal/ui"
 )
 
 // Pinned-node support, built on a dedicated daed group instead of mutating

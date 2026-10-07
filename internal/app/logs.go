@@ -20,8 +20,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"dae-tui/internal/i18n"
-	"dae-tui/internal/ui"
+	"github.com/yhyld/dae-tui/internal/i18n"
+	"github.com/yhyld/dae-tui/internal/ui"
 )
 
 const (

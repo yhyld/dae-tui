@@ -8,7 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"dae-tui/internal/driver"
+	"github.com/yhyld/dae-tui/internal/driver"
 )
 
 // A mutation's success message carries its label as a pending-reload note;

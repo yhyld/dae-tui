@@ -14,7 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"dae-tui/internal/driver"
+	"github.com/yhyld/dae-tui/internal/driver"
 )
 
 // Options configures a daed driver instance.

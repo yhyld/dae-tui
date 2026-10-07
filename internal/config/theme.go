@@ -9,7 +9,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
-	"dae-tui/internal/ui"
+	"github.com/yhyld/dae-tui/internal/ui"
 )
 
 // Theme is one named color scheme: the slots ui.ApplyPalette takes. In a

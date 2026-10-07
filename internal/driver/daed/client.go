@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"dae-tui/internal/driver"
+	"github.com/yhyld/dae-tui/internal/driver"
 )
 
 // Client is a minimal GraphQL-over-HTTP client for the daed API: one POST

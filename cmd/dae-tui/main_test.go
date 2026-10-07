@@ -6,8 +6,8 @@ import (
 	"reflect"
 	"testing"
 
-	"dae-tui/internal/config"
-	"dae-tui/internal/driver"
+	"github.com/yhyld/dae-tui/internal/config"
+	"github.com/yhyld/dae-tui/internal/driver"
 )
 
 func TestSplitCSV(t *testing.T) {

@@ -23,7 +23,7 @@ dae-tui 是 [dae](https://github.com/daeuniverse/dae) eBPF 代理的终端管理
 从 GitHub Releases 下载对应平台的二进制，或从源码构建：
 
 ```bash
-git clone https://github.com/<your-org>/dae-tui.git
+git clone https://github.com/yhyld/dae-tui.git
 cd dae-tui
 go build -o dae-tui ./cmd/dae-tui
 ./dae-tui -version

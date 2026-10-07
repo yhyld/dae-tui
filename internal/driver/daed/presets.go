@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"dae-tui/internal/driver"
+	"github.com/yhyld/dae-tui/internal/driver"
 )
 
 // Routing presets: ready-made routing profiles rendered as dae DSL. They

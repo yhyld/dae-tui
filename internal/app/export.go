@@ -9,8 +9,8 @@ import (
 	"github.com/BurntSushi/toml"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"dae-tui/internal/driver"
-	"dae-tui/internal/i18n"
+	"github.com/yhyld/dae-tui/internal/driver"
+	"github.com/yhyld/dae-tui/internal/i18n"
 )
 
 // The profiles backup: a TOML document of every stored config/dns/routing

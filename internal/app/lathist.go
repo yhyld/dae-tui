@@ -3,7 +3,7 @@ package app
 import (
 	"time"
 
-	"dae-tui/internal/driver"
+	"github.com/yhyld/dae-tui/internal/driver"
 )
 
 // latHistory accumulates a rolling window of latency samples per node.

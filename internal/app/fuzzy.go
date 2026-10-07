@@ -3,8 +3,8 @@ package app
 import (
 	"strings"
 
-	"dae-tui/internal/driver"
-	"dae-tui/internal/ui"
+	"github.com/yhyld/dae-tui/internal/driver"
+	"github.com/yhyld/dae-tui/internal/ui"
 )
 
 // The node filter speaks fzf: a query matches when its runes occur as a

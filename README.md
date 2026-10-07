@@ -31,7 +31,7 @@ http://127.0.0.1:2023/graphql
 从 GitHub Releases 下载对应平台的二进制，或使用 Go 1.27.1+ 从源码构建：
 
 ```bash
-git clone https://github.com/<your-org>/dae-tui.git
+git clone https://github.com/yhyld/dae-tui.git
 cd dae-tui
 go build -o dae-tui ./cmd/dae-tui
 ```

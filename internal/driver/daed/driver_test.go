@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"dae-tui/internal/driver"
+	"github.com/yhyld/dae-tui/internal/driver"
 )
 
 // mockGraphQL dispatches on the operation name embedded in the query text.
